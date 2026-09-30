@@ -1,0 +1,41 @@
+name: pre-commit
+
+# Runs the pre-commit hooks in CI, since local hooks can be skipped. Only the
+# files changed in the pull request are checked, so hygiene, formatting and
+# secret scanning apply to new changes without requiring the whole tree to be
+# clean.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pre-commit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust (rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install pre-commit
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pre-commit"
+          "$RUNNER_TEMP/pre-commit/bin/pip" install --quiet pre-commit
+          echo "$RUNNER_TEMP/pre-commit/bin" >> "$GITHUB_PATH"
+
+      - name: Run hooks on changed files
+        run: |
+          pre-commit run \
+            --from-ref "origin/${{ github.base_ref }}" --to-ref HEAD \
+            --show-diff-on-failure --color=always

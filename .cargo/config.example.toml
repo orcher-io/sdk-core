@@ -1,0 +1,12 @@
+# Local cross-repo development override (opt-in).
+#
+# Copy this file to `.cargo/config.toml` (git-ignored) to build sdk-core against
+# a sibling `../protos` checkout instead of the pinned git rev in Cargo.toml.
+# This lets you change the wire format and the core together with live
+# recompilation, without pushing protos first.
+#
+#   cp .cargo/config.example.toml .cargo/config.toml
+#
+# `paths` overrides are applied at build time but are NOT recorded in
+# Cargo.lock, so the committed pin stays authoritative for everyone else.
+paths = ["../protos"]

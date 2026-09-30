@@ -1,0 +1,77 @@
+name: Release
+
+# Every push to main is read as Conventional Commits. release-please keeps a
+# pull request open with the next version and its changelog; merging it tags
+# the release, and the publish job below sends that version to crates.io.
+#
+# Before 1.0, features and fixes bump the patch and a breaking change bumps
+# the minor (see release-please-config.json).
+#
+# Publishing authenticates with crates.io trusted publishing (OIDC), so no
+# token is stored. A CARGO_REGISTRY_TOKEN secret is used instead when present,
+# which is only needed for a crate's very first publish.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the version in Cargo.toml and tag it (first release, or to retry a failed publish)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: >-
+      always() &&
+      (needs.release-please.outputs.released == 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish))
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        if: env.HAS_TOKEN != 'true'
+        id: auth
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+      # A manual publish tags the version it published, so release-please
+      # starts the next changelog from it.
+      - name: Tag a manual publish
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          gh release view "v$version" >/dev/null 2>&1 ||
+            gh release create "v$version" --target "$GITHUB_SHA" --title "v$version" --notes "First public release."
+        env:
+          GH_TOKEN: ${{ github.token }}

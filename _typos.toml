@@ -1,0 +1,11 @@
+# typos spell-checker config. Allowlist project/domain terms and identifiers
+# that are not real misspellings. https://github.com/crate-ci/typos
+[default.extend-words]
+orcher = "orcher"
+
+[default]
+# Skip checking things that aren't prose.
+extend-ignore-identifiers-re = ["[A-Za-z0-9]*_?[0-9a-f]{7,}"]  # short git shas, hashes
+
+[files]
+extend-exclude = [".sqlx/", "Cargo.lock", "*.snap"]

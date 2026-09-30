@@ -1,0 +1,62 @@
+# Pre-commit hooks for the orcher SDK core.
+#
+# One-time setup (per clone):
+#   pipx install pre-commit   # or: brew install pre-commit
+#   pre-commit install        # installs the git hooks (pre-commit + commit-msg)
+#
+# Every hook runs on staged or changed files only, so it is fast and does not
+# require the whole tree to be clean: formatting and hygiene are enforced as
+# files are touched. The build, the tests and the workspace-wide format check
+# run in CI.
+#
+# Bypass in an emergency with `git commit --no-verify` (CI is the real gate).
+
+default_install_hook_types: [pre-commit, commit-msg]
+minimum_pre_commit_version: "3.5.0"
+
+exclude: '^(\.sqlx/|Cargo\.lock$|.*\.md$)'
+
+repos:
+  # ── General hygiene ───────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-yaml
+      - id: check-toml
+      - id: detect-private-key
+
+  # ── Secret scanning (catches tokens/keys before they're committed) ────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # ── Spell check (config: _typos.toml) ─────────────────────────────────────
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.24.6
+    hooks:
+      - id: typos
+
+  # ── Rust formatting on changed files ──────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt (changed files)
+        entry: rustfmt --edition 2021 --check
+        language: system
+        types: [rust]
+
+  # ── Conventional commit messages ──────────────────────────────────────────
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]

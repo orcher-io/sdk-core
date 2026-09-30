@@ -1,0 +1,38 @@
+name: CI
+
+# Runs on GitHub-hosted runners only. Pull requests from forks run here too,
+# so this workflow must never target a self-hosted runner or read secrets.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --lib --tests
+      - name: Doc examples
+        run: cargo test --doc
+      - name: Docs build without warnings
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # Builds the crate exactly as crates.io would receive it.
+      - run: cargo package
