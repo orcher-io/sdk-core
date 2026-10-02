@@ -105,9 +105,17 @@ impl WorkerMetrics {
 /// console would show a worker that is doing nothing as saturated. A finish
 /// without a matching start is a bug, but not one worth amplifying.
 fn decrement(counter: &AtomicU64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_sub(1))
-    });
+    // A plain compare-exchange loop: `fetch_update` is deprecated on current
+    // toolchains and its replacement, `try_update`, is missing on older ones.
+    let mut current = counter.load(Ordering::Relaxed);
+    while let Err(actual) = counter.compare_exchange_weak(
+        current,
+        current.saturating_sub(1),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        current = actual;
+    }
 }
 
 #[cfg(test)]
