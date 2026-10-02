@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 authors = ["ORCHER Contributors"]
 repository = "https://github.com/orcher-io/sdk-core"
+readme = "README.md"
 description = "Core SDK for ORCHER orchestration platform - handles gRPC communication, state machines, and replay engine"
 keywords = ["orchestration", "workflow", "distributed", "sdk"]
 categories = ["asynchronous", "network-programming"]
