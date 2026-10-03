@@ -100,6 +100,10 @@ pub struct PollerConfig {
     /// on its own must leave this off (the default) unless whatever runs its
     /// tasks heartbeats them.
     pub auto_heartbeat: bool,
+
+    /// The largest message the poller receives, and tells the engine it can
+    /// receive. [`crate::limits::default_max_message_bytes`] unless set.
+    pub max_message_bytes: usize,
 }
 
 impl Default for PollerConfig {
@@ -119,6 +123,7 @@ impl Default for PollerConfig {
             version_id: None,
             tls_config: None,
             auto_heartbeat: false,
+            max_message_bytes: crate::limits::default_max_message_bytes(),
         }
     }
 }
@@ -333,8 +338,11 @@ impl WorkflowExecutionPoller {
         };
 
         let poller = Self {
+            client: crate::limits::sized!(
+                ExecutionServiceClient::new(channel),
+                config.max_message_bytes
+            ),
             config: Arc::new(config),
-            client: ExecutionServiceClient::new(channel),
             shutdown: shutdown_rx,
             task_sender,
             poll_request_template,
@@ -432,7 +440,10 @@ impl WorkflowExecutionPoller {
                 .map_err(|e| {
                     Error::connection(format!("Failed to reconnect to {}: {}", self.server_url, e))
                 })?;
-                self.client = ExecutionServiceClient::new(channel);
+                self.client = crate::limits::sized!(
+                    ExecutionServiceClient::new(channel),
+                    self.config.max_message_bytes
+                );
                 self.cooloff_until = None;
                 self.consecutive_idle_polls = 0;
                 self.consecutive_timeouts = 0;
@@ -661,6 +672,10 @@ impl WorkflowExecutionPoller {
             }
         }
 
+        // How much this poller can receive, so the engine fails what will
+        // not fit rather than handing it out to be refused here.
+        crate::limits::state_receive_limit(&mut request, self.config.max_message_bytes);
+
         // This is the hot path: only work and errors are logged, not every poll.
 
         let start = std::time::Instant::now();
@@ -674,6 +689,9 @@ impl WorkflowExecutionPoller {
                 tracing::trace!("Poll timeout (expected during long-poll)");
                 return Error::timeout("poll workflow execution");
             }
+            // A message over the size limit is said as such, not as tonic's
+            // "decoded message length too large".
+            let e = crate::limits::clarify(e);
             tracing::warn!(
                 error_code = ?e.code(),
                 error_message = %e.message(),
@@ -832,8 +850,11 @@ impl TaskExecutionPoller {
         };
 
         let poller = Self {
+            client: crate::limits::sized!(
+                ExecutionServiceClient::new(channel),
+                config.max_message_bytes
+            ),
             config: Arc::new(config),
-            client: ExecutionServiceClient::new(channel),
             shutdown: shutdown_rx,
             task_sender,
             poll_request_template,
@@ -1100,6 +1121,10 @@ impl TaskExecutionPoller {
             }
         }
 
+        // How much this poller can receive, so the engine fails what will
+        // not fit rather than handing it out to be refused here.
+        crate::limits::state_receive_limit(&mut request, self.config.max_message_bytes);
+
         let start = std::time::Instant::now();
 
         // The gRPC deadline alone does not guarantee the call returns, so a
@@ -1122,6 +1147,7 @@ impl TaskExecutionPoller {
                         tracing::trace!("Poll timeout (expected)");
                         return Error::timeout("poll task execution");
                     }
+                    let e = crate::limits::clarify(e);
                     tracing::warn!(error = %e, code = ?e.code(), "Task poll gRPC error");
                     Error::GrpcStatus(e)
                 })?;
@@ -1201,6 +1227,10 @@ pub struct ActorPollerConfig {
 
     /// TLS for the poller's own connection; see `PollerConfig::tls_config`.
     pub tls_config: Option<super::TlsConfig>,
+
+    /// The largest message the poller receives; see
+    /// `PollerConfig::max_message_bytes`.
+    pub max_message_bytes: usize,
 }
 
 impl Default for ActorPollerConfig {
@@ -1213,6 +1243,7 @@ impl Default for ActorPollerConfig {
             organization_id: None,
             api_key: None,
             tls_config: None,
+            max_message_bytes: crate::limits::default_max_message_bytes(),
         }
     }
 }
@@ -1290,8 +1321,11 @@ impl ActorOperationPoller {
         };
 
         Ok(Self {
+            client: crate::limits::sized!(
+                ActorServiceClient::new(channel),
+                config.max_message_bytes
+            ),
             config: Arc::new(config),
-            client: ActorServiceClient::new(channel),
             shutdown: shutdown_rx,
             operation_sender,
             poll_request_template,
@@ -1358,7 +1392,10 @@ impl ActorOperationPoller {
                 .map_err(|e| {
                     Error::connection(format!("Failed to reconnect to {}: {}", self.server_url, e))
                 })?;
-                self.client = ActorServiceClient::new(channel);
+                self.client = crate::limits::sized!(
+                    ActorServiceClient::new(channel),
+                    self.config.max_message_bytes
+                );
                 self.cooloff_until = None;
                 self.consecutive_idle_polls = 0;
                 self.consecutive_timeouts = 0;
@@ -1494,7 +1531,7 @@ impl ActorOperationPoller {
                     if e.code() == tonic::Code::DeadlineExceeded {
                         return Error::timeout("poll actor operation");
                     }
-                    Error::GrpcStatus(e)
+                    Error::from(e)
                 })?;
 
         let poll_response = response.into_inner();
@@ -1603,6 +1640,7 @@ mod tests {
             api_key: None,
             tls_config: None,
             auto_heartbeat: false,
+            max_message_bytes: 1024,
         };
 
         assert_eq!(config.namespace, "custom-ns");

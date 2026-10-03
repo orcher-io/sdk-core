@@ -2068,3 +2068,400 @@ async fn an_activation_whose_commands_contradict_its_journal_is_failed_as_non_de
         }
     }
 }
+
+/// What a worker does with a message too large to send or receive.
+///
+/// A task result or workflow completion over a gRPC message limit used to be
+/// sent, refused by the transport, and either dropped or sent again until the
+/// budget ran out; the engine then handed the work out again at its timeout,
+/// and it was run and refused again, forever. An activation over tonic's
+/// 4 MiB default could not be received at all.
+mod size_limits {
+    use super::*;
+    use crate::limits::{MAX_RECEIVE_MESSAGE_BYTES_HEADER, PAYLOAD_TOO_LARGE};
+    use crate::proto::orcher::v1::command::Attributes;
+
+    const MIB: usize = 1024 * 1024;
+
+    #[derive(Default)]
+    struct Seen {
+        task_results: Vec<usize>,
+        task_failures: Vec<Failure>,
+        completions: Vec<CompleteWorkflowExecutionRequest>,
+        /// The receive limit each completion stated.
+        stated: Vec<Option<String>>,
+    }
+
+    /// An engine that records completions, and refuses the first `refuse`
+    /// of them the way tonic refuses a message over its limit.
+    #[derive(Clone, Default)]
+    struct SizeEngine {
+        seen: Arc<StdMutex<Seen>>,
+        refuse: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SizeEngine {
+        fn refusing(times: usize) -> Self {
+            let engine = Self::default();
+            engine
+                .refuse
+                .store(times, std::sync::atomic::Ordering::SeqCst);
+            engine
+        }
+        fn refused(&self) -> Result<(), Status> {
+            let left = self.refuse.load(std::sync::atomic::Ordering::SeqCst);
+            if left == 0 {
+                return Ok(());
+            }
+            self.refuse
+                .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+            Err(Status::out_of_range(
+                "Error, decoded message length too large: found 6291918 bytes, \
+                 the limit is: 4194304 bytes",
+            ))
+        }
+        fn stated<T>(&self, request: &Request<T>) {
+            let stated = request
+                .metadata()
+                .get(MAX_RECEIVE_MESSAGE_BYTES_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            self.seen.lock().unwrap().stated.push(stated);
+        }
+    }
+
+    #[tonic::async_trait]
+    impl ExecutionService for SizeEngine {
+        async fn poll_workflow_execution(
+            &self,
+            _: Request<PollWorkflowExecutionRequest>,
+        ) -> Result<Response<PollWorkflowExecutionResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn poll_task_execution(
+            &self,
+            _: Request<PollTaskExecutionRequest>,
+        ) -> Result<Response<PollTaskExecutionResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn complete_workflow_execution(
+            &self,
+            request: Request<CompleteWorkflowExecutionRequest>,
+        ) -> Result<Response<CompleteWorkflowExecutionResponse>, Status> {
+            self.stated(&request);
+            self.refused()?;
+            self.seen
+                .lock()
+                .unwrap()
+                .completions
+                .push(request.into_inner());
+            Ok(Response::new(CompleteWorkflowExecutionResponse::default()))
+        }
+        async fn fail_workflow_execution(
+            &self,
+            _: Request<FailWorkflowExecutionRequest>,
+        ) -> Result<Response<FailWorkflowExecutionResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn complete_task_execution(
+            &self,
+            request: Request<CompleteTaskExecutionRequest>,
+        ) -> Result<Response<CompleteTaskExecutionResponse>, Status> {
+            self.stated(&request);
+            self.refused()?;
+            self.seen
+                .lock()
+                .unwrap()
+                .task_results
+                .push(request.into_inner().result.len());
+            Ok(Response::new(CompleteTaskExecutionResponse::default()))
+        }
+        async fn fail_task_execution(
+            &self,
+            request: Request<FailTaskExecutionRequest>,
+        ) -> Result<Response<FailTaskExecutionResponse>, Status> {
+            self.seen
+                .lock()
+                .unwrap()
+                .task_failures
+                .extend(request.into_inner().failure);
+            Ok(Response::new(FailTaskExecutionResponse {}))
+        }
+        async fn cancel_task_execution(
+            &self,
+            _: Request<CancelTaskExecutionRequest>,
+        ) -> Result<Response<CancelTaskExecutionResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn record_task_heartbeat(
+            &self,
+            _: Request<RecordTaskHeartbeatRequest>,
+        ) -> Result<Response<RecordTaskHeartbeatResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn respond_query_task(
+            &self,
+            _: Request<RespondQueryTaskRequest>,
+        ) -> Result<Response<RespondQueryTaskResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn respond_update_task(
+            &self,
+            _: Request<RespondUpdateTaskRequest>,
+        ) -> Result<Response<RespondUpdateTaskResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn release_workflow_execution(
+            &self,
+            _: Request<ReleaseWorkflowExecutionRequest>,
+        ) -> Result<Response<ReleaseWorkflowExecutionResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+        async fn shutdown_worker(
+            &self,
+            _: Request<ShutdownWorkerRequest>,
+        ) -> Result<Response<ShutdownWorkerResponse>, Status> {
+            Err(Status::unimplemented("size engine"))
+        }
+    }
+
+    /// The engine on a local port, accepting messages of any size, and a
+    /// completer whose own limit is `limit`.
+    async fn completer_with_limit(engine: &SizeEngine, limit: usize) -> Harness {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(
+            Server::builder()
+                .add_service(
+                    ExecutionServiceServer::new(engine.clone())
+                        .max_decoding_message_size(usize::MAX),
+                )
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let url = format!("http://{addr}");
+        let mut harness = completer_for(url.clone(), quick());
+        harness.completer.channel_manager =
+            Arc::new(ChannelManager::new(url).with_max_message_bytes(limit));
+        harness
+    }
+
+    fn task_result(bytes: usize) -> TaskReport {
+        TaskReport::Complete {
+            token: b"task-token".to_vec(),
+            result: vec![b'x'; bytes],
+            task: TaskIds {
+                task_id: "summarise_0".into(),
+                workflow_id: "wf-1".into(),
+            },
+        }
+    }
+
+    fn completing_with(result: Vec<u8>) -> Report {
+        Report::Complete {
+            workflow_id: "wf-1".into(),
+            run_id: "exec-1".into(),
+            token: b"act1.tok".to_vec(),
+            stream_entry_id: "act1.tok".into(),
+            commands: vec![Command {
+                command_type: CommandType::CompleteWorkflow as i32,
+                attributes: Some(Attributes::CompleteWorkflow(
+                    CompleteWorkflowCommandAttributes { result },
+                )),
+            }],
+            query_results: vec![],
+            update_results: vec![],
+        }
+    }
+
+    /// The single command a completion carries, if it fails the workflow.
+    fn failed_with(completion: &CompleteWorkflowExecutionRequest) -> Option<&Failure> {
+        match completion.commands.as_slice() {
+            [Command {
+                attributes: Some(Attributes::FailWorkflow(attrs)),
+                ..
+            }] => attrs.failure.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// A task result larger than the worker sends fails the task, final, and
+    /// says why; the result itself is never sent.
+    #[tokio::test]
+    async fn a_task_result_too_large_to_send_fails_the_task() {
+        let engine = SizeEngine::default();
+        let harness = completer_with_limit(&engine, 64 * 1024).await;
+
+        let delivery = harness
+            .completer
+            .send_task(task_result(100 * 1024), None, "default")
+            .await;
+        assert!(matches!(delivery, Delivery::Delivered(())), "{delivery:?}");
+
+        let seen = engine.seen.lock().unwrap();
+        assert!(
+            seen.task_results.is_empty(),
+            "the oversized result was sent"
+        );
+        let [failure] = seen.task_failures.as_slice() else {
+            panic!("the task was not failed: {:?}", seen.task_failures);
+        };
+        assert!(failure.non_retryable);
+        assert_eq!(failure.failure_type, PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            failure.message,
+            "the result of task \"summarise_0\" is 100 KiB, more than the 64 KiB this \
+             worker sends in one message (max_message_bytes). Store large data \
+             elsewhere and pass a reference."
+        );
+    }
+
+    /// An engine whose limit is lower than the worker's refuses the result
+    /// whole. It is not sent again; the task is failed, saying why.
+    #[tokio::test]
+    async fn a_task_result_the_engine_refuses_as_too_large_fails_the_task() {
+        let engine = SizeEngine::refusing(usize::MAX);
+        let harness = completer_with_limit(&engine, 32 * MIB).await;
+
+        let delivery = harness
+            .completer
+            .send_task(task_result(5 * MIB), None, "default")
+            .await;
+        assert!(matches!(delivery, Delivery::Delivered(())), "{delivery:?}");
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.stated.len(), 1, "the refused result was sent again");
+        let [failure] = seen.task_failures.as_slice() else {
+            panic!("the task was not failed: {:?}", seen.task_failures);
+        };
+        assert!(failure.non_retryable);
+        assert_eq!(failure.failure_type, PAYLOAD_TOO_LARGE);
+        assert!(
+            failure.message.starts_with(
+                "the result of task \"summarise_0\" is 5 MiB, more than the engine accepts"
+            ),
+            "{}",
+            failure.message
+        );
+    }
+
+    /// A result between tonic's 4 MiB default and the worker's limit is sent
+    /// as it is, and the worker tells the engine what it can receive.
+    #[tokio::test]
+    async fn a_task_result_over_the_grpc_default_is_sent_whole() {
+        let engine = SizeEngine::default();
+        let harness = completer_with_limit(&engine, crate::limits::DEFAULT_MAX_MESSAGE_BYTES).await;
+
+        let delivery = harness
+            .completer
+            .send_task(task_result(5 * MIB), None, "default")
+            .await;
+        assert!(matches!(delivery, Delivery::Delivered(())), "{delivery:?}");
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.task_results, vec![5 * MIB]);
+        assert!(seen.task_failures.is_empty());
+        assert_eq!(
+            seen.stated,
+            vec![Some(crate::limits::DEFAULT_MAX_MESSAGE_BYTES.to_string())]
+        );
+    }
+
+    /// A workflow completion larger than the worker sends completes the
+    /// activation by failing the workflow, final, saying which payload made
+    /// it too large.
+    #[tokio::test]
+    async fn a_workflow_completion_too_large_to_send_fails_the_workflow() {
+        let engine = SizeEngine::default();
+        let harness = completer_with_limit(&engine, 64 * 1024).await;
+
+        harness
+            .completer
+            .send(completing_with(vec![b'x'; 100 * 1024]))
+            .await;
+
+        let seen = engine.seen.lock().unwrap();
+        let [completion] = seen.completions.as_slice() else {
+            panic!("expected one completion, got {}", seen.completions.len());
+        };
+        assert_eq!(
+            completion.stream_entry_id, "act1.tok",
+            "the activation it answers"
+        );
+        let failure = failed_with(completion).expect("the workflow was not failed");
+        assert!(failure.non_retryable);
+        assert_eq!(failure.failure_type, PAYLOAD_TOO_LARGE);
+        assert!(
+            failure.message.starts_with(
+                "the workflow's completion (largest: the workflow result, 100 KiB) is"
+            ) && failure
+                .message
+                .contains("more than the 64 KiB this worker sends"),
+            "{}",
+            failure.message
+        );
+    }
+
+    /// A workflow completion the engine refuses as too large is followed by
+    /// one that fails the workflow, instead of the activation being handed
+    /// out again to be refused again.
+    #[tokio::test]
+    async fn a_workflow_completion_the_engine_refuses_as_too_large_fails_the_workflow() {
+        let engine = SizeEngine::refusing(1);
+        let harness = completer_with_limit(&engine, 32 * MIB).await;
+
+        harness
+            .completer
+            .send(completing_with(vec![b'x'; 5 * MIB]))
+            .await;
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.stated.len(), 2, "refused once, then the failure");
+        let [completion] = seen.completions.as_slice() else {
+            panic!(
+                "expected one accepted completion, got {}",
+                seen.completions.len()
+            );
+        };
+        let failure = failed_with(completion).expect("the workflow was not failed");
+        assert_eq!(failure.failure_type, PAYLOAD_TOO_LARGE);
+        assert!(
+            failure.message.contains("more than the engine accepts"),
+            "{}",
+            failure.message
+        );
+    }
+
+    /// An activation over tonic's 4 MiB default reaches the language SDK.
+    /// It used to be refused on arrival by the worker's own gRPC stack.
+    #[tokio::test]
+    async fn an_activation_over_the_grpc_default_is_received() {
+        let engine = Engine::default();
+        let input = serde_json::to_vec(&"x".repeat(5 * MIB)).unwrap();
+        engine
+            .0
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(PollWorkflowExecutionResponse {
+                input: input.clone(),
+                ..activation("wf-large", "act1.large")
+            });
+        let (driver, mut work_rx, _result_tx) = driver_for(&engine, test_config()).await;
+        let shutdown = driver.shutdown_handle();
+        let mut driver = driver;
+        let running = tokio::spawn(async move { driver.run().await });
+
+        let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+            .await
+            .expect("the 5 MiB activation never arrived")
+            .expect("the driver is running");
+        assert_eq!(work.task.execution.workflow_id, "wf-large");
+        assert_eq!(
+            work.task.input,
+            serde_json::Value::String("x".repeat(5 * MIB))
+        );
+
+        shutdown.shutdown();
+        let _ = tokio::time::timeout(Duration::from_secs(5), running).await;
+    }
+}

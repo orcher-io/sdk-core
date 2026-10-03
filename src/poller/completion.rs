@@ -67,6 +67,7 @@ use tokio::sync::{mpsc, watch};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
+use crate::limits::{refused_as_too_large, sized, too_large_to_send, PAYLOAD_TOO_LARGE};
 use crate::poller::channel::{Breaker, ChannelManager, Unconnected};
 use crate::poller::driver::{
     proto_task_to_task_work, ActorDriverConfig, TaskDriverConfig, TaskWork, WorkflowDriverConfig,
@@ -78,6 +79,7 @@ use crate::proto::orcher::v1::{
     CompleteWorkflowExecutionRequest, FailTaskExecutionRequest, FailWorkflowExecutionRequest,
     Failure, QueryResult, TaskCapabilities, UpdateResult,
 };
+use prost::Message as _;
 
 /// How hard to try to deliver one completion or failure report — for a
 /// workflow activation, a task, or an actor operation.
@@ -553,11 +555,20 @@ pub(crate) struct Completer {
 
 impl Completer {
     fn credentialed<T>(&self, body: T) -> tonic::Request<T> {
-        crate::poller::credentials::credentialed_request(
+        let mut request = crate::poller::credentials::credentialed_request(
             body,
             self.caller.api_key.as_deref(),
             self.caller.organization_id.as_deref(),
-        )
+        );
+        // What this worker can receive, which bounds the tasks the engine
+        // hands back with its answer.
+        crate::limits::state_receive_limit(&mut request, self.max_message_bytes());
+        request
+    }
+
+    /// The largest message this worker sends or receives.
+    fn max_message_bytes(&self) -> usize {
+        self.channel_manager.max_message_bytes()
     }
 
     /// Send a report and log how it ended.
@@ -598,7 +609,8 @@ impl Completer {
                             auto_heartbeat: true,
                         }),
                 };
-                self.complete(&workflow_id, &run_id, request).await;
+                self.complete_or_fail_too_large(&workflow_id, &run_id, request)
+                    .await;
             }
             Report::Fail {
                 workflow_id,
@@ -642,12 +654,60 @@ impl Completer {
         }
     }
 
+    /// Send a workflow completion, or, when it is too large to send or the
+    /// engine refuses it as too large, a completion that fails the workflow
+    /// with the reason.
+    ///
+    /// Sent anyway, a completion over the limit is refused by the transport,
+    /// on one side or the other, every time it is sent: the activation is
+    /// handed out again at its claim timeout, run again, and refused again,
+    /// and the workflow never ends. Replay produces the same completion, so
+    /// failing the workflow is the only outcome that ends it, and it says why.
+    pub(crate) async fn complete_or_fail_too_large(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+        request: CompleteWorkflowExecutionRequest,
+    ) -> Delivery<()> {
+        let size = request.encoded_len();
+        let what = workflow_completion_named(&request);
+        let limit = self.max_message_bytes();
+        let template = without_payloads(&request);
+        if size > limit {
+            let reason = too_large_to_send(&what, size, limit);
+            tracing::warn!(
+                workflow_id = %workflow_id,
+                run_id = %run_id,
+                reason = %reason,
+                "Workflow completion too large to send; failing the workflow"
+            );
+            return self
+                .complete(workflow_id, run_id, fail_workflow_instead(template, reason))
+                .await;
+        }
+        match self.complete(workflow_id, run_id, request).await {
+            Delivery::Declined(code) if declined_as_too_large(code) => {
+                let reason = refused_as_too_large(&what, size);
+                tracing::warn!(
+                    workflow_id = %workflow_id,
+                    run_id = %run_id,
+                    reason = %reason,
+                    "Workflow completion refused as too large; failing the workflow"
+                );
+                self.complete(workflow_id, run_id, fail_workflow_instead(template, reason))
+                    .await
+            }
+            other => other,
+        }
+    }
+
     pub(crate) async fn complete(
         &self,
         workflow_id: &str,
         run_id: &str,
         request: CompleteWorkflowExecutionRequest,
     ) -> Delivery<()> {
+        let max = self.max_message_bytes();
         let delivery = self
             .deliver(
                 Subject {
@@ -658,8 +718,8 @@ impl Completer {
                     },
                 },
                 request,
-                |channel, request| async move {
-                    ExecutionServiceClient::new(channel)
+                move |channel, request| async move {
+                    sized!(ExecutionServiceClient::new(channel), max)
                         .complete_workflow_execution(request)
                         .await
                 },
@@ -706,6 +766,7 @@ impl Completer {
         run_id: &str,
         request: FailWorkflowExecutionRequest,
     ) -> Delivery<()> {
+        let max = self.max_message_bytes();
         let delivery = self
             .deliver(
                 Subject {
@@ -716,8 +777,8 @@ impl Completer {
                     },
                 },
                 request,
-                |channel, request| async move {
-                    ExecutionServiceClient::new(channel)
+                move |channel, request| async move {
+                    sized!(ExecutionServiceClient::new(channel), max)
                         .fail_workflow_execution(request)
                         .await
                 },
@@ -755,12 +816,30 @@ impl Completer {
                 result,
                 task,
             } => {
+                let max = self.max_message_bytes();
                 let request = CompleteTaskExecutionRequest {
                     task_token: token,
                     namespace: self.caller.namespace.clone(),
                     identity: self.caller.identity.clone(),
                     result,
                 };
+                // A result too large to send fails the task instead, saying
+                // why. Sent anyway, it is refused on every attempt, and the
+                // task waits out its timeout to be run, and refused, again.
+                let what = match task.task_id.as_str() {
+                    "" => "the task result".to_string(),
+                    id => format!("the result of task {id:?}"),
+                };
+                let size = request.result.len();
+                if request.encoded_len() > max {
+                    let message = too_large_to_send(&what, size, max);
+                    report_event!(warn, task.ids(), reason = %message,
+                        "Task result too large to send; failing the task");
+                    return self
+                        .send_task_failure(request.task_token, message, task)
+                        .await;
+                }
+                let token = request.task_token.clone();
                 let delivery = self
                     .deliver(
                         Subject {
@@ -768,8 +847,8 @@ impl Completer {
                             ids: task.ids(),
                         },
                         request,
-                        |channel, request| async move {
-                            ExecutionServiceClient::new(channel)
+                        move |channel, request| async move {
+                            sized!(ExecutionServiceClient::new(channel), max)
                                 .complete_task_execution(request)
                                 .await
                         },
@@ -799,6 +878,14 @@ impl Completer {
                         }
                         Delivery::Delivered(())
                     }
+                    // An engine whose own limit is lower than this worker's
+                    // refused the message whole: fail the task, saying why.
+                    Delivery::Declined(code) if declined_as_too_large(code) => {
+                        let message = refused_as_too_large(&what, size);
+                        report_event!(warn, task.ids(), reason = %message,
+                            "Task result refused as too large; failing the task");
+                        self.send_task_failure(token, message, task).await
+                    }
                     Delivery::Declined(code) => Delivery::Declined(code),
                     Delivery::Abandoned => Delivery::Abandoned,
                 }
@@ -810,43 +897,68 @@ impl Completer {
                 non_retryable,
                 task,
             } => {
-                let request = FailTaskExecutionRequest {
-                    task_token: token,
-                    namespace: self.caller.namespace.clone(),
-                    identity: self.caller.identity.clone(),
-                    failure: Some(Failure {
-                        message,
-                        source: "TaskDriver".to_string(),
-                        stack_trace: String::new(),
-                        cause: None,
-                        failure_type,
-                        details: vec![],
-                        non_retryable,
-                    }),
-                };
-                let delivery = self
-                    .deliver(
-                        Subject {
-                            what: "failure report",
-                            ids: task.ids(),
-                        },
-                        request,
-                        |channel, request| async move {
-                            ExecutionServiceClient::new(channel)
-                                .fail_task_execution(request)
-                                .await
-                        },
-                    )
-                    .await;
-                match delivery {
-                    Delivery::Delivered(_) => {
-                        report_event!(debug, task.ids(), "Task execution failure reported");
-                        Delivery::Delivered(())
-                    }
-                    Delivery::Declined(code) => Delivery::Declined(code),
-                    Delivery::Abandoned => Delivery::Abandoned,
-                }
+                self.send_task_fail(token, message, failure_type, non_retryable, task)
+                    .await
             }
+        }
+    }
+
+    /// Fail the task whose result is too large to send: final, since the same
+    /// code produces the same result.
+    async fn send_task_failure(
+        &self,
+        token: Vec<u8>,
+        message: String,
+        task: TaskIds,
+    ) -> Delivery<()> {
+        self.send_task_fail(token, message, PAYLOAD_TOO_LARGE.to_string(), true, task)
+            .await
+    }
+
+    async fn send_task_fail(
+        &self,
+        token: Vec<u8>,
+        message: String,
+        failure_type: String,
+        non_retryable: bool,
+        task: TaskIds,
+    ) -> Delivery<()> {
+        let max = self.max_message_bytes();
+        let request = FailTaskExecutionRequest {
+            task_token: token,
+            namespace: self.caller.namespace.clone(),
+            identity: self.caller.identity.clone(),
+            failure: Some(Failure {
+                message,
+                source: "TaskDriver".to_string(),
+                stack_trace: String::new(),
+                cause: None,
+                failure_type,
+                details: vec![],
+                non_retryable,
+            }),
+        };
+        let delivery = self
+            .deliver(
+                Subject {
+                    what: "failure report",
+                    ids: task.ids(),
+                },
+                request,
+                move |channel, request| async move {
+                    sized!(ExecutionServiceClient::new(channel), max)
+                        .fail_task_execution(request)
+                        .await
+                },
+            )
+            .await;
+        match delivery {
+            Delivery::Delivered(_) => {
+                report_event!(debug, task.ids(), "Task execution failure reported");
+                Delivery::Delivered(())
+            }
+            Delivery::Declined(code) => Delivery::Declined(code),
+            Delivery::Abandoned => Delivery::Abandoned,
         }
     }
 
@@ -856,6 +968,7 @@ impl Completer {
     /// this report — the operation is unknown, or already completed — and
     /// sending it again would get the same answer, so it counts as declined.
     pub(crate) async fn send_actor(&self, request: CompleteActorOperationRequest) -> Delivery<()> {
+        let max = self.max_message_bytes();
         let operation_id = request.operation_id.clone();
         let execution_id = request.execution_id.clone();
         let ids = Ids::ActorOperation {
@@ -871,8 +984,8 @@ impl Completer {
             .deliver(
                 Subject { what, ids },
                 request,
-                |channel, request| async move {
-                    ActorServiceClient::new(channel)
+                move |channel, request| async move {
+                    sized!(ActorServiceClient::new(channel), max)
                         .complete_actor_operation(request)
                         .await
                 },
@@ -1016,6 +1129,9 @@ impl Completer {
                     return Delivery::Delivered(response.into_inner());
                 }
                 Err(status) => {
+                    // A message over a size limit is refused the same way on
+                    // every attempt, whatever its code says about trying again.
+                    let status = crate::limits::clarify(status);
                     let code = status.code();
                     if next_after(code) == Next::Drop {
                         self.log_declined(subject, &status);
@@ -1162,6 +1278,115 @@ impl Completer {
                 subject.what
             );
         }
+    }
+}
+
+/// Whether a report declined with `code` was refused for its size: what
+/// [`crate::limits::clarify`] makes of every size refusal before the decision
+/// to retry, and an answer the engine gives for nothing else.
+fn declined_as_too_large(code: Code) -> bool {
+    code == Code::OutOfRange
+}
+
+/// The payload a workflow completion is made large by, named for the reason
+/// the workflow fails with: its largest one, and what that is.
+fn workflow_completion_named(request: &CompleteWorkflowExecutionRequest) -> String {
+    use crate::proto::orcher::v1::command::Attributes;
+    let mut largest: Option<(String, usize)> = None;
+    let mut consider = |what: String, size: usize| {
+        if largest.as_ref().is_none_or(|(_, most)| size > *most) {
+            largest = Some((what, size));
+        }
+    };
+    for command in &request.commands {
+        match command.attributes.as_ref() {
+            Some(Attributes::CompleteWorkflow(a)) => {
+                consider("the workflow result".to_string(), a.result.len())
+            }
+            Some(Attributes::ScheduleTask(a)) => {
+                consider(format!("the input of task {:?}", a.task_id), a.input.len())
+            }
+            Some(Attributes::StartChildWorkflow(a)) => consider(
+                format!("the input of child workflow {:?}", a.workflow_id),
+                a.input.len(),
+            ),
+            Some(Attributes::SendEvent(a)) => consider(
+                format!("the payload of event {:?}", a.event_name),
+                a.payload.len(),
+            ),
+            Some(Attributes::RecordStepResult(a)) => consider(
+                format!("the result of step {:?}", a.step_name),
+                a.result.len(),
+            ),
+            Some(Attributes::RestartFresh(a)) => {
+                consider("the input of the fresh run".to_string(), a.input.len())
+            }
+            _ => {}
+        }
+    }
+    for result in &request.query_results {
+        consider(
+            format!("the answer to query {:?}", result.query_id),
+            result.encoded_len(),
+        );
+    }
+    for result in &request.update_results {
+        consider(
+            format!("the result of update {:?}", result.update_id),
+            result.encoded_len(),
+        );
+    }
+    match largest {
+        Some((what, size)) => format!(
+            "the workflow's completion (largest: {what}, {})",
+            crate::limits::format_bytes(size)
+        ),
+        None => "the workflow's completion".to_string(),
+    }
+}
+
+/// `request` with nothing in it but who and what it answers.
+fn without_payloads(
+    request: &CompleteWorkflowExecutionRequest,
+) -> CompleteWorkflowExecutionRequest {
+    CompleteWorkflowExecutionRequest {
+        workflow_id: request.workflow_id.clone(),
+        execution_id: request.execution_id.clone(),
+        namespace: request.namespace.clone(),
+        identity: request.identity.clone(),
+        task_token: request.task_token.clone(),
+        stream_entry_id: request.stream_entry_id.clone(),
+        eager_task_capabilities: request.eager_task_capabilities,
+        ..Default::default()
+    }
+}
+
+/// `template`, completing the activation it answers by failing the workflow
+/// with `reason`, final whatever the retry policy: replay produces the same
+/// completion.
+fn fail_workflow_instead(
+    template: CompleteWorkflowExecutionRequest,
+    reason: String,
+) -> CompleteWorkflowExecutionRequest {
+    use crate::proto::orcher::v1::{
+        command::Attributes, CommandType, FailWorkflowCommandAttributes,
+    };
+    CompleteWorkflowExecutionRequest {
+        commands: vec![Command {
+            command_type: CommandType::FailWorkflow as i32,
+            attributes: Some(Attributes::FailWorkflow(FailWorkflowCommandAttributes {
+                failure: Some(Failure {
+                    message: reason,
+                    source: "WorkflowDriver".to_string(),
+                    stack_trace: String::new(),
+                    cause: None,
+                    failure_type: PAYLOAD_TOO_LARGE.to_string(),
+                    details: vec![],
+                    non_retryable: true,
+                }),
+            })),
+        }],
+        ..template
     }
 }
 

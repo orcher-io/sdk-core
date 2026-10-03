@@ -181,7 +181,7 @@ fn start_error(status: tonic::Status, workflow_id: &str) -> Error {
     if status.code() == tonic::Code::AlreadyExists {
         Error::from_status_for_workflow(status, workflow_id)
     } else {
-        Error::GrpcStatus(status)
+        Error::from(status)
     }
 }
 
@@ -234,6 +234,8 @@ pub struct WorkflowClient {
     /// Namespace every operation targets.
     namespace: String,
     timeout: Duration,
+    /// The largest message sent or received.
+    max_message_bytes: usize,
 }
 
 impl WorkflowClient {
@@ -279,14 +281,35 @@ impl WorkflowClient {
     /// [`WorkflowClient::with_organization_id`].
     pub fn from_channel(channel: Channel) -> Self {
         let auth = AuthInterceptor::default();
+        let max_message_bytes = crate::limits::default_max_message_bytes();
         Self {
-            client: WorkflowServiceClient::with_interceptor(channel.clone(), auth.clone()),
-            query_client: QueryServiceClient::with_interceptor(channel.clone(), auth.clone()),
+            client: crate::limits::sized!(
+                WorkflowServiceClient::with_interceptor(channel.clone(), auth.clone()),
+                max_message_bytes
+            ),
+            query_client: crate::limits::sized!(
+                QueryServiceClient::with_interceptor(channel.clone(), auth.clone()),
+                max_message_bytes
+            ),
             channel,
             auth,
             namespace: DEFAULT_NAMESPACE.to_string(),
             timeout: Duration::from_secs(180),
+            max_message_bytes,
         }
+    }
+
+    /// Sends and receives messages of up to `max_message_bytes`: a workflow's
+    /// input, its result, an event's payload.
+    ///
+    /// [`crate::limits::default_max_message_bytes`] unless set:
+    /// `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's default. A message
+    /// over the limit on either side fails with an OUT_OF_RANGE status that
+    /// says which limit to raise.
+    pub fn with_max_message_bytes(mut self, max_message_bytes: usize) -> Self {
+        self.max_message_bytes = max_message_bytes;
+        self.rebuild_clients();
+        self
     }
 
     /// Returns the credentials this client sends.
@@ -304,10 +327,14 @@ impl WorkflowClient {
     /// The interceptor is bound when the clients are constructed, so changing
     /// `auth` alone would leave the existing clients sending the old headers.
     fn rebuild_clients(&mut self) {
-        self.client =
-            WorkflowServiceClient::with_interceptor(self.channel.clone(), self.auth.clone());
-        self.query_client =
-            QueryServiceClient::with_interceptor(self.channel.clone(), self.auth.clone());
+        self.client = crate::limits::sized!(
+            WorkflowServiceClient::with_interceptor(self.channel.clone(), self.auth.clone()),
+            self.max_message_bytes
+        );
+        self.query_client = crate::limits::sized!(
+            QueryServiceClient::with_interceptor(self.channel.clone(), self.auth.clone()),
+            self.max_message_bytes
+        );
     }
 
     /// Sends `authorization: Bearer <key>` on every request from this client.
@@ -419,7 +446,7 @@ impl WorkflowClient {
             let inner = match self.client.clone().get_workflow_result(request).await {
                 Ok(r) => r.into_inner(),
                 Err(status) => {
-                    let err = Error::GrpcStatus(status);
+                    let err = Error::from(status);
                     // `is_normal_timeout` covers the server's DeadlineExceeded, a
                     // transport or proxy DeadlineExceeded, and Cancelled("Timeout
                     // expired"). The short sleep stops a server that returns

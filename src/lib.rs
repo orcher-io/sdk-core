@@ -115,6 +115,7 @@ pub mod codec;
 pub mod converter;
 pub mod error;
 pub mod interceptor;
+pub mod limits;
 pub mod payload;
 pub mod poller;
 pub mod state;

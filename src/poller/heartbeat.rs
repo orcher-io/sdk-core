@@ -504,9 +504,12 @@ async fn send(
         registry.caller.organization_id.as_deref(),
     );
     request.set_timeout(period.min(MAX_CALL_TIMEOUT));
-    match ExecutionServiceClient::new(channel)
-        .record_task_heartbeat(request)
-        .await
+    match crate::limits::sized!(
+        ExecutionServiceClient::new(channel),
+        registry.channel_manager.max_message_bytes()
+    )
+    .record_task_heartbeat(request)
+    .await
     {
         Ok(response) => Ok(response.into_inner().cancel_requested),
         Err(status) => {

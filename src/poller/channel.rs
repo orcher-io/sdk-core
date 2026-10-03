@@ -96,6 +96,8 @@ pub struct ChannelManager {
     max_backoff: Duration,
     jitter_ms: u64,
     tls_config: Option<TlsConfig>,
+    // The largest message a client on this manager's channel sends or receives.
+    max_message_bytes: usize,
 }
 
 struct State {
@@ -160,7 +162,21 @@ impl ChannelManager {
             max_backoff: Duration::from_secs(30),
             jitter_ms: 250,
             tls_config: None,
+            max_message_bytes: crate::limits::default_max_message_bytes(),
         }
+    }
+
+    /// Sets the largest message a client on this manager's channel sends or
+    /// receives. [`crate::limits::default_max_message_bytes`] unless set.
+    pub fn with_max_message_bytes(mut self, max_message_bytes: usize) -> Self {
+        self.max_message_bytes = max_message_bytes;
+        self
+    }
+
+    /// The largest message a client on this manager's channel sends or
+    /// receives.
+    pub fn max_message_bytes(&self) -> usize {
+        self.max_message_bytes
     }
 
     /// Creates a manager for the given server address that connects over TLS.

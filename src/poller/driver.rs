@@ -167,6 +167,13 @@ pub struct WorkflowDriverConfig {
     /// Defaults from `ORCHER_VERSION_ID`, since the value normally comes from
     /// the build rather than being written by hand. Unset declares nothing.
     pub version_id: Option<String>,
+
+    /// The largest gRPC message the driver sends or receives, and tells the
+    /// engine it can receive. [`crate::limits::default_max_message_bytes`]
+    /// unless set: `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's
+    /// default. A result too large to send fails its task or workflow, saying
+    /// so, rather than being sent and refused.
+    pub max_message_bytes: usize,
 }
 
 impl Default for WorkflowDriverConfig {
@@ -185,6 +192,7 @@ impl Default for WorkflowDriverConfig {
             api_key: None,
             tls_config: None,
             version_id: None,
+            max_message_bytes: crate::limits::default_max_message_bytes(),
         }
     }
 }
@@ -466,7 +474,8 @@ impl WorkflowDriver {
         let mut channel_manager = match config.tls_config {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
-        };
+        }
+        .with_max_message_bytes(config.max_message_bytes);
         let _channel = channel_manager
             .get()
             .await
@@ -500,6 +509,7 @@ impl WorkflowDriver {
                 version_id: config.version_id.clone(),
                 auto_heartbeat: false,
                 tls_config: config.tls_config.clone(),
+                max_message_bytes: config.max_message_bytes,
             };
 
             let poller = WorkflowExecutionPoller::new(
@@ -1477,6 +1487,13 @@ pub struct TaskDriverConfig {
     /// started forever. When off, only the heartbeats the task's own code
     /// records are sent, and the engine is not told.
     pub auto_heartbeat: bool,
+
+    /// The largest gRPC message the driver sends or receives, and tells the
+    /// engine it can receive. [`crate::limits::default_max_message_bytes`]
+    /// unless set: `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's
+    /// default. A result too large to send fails its task or workflow, saying
+    /// so, rather than being sent and refused.
+    pub max_message_bytes: usize,
 }
 
 impl Default for TaskDriverConfig {
@@ -1496,6 +1513,7 @@ impl Default for TaskDriverConfig {
             tls_config: None,
             version_id: None,
             auto_heartbeat: true,
+            max_message_bytes: crate::limits::default_max_message_bytes(),
         }
     }
 }
@@ -1602,7 +1620,8 @@ impl TaskDriver {
         let channel_manager = match config.tls_config {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
-        };
+        }
+        .with_max_message_bytes(config.max_message_bytes);
 
         // Channels to and from the language SDK.
         // The work channel has one place more than the executions allowed.
@@ -1641,6 +1660,7 @@ impl TaskDriver {
                 version_id: config.version_id.clone(),
                 auto_heartbeat: config.auto_heartbeat,
                 tls_config: config.tls_config.clone(),
+                max_message_bytes: config.max_message_bytes,
             };
 
             let poller = TaskExecutionPoller::new(
@@ -2190,6 +2210,7 @@ async fn session_poller(
         version_id: config.version_id.clone(),
         auto_heartbeat: config.auto_heartbeat,
         tls_config: config.tls_config.clone(),
+        max_message_bytes: config.max_message_bytes,
     };
     TaskExecutionPoller::new(
         poller_config,
@@ -2267,6 +2288,13 @@ pub struct ActorDriverConfig {
 
     /// TLS configuration for secure connections (optional).
     pub tls_config: Option<super::TlsConfig>,
+
+    /// The largest gRPC message the driver sends or receives, and tells the
+    /// engine it can receive. [`crate::limits::default_max_message_bytes`]
+    /// unless set: `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's
+    /// default. A result too large to send fails its task or workflow, saying
+    /// so, rather than being sent and refused.
+    pub max_message_bytes: usize,
 }
 
 impl Default for ActorDriverConfig {
@@ -2285,6 +2313,7 @@ impl Default for ActorDriverConfig {
             heartbeat_interval: Duration::from_secs(10),
             registration_id: None,
             tls_config: None,
+            max_message_bytes: crate::limits::default_max_message_bytes(),
         }
     }
 }
@@ -2375,7 +2404,8 @@ impl ActorDriver {
         let channel_manager = match config.tls_config {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
-        };
+        }
+        .with_max_message_bytes(config.max_message_bytes);
 
         // Channels to and from the language SDK.
         let (work_sender, work_receiver) = mpsc::channel(config.max_concurrent_executions);
@@ -2404,6 +2434,7 @@ impl ActorDriver {
                 organization_id: config.organization_id.clone(),
                 api_key: config.api_key.clone(),
                 tls_config: config.tls_config.clone(),
+                max_message_bytes: config.max_message_bytes,
             };
 
             let poller = ActorOperationPoller::new(
