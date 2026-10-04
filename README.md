@@ -1,8 +1,8 @@
 <p>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/banner.svg">
-    <source media="(prefers-color-scheme: light)" srcset="./assets/banner-light.svg">
-    <img alt="ORCHER SDK Core" src="./assets/banner.svg" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner-light.svg">
+    <img alt="ORCHER SDK Core" src="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner.svg" width="100%">
   </picture>
 </p>
 
