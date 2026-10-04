@@ -11,7 +11,7 @@
 <br />
 
 <div>
-  <a href="https://crates.io/crates/orcher-sdk-core"><img src="https://img.shields.io/crates/v/orcher-sdk-core?style=flat-square&labelColor=0a0a0a&color=04B385&logo=rust&logoColor=white" alt="crates.io"></a>
+  <a href="https://crates.io/crates/orcher-sdk-core"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcrates.io%2Fapi%2Fv1%2Fcrates%2Forcher-sdk-core&query=%24.crate.max_version&prefix=v&style=flat-square&labelColor=0a0a0a&color=04B385&logo=rust&logoColor=white&label=crates.io&cacheSeconds=600" alt="crates.io"></a>
   <a href="https://docs.rs/orcher-sdk-core"><img src="https://img.shields.io/docsrs/orcher-sdk-core?style=flat-square&labelColor=0a0a0a&color=38BDF0&logo=docsdotrs&logoColor=white" alt="docs.rs"></a>
   <a href="https://github.com/orcher-io/sdk-core/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/orcher-io/sdk-core/ci.yml?branch=main&style=flat-square&labelColor=0a0a0a&color=04B385&logo=github&logoColor=white&label=CI" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-38BDF0?style=flat-square&labelColor=0a0a0a" alt="Apache 2.0"></a>
