@@ -29,8 +29,12 @@ pub enum Error {
     Transport(#[from] tonic::transport::Error),
 
     /// gRPC status error.
+    ///
+    /// A status that reports a message over a gRPC size limit arrives
+    /// rewritten by [`crate::limits::clarify`]: OUT_OF_RANGE, saying which
+    /// limit to raise or that the data belongs elsewhere.
     #[error("gRPC status error: {0}")]
-    GrpcStatus(#[from] tonic::Status),
+    GrpcStatus(#[source] tonic::Status),
 
     /// Workflow not found.
     #[error("Workflow not found: workflow_id={workflow_id}, run_id={run_id:?}")]
@@ -182,6 +186,12 @@ pub enum Error {
     Other(#[from] anyhow::Error),
 }
 
+impl From<tonic::Status> for Error {
+    fn from(status: tonic::Status) -> Self {
+        Error::GrpcStatus(crate::limits::clarify(status))
+    }
+}
+
 /// A task's own description of its failure.
 ///
 /// It says what went wrong, the type of error the task raised, and whether a
@@ -305,7 +315,7 @@ impl Error {
                     message
                 },
             },
-            _ => Error::GrpcStatus(status),
+            _ => Error::from(status),
         }
     }
 }

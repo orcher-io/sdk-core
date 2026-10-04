@@ -40,7 +40,12 @@ impl CoreActorClient {
     /// that requires an API key, even while workflow calls succeed.
     pub fn with_auth(channel: Channel, auth: AuthInterceptor) -> Self {
         Self {
-            client: ActorServiceClient::with_interceptor(channel, auth),
+            // Operation payloads and results up to the configured message
+            // limit, not tonic's 4 MiB default.
+            client: crate::limits::sized!(
+                ActorServiceClient::with_interceptor(channel, auth),
+                crate::limits::default_max_message_bytes()
+            ),
         }
     }
 
