@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/orcher-io/sdk-core/compare/v0.8.1...v0.8.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* show the README banner on the package registries ([#9](https://github.com/orcher-io/sdk-core/issues/9)) ([77a3117](https://github.com/orcher-io/sdk-core/commit/77a31171f613d0575429260e56e1e0f69e01435a))
+
 ## [0.8.1](https://github.com/orcher-io/sdk-core/compare/v0.8.0...v0.8.1) (2026-10-04)
 
 
