@@ -17,8 +17,28 @@
 //! `timer_id`, a child workflow's `workflow_id`. The engine matches commands to what it already
 //! has by that id alone, so a step id reused for different work is served the old work's
 //! result. That is what the comparison catches.
+//!
+//! ## Recorded steps the code no longer reaches
+//!
+//! The steps a journal *recorded* are the commands the workflow code itself gave, as the
+//! engine journaled them: `TaskScheduled` (a task), `TimerStarted` (a timer, including the
+//! deadline of a wait for an event) and `ChildWorkflowExecutionStarted` (a child workflow).
+//! Nothing else in a journal is a recorded step. Events received, timers fired, task and child
+//! outcomes, inline closure and side-effect results (`StepCompleted`), cancellation requests,
+//! updates and queries are what the workflow was handed, not what it commanded, and the code
+//! may legitimately leave any of them unread.
+//!
+//! Replayed against its journal, deterministic code reaches every recorded step again: it
+//! takes the step's outcome from the journal, or, for one still open, issues it again. An
+//! activation in which the language SDK reports the steps it reached
+//! ([`ExecutionResult::reached_steps`](crate::bridge::ExecutionResult::reached_steps)) is held
+//! to that: if a recorded step was not reached, and the activation issues a step the journal
+//! never recorded or ends the workflow, the code no longer does what it did when the journal
+//! was written, and continuing would run a different workflow on top of the old one's history.
+//! A run whose journal records a cancellation request is not held to it, since a language SDK
+//! may stop the code short on cancellation.
 
-use crate::bridge::Command;
+use crate::bridge::{Command, ExecutionResult};
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::state::machine::WorkflowStateMachine;
@@ -26,11 +46,13 @@ use crate::types::WorkflowExecution;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-/// The `failure_type` a workflow activation is failed with when its commands
-/// do not match its journal.
+/// The failure type of a workflow activation whose commands do not match its
+/// journal.
 ///
-/// Name it in a workflow's `non_retryable_error_types` to stop the engine
-/// starting a fresh run after such a failure.
+/// Such an activation is not applied: the
+/// [`WorkflowDriver`](crate::poller::WorkflowDriver) logs the violation and
+/// hands the activation back to the engine to be tried again after a pause,
+/// so the run stays open until code that replays its journal picks it up.
 pub const NON_DETERMINISM_FAILURE_TYPE: &str = "NonDeterminismError";
 
 /// What a [`DeterminismViolation`] is about.
@@ -64,7 +86,9 @@ pub enum CommandCoverage {
     /// steps still open and the new ones.
     ///
     /// Only a step whose id the journal already recorded can be checked, and
-    /// only against what the journal recorded for it.
+    /// only against what the journal recorded for it. An activation that also
+    /// reports the steps the code reached is checked further by
+    /// [`Replayer::check_activation`].
     Activation,
 }
 
@@ -242,10 +266,15 @@ pub(crate) struct JournalSteps {
     /// Tasks and timers, in the order the journal recorded them: the engine
     /// journals them as it processes each command, in command order.
     ordered: Vec<Step>,
+    /// Every recorded step, children included, in journal order, the first
+    /// record of each.
+    recorded: Vec<Step>,
     /// Every recorded step by kind and id, the first record of each.
     by_id: HashMap<(StepKind, String), Step>,
     /// The journal records that the workflow completed.
     completed: Option<i64>,
+    /// The journal records a request to cancel the workflow.
+    cancel_requested: bool,
 }
 
 impl JournalSteps {
@@ -280,6 +309,9 @@ impl JournalSteps {
                     if entry.entry_type == EntryType::WorkflowExecutionCompleted as i32 {
                         steps.completed.get_or_insert(entry.entry_id);
                     }
+                    if entry.entry_type == EntryType::WorkflowExecutionCancelRequested as i32 {
+                        steps.cancel_requested = true;
+                    }
                     continue;
                 }
             };
@@ -293,9 +325,107 @@ impl JournalSteps {
             if step.kind != StepKind::ChildWorkflow {
                 steps.ordered.push(step.clone());
             }
+            steps.recorded.push(step.clone());
             steps.by_id.insert(key, step);
         }
         steps
+    }
+
+    /// Check one activation's result: its commands as
+    /// [`CommandCoverage::Activation`], and, when the language SDK reported the
+    /// steps the code reached, that it did not leave a recorded step behind;
+    /// see the [module documentation](self).
+    pub(crate) fn check_activation(&self, result: &ExecutionResult) -> Vec<DeterminismViolation> {
+        let mut violations = self.check(&result.commands, CommandCoverage::Activation);
+        if violations.is_empty() {
+            violations.extend(self.left_behind(result));
+        }
+        violations
+    }
+
+    /// A recorded step the code did not reach, in an activation that issues
+    /// new work or ends the workflow.
+    fn left_behind(&self, result: &ExecutionResult) -> Option<DeterminismViolation> {
+        let reached = result.reached_steps.as_deref()?;
+        if self.cancel_requested {
+            return None;
+        }
+        let issued: Vec<Step> = result
+            .commands
+            .iter()
+            .filter_map(Step::from_command)
+            .collect();
+
+        // What the activation would do that cannot be taken back. Commands
+        // that are neither (an open step issued again, an event sent, a wait)
+        // are let through: if the code went astray, the activation that acts
+        // on it is the one stopped.
+        let new_step = issued
+            .iter()
+            .find(|step| !self.by_id.contains_key(&(step.kind, step.id.clone())));
+        let ending = result.commands.iter().find_map(|command| match command {
+            Command::CompleteWorkflow(_) => Some("completed the workflow"),
+            Command::FailWorkflow(_) => Some("failed the workflow"),
+            Command::RestartFresh(_) => Some("restarted the workflow as a fresh run"),
+            Command::CancelWorkflowExecution(_) => Some("canceled the workflow"),
+            _ => None,
+        });
+        let did = match (new_step, ending) {
+            (Some(step), _) => format!("issued new work, {step}"),
+            (None, Some(ending)) => ending.to_string(),
+            (None, None) if result.restart_fresh.is_some() => {
+                "restarted the workflow as a fresh run".to_string()
+            }
+            (None, None) if !result.successful => {
+                let error = result
+                    .error
+                    .as_ref()
+                    .map(|e| e.message.as_str())
+                    .unwrap_or("no message");
+                format!("failed the workflow ({error})")
+            }
+            (None, None) => return None,
+        };
+
+        let consumed: HashSet<&str> = reached
+            .iter()
+            .map(String::as_str)
+            .chain(issued.iter().map(|step| step.id.as_str()))
+            .collect();
+        let left: Vec<(usize, &Step)> = self
+            .recorded
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| !consumed.contains(step.id.as_str()))
+            .collect();
+        let &(position, first) = left.first()?;
+
+        const LISTED: usize = 5;
+        let mut listed = left
+            .iter()
+            .take(LISTED)
+            .map(|(_, step)| format!("{step} (entry {})", step.entry_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if left.len() > LISTED {
+            listed.push_str(&format!(" and {} more", left.len() - LISTED));
+        }
+        Some(DeterminismViolation::non_determinism(
+            first.entry_id,
+            &first.id,
+            format!(
+                "Non-deterministic workflow: step {} of the journal (entry {}) is {first}, \
+                 which the workflow code no longer reaches: replaying the journal, the code \
+                 instead {did}. Recorded steps not reached: {listed}",
+                position + 1,
+                first.entry_id,
+            ),
+            first.to_string(),
+            match new_step {
+                Some(step) => step.to_string(),
+                None => format!("the code {did}"),
+            },
+        ))
     }
 
     /// Compare `commands` with the recorded steps; see [`CommandCoverage`].
@@ -750,6 +880,22 @@ impl Replayer {
         JournalSteps::from_journal(journal).check(commands, coverage)
     }
 
+    /// Checks one activation's result against the steps `journal` recorded.
+    ///
+    /// The result's commands are compared as [`CommandCoverage::Activation`]
+    /// commands. When the result also reports the steps the code reached
+    /// ([`ExecutionResult::reached_steps`]), a recorded step it did not reach,
+    /// in an activation that issues a step the journal does not record or
+    /// ends the workflow, is reported too: the code no longer does what it did
+    /// when the journal was written (see the [module documentation](self)).
+    /// Every violation is of [`ViolationKind::NonDeterminism`].
+    pub fn check_activation(
+        journal: &[JournalEntry],
+        result: &ExecutionResult,
+    ) -> Vec<DeterminismViolation> {
+        JournalSteps::from_journal(journal).check_activation(result)
+    }
+
     /// Replays `journal` and returns only the rebuilt state machine.
     ///
     /// Non-critical violations are logged as a warning and otherwise ignored.
@@ -1063,6 +1209,12 @@ mod tests {
                     }
                     Attributes::WorkflowExecutionCompleted(_) => {
                         EntryType::WorkflowExecutionCompleted
+                    }
+                    Attributes::TimerFired(_) => EntryType::TimerFired,
+                    Attributes::EventReceived(_) => EntryType::EventReceived,
+                    Attributes::StepCompleted(_) => EntryType::StepCompleted,
+                    Attributes::WorkflowExecutionCancelRequested(_) => {
+                        EntryType::WorkflowExecutionCancelRequested
                     }
                     other => panic!("no entry type for {other:?} in this test"),
                 };
@@ -1460,6 +1612,487 @@ mod tests {
         commands.push(complete());
         let violations = Replayer::check_commands(&history, &commands, CommandCoverage::Activation);
         assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    // ── Recorded steps an activation leaves behind ──────────────────────
+    //
+    // The language SDK reports every step the code reached. The journals are
+    // shaped like the engine writes them: a wait for an event with a deadline
+    // records its deadline timer `event_timeout_<name>_<n>`, a task its
+    // `TaskScheduled`, and what the workflow is handed (fired timers, events,
+    // task results, closure results) has entries of its own.
+
+    use crate::bridge::{ExecutionError, FailWorkflowCommand};
+    use crate::proto::orcher::v1::{
+        EventReceivedEventAttributes, StepCompletedEventAttributes, TimerFiredEventAttributes,
+    };
+
+    fn timer_fired(timer_id: &str) -> Attributes {
+        Attributes::TimerFired(TimerFiredEventAttributes {
+            timer_id: timer_id.into(),
+            ..Default::default()
+        })
+    }
+
+    fn event_received(event_name: &str) -> Attributes {
+        Attributes::EventReceived(EventReceivedEventAttributes {
+            event_name: event_name.into(),
+            payload: br#"{"state":"pending"}"#.to_vec(),
+            ..Default::default()
+        })
+    }
+
+    fn closure_done(step_name: &str) -> Attributes {
+        Attributes::StepCompleted(StepCompletedEventAttributes {
+            step_name: step_name.into(),
+            step_type: 2,
+            result: b"1".to_vec(),
+            ..Default::default()
+        })
+    }
+
+    fn cancel_requested() -> Attributes {
+        Attributes::WorkflowExecutionCancelRequested(Default::default())
+    }
+
+    fn fail_workflow() -> Command {
+        Command::FailWorkflow(FailWorkflowCommand {
+            message: "gave up".into(),
+            details: None,
+            error_type: "Escalated".into(),
+        })
+    }
+
+    /// An activation's result: `commands`, having reached `reached`.
+    fn activation(commands: Vec<Command>, reached: &[&str]) -> ExecutionResult {
+        let mut result = ExecutionResult::success("test-run".into(), commands);
+        result.set_reached_steps(reached.iter().map(|s| s.to_string()).collect());
+        result
+    }
+
+    /// A status watch that waits for a `status` event with a deadline, then
+    /// applies whatever came with a task, three rounds over, each deadline
+    /// passing with no event: as the engine journaled it.
+    fn three_quiet_rounds() -> Vec<JournalEntry> {
+        journal(vec![
+            timer_started("event_timeout_status_1"),   // 2
+            timer_fired("event_timeout_status_1"),     // 3
+            scheduled("applyStatus_0", "applyStatus"), // 4
+            task_done(4),                              // 5
+            timer_started("event_timeout_status_2"),   // 6
+            timer_fired("event_timeout_status_2"),     // 7
+            scheduled("applyStatus_1", "applyStatus"), // 8
+            task_done(8),                              // 9
+            timer_started("event_timeout_status_3"),   // 10
+            timer_fired("event_timeout_status_3"),     // 11
+        ])
+    }
+
+    /// The one violation `violations` holds.
+    fn only(violations: &[DeterminismViolation]) -> &DeterminismViolation {
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].kind, ViolationKind::NonDeterminism);
+        assert_eq!(violations[0].severity, ViolationSeverity::Critical);
+        &violations[0]
+    }
+
+    /// The divergence this check exists for: the loop was changed to give up
+    /// after one quiet round. Replaying a run the old code recorded, the new
+    /// code takes round one from the journal, then schedules the escalation
+    /// task where the journal holds round two. Every command it issues is new,
+    /// so nothing reuses a recorded id, and before this check the run carried
+    /// on down the new path and completed.
+    #[test]
+    fn a_loop_cut_short_is_reported_where_the_journal_goes_on() {
+        let result = activation(
+            vec![task("escalate_1", "escalate")],
+            &["event_timeout_status_1", "applyStatus_0", "escalate_1"],
+        );
+        let violations = Replayer::check_activation(&three_quiet_rounds(), &result);
+        let violation = only(&violations);
+        assert_eq!(violation.event_id, 6);
+        assert_eq!(violation.step_id.as_deref(), Some("event_timeout_status_2"));
+        assert_eq!(
+            violation.expected.as_deref(),
+            Some(r#"timer "event_timeout_status_2""#)
+        );
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some(r#"task "escalate_1" of type "escalate""#)
+        );
+        assert_eq!(
+            violation.to_string(),
+            r#"Non-deterministic workflow: step 3 of the journal (entry 6) is timer "event_timeout_status_2", which the workflow code no longer reaches: replaying the journal, the code instead issued new work, task "escalate_1" of type "escalate". Recorded steps not reached: timer "event_timeout_status_2" (entry 6), task "applyStatus_1" of type "applyStatus" (entry 8), timer "event_timeout_status_3" (entry 10): expected timer "event_timeout_status_2", actual task "escalate_1" of type "escalate""#
+        );
+    }
+
+    /// The unchanged code replays the same journal through all three rounds
+    /// and goes on to the fourth.
+    #[test]
+    fn the_loop_unchanged_replays_clean() {
+        let result = activation(
+            vec![task("applyStatus_2", "applyStatus")],
+            &[
+                "event_timeout_status_1",
+                "applyStatus_0",
+                "event_timeout_status_2",
+                "applyStatus_1",
+                "event_timeout_status_3",
+                "applyStatus_2",
+            ],
+        );
+        let violations = Replayer::check_activation(&three_quiet_rounds(), &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// A change that leaves the recorded part alone is compatible: the cap
+    /// raised from three quiet rounds to five, replayed at round three.
+    #[test]
+    fn a_change_past_the_recorded_part_is_compatible() {
+        let result = activation(
+            vec![
+                Command::WaitForEvent(WaitForEventCommand {
+                    step_id: "event_status_3".into(),
+                    event_name: "status".into(),
+                    timeout_ms: Some(4000),
+                }),
+                timer("event_timeout_status_4"),
+            ],
+            &[
+                "event_timeout_status_1",
+                "applyStatus_0",
+                "event_timeout_status_2",
+                "applyStatus_1",
+                "event_timeout_status_3",
+                "applyStatus_2",
+                "event_timeout_status_4",
+            ],
+        );
+        let history = journal(vec![
+            timer_started("event_timeout_status_1"),   // 2
+            timer_fired("event_timeout_status_1"),     // 3
+            scheduled("applyStatus_0", "applyStatus"), // 4
+            task_done(4),                              // 5
+            timer_started("event_timeout_status_2"),   // 6
+            timer_fired("event_timeout_status_2"),     // 7
+            scheduled("applyStatus_1", "applyStatus"), // 8
+            task_done(8),                              // 9
+            timer_started("event_timeout_status_3"),   // 10
+            timer_fired("event_timeout_status_3"),     // 11
+            scheduled("applyStatus_2", "applyStatus"), // 12
+            task_done(12),                             // 13
+        ]);
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// A different task at the same position, under both ways of naming
+    /// steps: an id that carries the task type is new, and leaves the
+    /// recorded task behind; an id that is only a counter is reused for
+    /// other work.
+    #[test]
+    fn a_different_task_at_the_same_position_is_reported() {
+        let history = journal(vec![scheduled("charge_0", "charge"), task_done(2)]);
+        let typed = Replayer::check_activation(
+            &history,
+            &activation(vec![task("refund_0", "refund")], &["refund_0"]),
+        );
+        let violation = only(&typed);
+        assert_eq!(violation.event_id, 2);
+        assert_eq!(
+            violation.expected.as_deref(),
+            Some(r#"task "charge_0" of type "charge""#)
+        );
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some(r#"task "refund_0" of type "refund""#)
+        );
+
+        let history = journal(vec![scheduled("task_0", "charge")]);
+        let counted = Replayer::check_activation(
+            &history,
+            &activation(vec![task("task_0", "refund")], &["task_0"]),
+        );
+        let violation = only(&counted);
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some(r#"task "task_0" of type "refund""#)
+        );
+    }
+
+    /// A step added inside the recorded part: the new step is issued where
+    /// the journal goes on with the next recorded one.
+    #[test]
+    fn an_extra_command_is_reported() {
+        let history = journal(vec![
+            scheduled("charge_0", "charge"),
+            task_done(2),
+            scheduled("ship_1", "ship"),
+            task_done(4),
+        ]);
+        let violations = Replayer::check_activation(
+            &history,
+            &activation(vec![task("audit_1", "audit")], &["charge_0", "audit_1"]),
+        );
+        let violation = only(&violations);
+        assert_eq!(violation.event_id, 4);
+        assert_eq!(violation.step_id.as_deref(), Some("ship_1"));
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some(r#"task "audit_1" of type "audit""#)
+        );
+    }
+
+    /// A step removed from the end: the code completes the workflow with a
+    /// recorded step it never reached.
+    #[test]
+    fn completing_with_a_recorded_step_not_reached_is_reported() {
+        let history = journal(vec![
+            scheduled("charge_0", "charge"),
+            task_done(2),
+            scheduled("ship_1", "ship"),
+            task_done(4),
+        ]);
+        let violations =
+            Replayer::check_activation(&history, &activation(vec![complete()], &["charge_0"]));
+        let violation = only(&violations);
+        assert_eq!(violation.event_id, 4);
+        assert_eq!(
+            violation.expected.as_deref(),
+            Some(r#"task "ship_1" of type "ship""#)
+        );
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some("the code completed the workflow")
+        );
+    }
+
+    /// Failing the workflow, by command or by an error out of the code,
+    /// with a recorded step not reached, is reported the same way.
+    #[test]
+    fn failing_with_a_recorded_step_not_reached_is_reported() {
+        let history = journal(vec![
+            scheduled("charge_0", "charge"),
+            task_done(2),
+            timer_started("timer_1"),
+        ]);
+        let by_command =
+            Replayer::check_activation(&history, &activation(vec![fail_workflow()], &["charge_0"]));
+        assert_eq!(
+            only(&by_command).actual.as_deref(),
+            Some("the code failed the workflow")
+        );
+
+        let mut errored = ExecutionResult::failed(
+            "test-run".into(),
+            ExecutionError::workflow_error("no such field".into(), false),
+        );
+        errored.set_reached_steps(vec!["charge_0".into()]);
+        let by_error = Replayer::check_activation(&history, &errored);
+        let violation = only(&by_error);
+        assert_eq!(violation.event_id, 4);
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some("the code failed the workflow (no such field)")
+        );
+    }
+
+    /// A recorded child workflow the code no longer starts is a recorded
+    /// step like any other.
+    #[test]
+    fn a_child_workflow_not_reached_is_reported() {
+        let history = journal(vec![child_started("child_0", "invoice")]);
+        let violations = Replayer::check_activation(
+            &history,
+            &activation(vec![task("notify_1", "notify")], &["notify_1"]),
+        );
+        assert_eq!(
+            only(&violations).expected.as_deref(),
+            Some(r#"child workflow "child_0" of type "invoice""#)
+        );
+    }
+
+    /// Past five, the steps not reached are counted rather than listed.
+    #[test]
+    fn a_long_tail_of_steps_not_reached_is_summed_up() {
+        let history = journal(
+            (0..8)
+                .map(|i| scheduled(&format!("a_{i}"), "a"))
+                .collect::<Vec<_>>(),
+        );
+        let violations =
+            Replayer::check_activation(&history, &activation(vec![task("b_0", "b")], &["b_0"]));
+        let message = only(&violations).to_string();
+        assert!(
+            message.contains(r#"task "a_4" of type "a" (entry 6) and 3 more"#),
+            "{message}"
+        );
+        assert!(!message.contains("a_5"), "{message}");
+    }
+
+    // ── What is not a recorded step the code must reach ──
+
+    /// Events delivered and never waited for stay buffered: they are what
+    /// the workflow was handed, not what it commanded. Here two `status`
+    /// events arrive during round one; the code takes one, leaves the other
+    /// for a wait it never makes, and goes on with new work.
+    #[test]
+    fn buffered_events_left_unread_are_not_held_against_the_code() {
+        let history = journal(vec![
+            timer_started("event_timeout_status_1"),   // 2
+            event_received("status"),                  // 3
+            event_received("status"),                  // 4
+            event_received("other"),                   // 5
+            scheduled("applyStatus_0", "applyStatus"), // 6
+            task_done(6),                              // 7
+        ]);
+        let result = activation(
+            vec![task("archive_1", "archive")],
+            &["event_timeout_status_1", "applyStatus_0", "archive_1"],
+        );
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// A deadline timer that fired after its event had won is not read by
+    /// the code, which took the event; it reached the timer all the same,
+    /// and so reports it. So does a wait whose event was already buffered,
+    /// whose timer was never started at all.
+    #[test]
+    fn a_fired_timer_the_code_did_not_wait_on_is_fine() {
+        let history = journal(vec![
+            timer_started("event_timeout_status_1"),   // 2
+            event_received("status"),                  // 3
+            scheduled("applyStatus_0", "applyStatus"), // 4
+            timer_fired("event_timeout_status_1"),     // 5
+            task_done(4),                              // 6
+            event_received("status"),                  // 7
+        ]);
+        let result = activation(
+            vec![task("applyStatus_1", "applyStatus")],
+            &[
+                "event_timeout_status_1",
+                "applyStatus_0",
+                "event_timeout_status_2",
+                "applyStatus_1",
+            ],
+        );
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// Tasks still running are issued again; their completions, and the
+    /// results of closures, are what the workflow is handed.
+    #[test]
+    fn open_steps_issued_again_and_completions_are_fine() {
+        let history = journal(vec![
+            scheduled("charge_0", "charge"),   // 2
+            scheduled("reserve_1", "reserve"), // 3
+            task_done(2),                      // 4
+            closure_done("lookup_2"),          // 5
+            timer_started("timer_3"),          // 6
+        ]);
+        let result = activation(
+            vec![
+                task("reserve_1", "reserve"),
+                timer("timer_3"),
+                task("ship_4", "ship"),
+            ],
+            &["charge_0", "lookup_2", "ship_4"],
+        );
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// A workflow that completes having reached every recorded step is fine
+    /// however many events arrived that it never read.
+    #[test]
+    fn completing_with_events_unread_is_fine() {
+        let history = journal(vec![
+            timer_started("event_timeout_status_1"),   // 2
+            event_received("status"),                  // 3
+            scheduled("applyStatus_0", "applyStatus"), // 4
+            event_received("status"),                  // 5
+            event_received("status"),                  // 6
+            task_done(4),                              // 7
+            event_received("status"),                  // 8
+        ]);
+        let result = activation(
+            vec![complete()],
+            &["event_timeout_status_1", "applyStatus_0"],
+        );
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// An activation that neither issues new work nor ends the workflow is
+    /// let through: if the code went astray, the activation that acts on it
+    /// is the one stopped.
+    #[test]
+    fn an_activation_that_only_waits_is_let_through() {
+        let history = journal(vec![scheduled("charge_0", "charge"), task_done(2)]);
+        let result = activation(
+            vec![Command::WaitForEvent(WaitForEventCommand {
+                step_id: "event_go_0".into(),
+                event_name: "go".into(),
+                timeout_ms: None,
+            })],
+            &[],
+        );
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// An SDK that does not report the steps it reached is held only to the
+    /// step ids its commands reuse, as before: a race the code no longer
+    /// waits on is simply not issued.
+    #[test]
+    fn without_reached_steps_only_the_commands_are_checked() {
+        let history = journal(vec![
+            scheduled("charge_0", "charge"),
+            task_done(2),
+            timer_started("timer_1"),
+        ]);
+        let result = ExecutionResult::success("test-run".into(), vec![complete()]);
+        assert!(Replayer::check_activation(&history, &result).is_empty());
+
+        let result = ExecutionResult::success("test-run".into(), vec![task("charge_0", "refund")]);
+        assert_eq!(Replayer::check_activation(&history, &result).len(), 1);
+    }
+
+    /// An SDK may stop the code short when the workflow is asked to cancel.
+    #[test]
+    fn a_run_asked_to_cancel_is_not_held_to_its_recorded_steps() {
+        let history = journal(vec![
+            scheduled("charge_0", "charge"),
+            task_done(2),
+            timer_started("timer_1"),
+            cancel_requested(),
+        ]);
+        let result = activation(vec![fail_workflow()], &["charge_0"]);
+        let violations = Replayer::check_activation(&history, &result);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// `reached_steps` is optional on the wire, so a result from an SDK
+    /// that predates it reads as one that does not report it.
+    #[test]
+    fn reached_steps_are_read_from_the_wire_when_present() {
+        let without: ExecutionResult = serde_json::from_str(
+            r#"{"run_id":"r","successful":true,"commands":[],"query_responses":[],
+                "error":null,"restart_fresh":null}"#,
+        )
+        .unwrap();
+        assert_eq!(without.reached_steps, None);
+        let with: ExecutionResult = serde_json::from_str(
+            r#"{"run_id":"r","successful":true,"commands":[],"query_responses":[],
+                "error":null,"restart_fresh":null,"reached_steps":["a_0","timer_1"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with.reached_steps,
+            Some(vec!["a_0".to_string(), "timer_1".to_string()])
+        );
     }
 
     #[test]

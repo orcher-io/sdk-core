@@ -484,6 +484,22 @@ pub(crate) enum Report {
     },
     /// Not run at all: handed back for the next poll to take.
     Release(crate::poller::lifecycle::Leftover),
+    /// Run, and not to be applied: held for `after`, or until the worker
+    /// shuts down, then handed back to be tried again. Nothing is recorded
+    /// against the workflow, so the run stays open with its journal as it
+    /// was.
+    Retry {
+        leftover: crate::poller::lifecycle::Leftover,
+        after: Duration,
+    },
+}
+
+impl Report {
+    /// Whether sending it waits on purpose, and so should not hold a slot
+    /// that new work needs.
+    pub(crate) fn waits(&self) -> bool {
+        matches!(self, Report::Retry { .. })
+    }
 }
 
 /// One task attempt's outcome, ready to send.
@@ -643,6 +659,25 @@ impl Completer {
             // activation to its claim timeout, which is where it was anyway.
             // Bounded by the grace, since it is mostly sent during shutdown.
             Report::Release(leftover) => {
+                crate::poller::lifecycle::release(
+                    &self.caller,
+                    &self.channel_manager,
+                    leftover,
+                    self.retry.shutdown_grace,
+                )
+                .await;
+            }
+            // Held here rather than released at once: the engine offers a
+            // released activation to the next poll straight away, and the
+            // same code would fail it the same way, as fast as it could poll.
+            // A worker shutting down hands it back at once, so the code that
+            // replaces it can take the run.
+            Report::Retry { leftover, after } => {
+                let mut shutdown = self.shutdown.clone();
+                tokio::select! {
+                    _ = tokio::time::sleep(after) => {}
+                    _ = shutdown.wait_for(|stopping| *stopping) => {}
+                }
                 crate::poller::lifecycle::release(
                     &self.caller,
                     &self.channel_manager,

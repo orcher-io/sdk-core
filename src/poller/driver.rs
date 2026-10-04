@@ -43,9 +43,7 @@ use crate::proto::orcher::v1::{
     WorkerMetrics, WorkerStatus,
 };
 use crate::state::cache::WorkflowCache;
-use crate::state::replayer::{
-    CommandCoverage, JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE,
-};
+use crate::state::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
 use crate::types::WorkflowExecution;
 
 /// Convert an eagerly returned `PollTaskExecutionResponse` into a `TaskWork`.
@@ -174,6 +172,23 @@ pub struct WorkflowDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+
+    /// How long an activation found non-deterministic is held before it is
+    /// handed back to the engine to be tried again. Each further violation
+    /// of the same run doubles it, up to
+    /// [`non_determinism_retry_max`](Self::non_determinism_retry_max).
+    /// Default: two seconds.
+    ///
+    /// Such an activation is not applied and the run is not failed: it stays
+    /// open, its journal unchanged, until code that replays the journal
+    /// picks it up. A worker shutting down hands back what it holds at once.
+    pub non_determinism_retry: Duration,
+
+    /// The longest an activation found non-deterministic is held before it
+    /// is tried again; see
+    /// [`non_determinism_retry`](Self::non_determinism_retry). Default: one
+    /// minute.
+    pub non_determinism_retry_max: Duration,
 }
 
 impl Default for WorkflowDriverConfig {
@@ -193,6 +208,8 @@ impl Default for WorkflowDriverConfig {
             tls_config: None,
             version_id: None,
             max_message_bytes: crate::limits::default_max_message_bytes(),
+            non_determinism_retry: Duration::from_secs(2),
+            non_determinism_retry_max: Duration::from_secs(60),
         }
     }
 }
@@ -385,6 +402,31 @@ fn leftover(task: WorkflowExecutionTask) -> Leftover {
         token: activation_token(task.task_token, task.stream_entry_id.as_deref()),
         workflow_id: task.execution.workflow_id,
         run_id: task.execution.run_id,
+        retried: false,
+    }
+}
+
+/// An activation handed to the language SDK, as its result is checked.
+struct Recorded {
+    workflow_type: String,
+    /// The steps its journal recorded, when commands are verified.
+    steps: Option<JournalSteps>,
+}
+
+/// How long to hold the `attempt`th activation in a row of one run found
+/// non-deterministic: `initial`, doubled for each attempt after the first,
+/// at most `max`.
+fn non_determinism_backoff(initial: Duration, max: Duration, attempt: u32) -> Duration {
+    let doublings = attempt.saturating_sub(1).min(16);
+    initial.saturating_mul(1 << doublings).min(max)
+}
+
+/// A pause, for a log line: whole seconds, or milliseconds under one.
+fn humanize(pause: Duration) -> String {
+    if pause >= Duration::from_secs(1) {
+        format!("{}s", pause.as_secs())
+    } else {
+        format!("{}ms", pause.as_millis())
     }
 }
 
@@ -426,10 +468,14 @@ pub struct WorkflowDriver {
 
     replay_config: ReplayConfig,
 
-    /// The steps the journal of each activation handed to the language SDK
-    /// recorded, by run, until its result comes back: the result's commands
-    /// are checked against them.
-    journal_steps: std::sync::Mutex<HashMap<String, JournalSteps>>,
+    /// Each activation handed to the language SDK, by run, until its result
+    /// comes back: what its journal recorded, to check the result against.
+    journal_steps: std::sync::Mutex<HashMap<String, Recorded>>,
+
+    /// How many activations of each run in a row were found
+    /// non-deterministic, which sets how long the next is held before it is
+    /// tried again. Forgotten once one is not.
+    non_deterministic: std::sync::Mutex<HashMap<String, u32>>,
 
     /// Shutdown signal receiver.
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -541,6 +587,7 @@ impl WorkflowDriver {
             cache,
             replay_config,
             journal_steps: Default::default(),
+            non_deterministic: Default::default(),
             shutdown,
             shutdown_sender,
             task_receiver,
@@ -768,7 +815,10 @@ impl WorkflowDriver {
                             );
                             outstanding = outstanding.saturating_sub(1);
                             let (report, succeeded) = self.handle_execution_result(result);
-                            in_flight.spawn(send(report, succeeded), slot.take());
+                            // An activation held to be tried again later does
+                            // not keep new work waiting meanwhile.
+                            let slot = slot.take().filter(|_| !report.waits());
+                            in_flight.spawn(send(report, succeeded), slot);
                         }
                         None => results_closed = true,
                     }
@@ -954,12 +1004,19 @@ impl WorkflowDriver {
         // What the journal recorded, to check the commands that come back
         // against. The engine claims a run for one activation at a time, so
         // the run names it; one never answered is replaced by the run's next.
-        if self.replay_config.verify_commands {
-            self.journal_steps
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(run_id.clone(), JournalSteps::from_journal(&task.journal));
-        }
+        self.journal_steps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                run_id.clone(),
+                Recorded {
+                    workflow_type: workflow_type.clone(),
+                    steps: self
+                        .replay_config
+                        .verify_commands
+                        .then(|| JournalSteps::from_journal(&task.journal)),
+                },
+            );
 
         let work = WorkflowWork {
             task,
@@ -987,8 +1044,10 @@ impl WorkflowDriver {
     /// Turn a result from the language SDK into the report to send, and
     /// whether the activation succeeded.
     fn handle_execution_result(&self, result: WorkflowWorkResult) -> (Report, bool) {
-        let succeeded = result.result.is_ok();
-        (self.report_for(result), succeeded)
+        let ran = result.result.is_ok();
+        let report = self.report_for(result);
+        let succeeded = ran && !report.waits();
+        (report, succeeded)
     }
 
     fn report_for(&self, result: WorkflowWorkResult) -> Report {
@@ -996,29 +1055,47 @@ impl WorkflowDriver {
         let run_id = result.run_id;
         let stream_entry_id = result.stream_entry_id.unwrap_or_default();
         let token = activation_token(result.task_token, Some(&stream_entry_id));
-        let journal_steps = self
+        let recorded = self
             .journal_steps
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&run_id);
-        let fail_as = |message: String, failure_type: &str, non_retryable: bool| Report::Fail {
+        let fail = |message: String| Report::Fail {
             workflow_id: workflow_id.clone(),
             run_id: run_id.clone(),
             token: token.clone(),
             message,
-            failure_type: failure_type.to_string(),
-            non_retryable,
+            failure_type: "WorkflowExecutionError".to_string(),
+            non_retryable: false,
         };
-        let fail = |message: String| fail_as(message, "WorkflowExecutionError", false);
-        // Running the same code against the same journal would issue the
-        // same commands again, so this is not retryable.
-        let non_deterministic =
-            |message: String| fail_as(message, NON_DETERMINISM_FAILURE_TYPE, true);
+        // Running the same code against the same journal would do the same
+        // again, and failing the run would end it for good, though a deploy
+        // of the code that recorded it could carry it on. So the activation
+        // is not applied: it is handed back to be tried again, later.
+        let non_deterministic = |found: String| {
+            let workflow_type = recorded
+                .as_ref()
+                .map(|r| r.workflow_type.as_str())
+                .unwrap_or("unknown");
+            self.retry_non_deterministic(
+                Leftover {
+                    workflow_id: workflow_id.clone(),
+                    run_id: run_id.clone(),
+                    token: token.clone(),
+                    retried: true,
+                },
+                workflow_type,
+                found,
+            )
+        };
 
         let execution_result = match result.result {
             Ok(execution_result) => execution_result,
             Err(e @ Error::DeterminismViolation { .. }) => return non_deterministic(e.to_string()),
-            Err(e) => return fail(e.to_string()),
+            Err(e) => {
+                self.forget_non_deterministic(&run_id);
+                return fail(e.to_string());
+            }
         };
 
         if let Err(e) = validate_execution_result(&execution_result) {
@@ -1027,30 +1104,19 @@ impl WorkflowDriver {
                 error = %e,
                 "Execution result validation failed"
             );
+            self.forget_non_deterministic(&run_id);
             return fail(format!("Invalid execution result: {}", e));
         }
 
-        if !execution_result.successful {
-            let error_msg = execution_result
-                .error
-                .as_ref()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "Unknown error".to_string());
-            return match execution_result.error.as_ref().map(|e| e.error_type) {
-                Some(ExecutionErrorType::NonDeterminism) => non_deterministic(error_msg),
-                _ => fail(error_msg),
-            };
-        }
-
-        // The commands must not contradict what the journal recorded. Sent
+        // The result must not contradict what the journal recorded. Sent
         // anyway, the engine would match a reused step id to the step it
-        // already has and serve its result as the new one's.
-        if let Some(journal_steps) = journal_steps {
-            let violations =
-                journal_steps.check(&execution_result.commands, CommandCoverage::Activation);
+        // already has and serve its result as the new one's, or carry on a
+        // run whose recorded steps the code has left behind.
+        if let Some(steps) = recorded.as_ref().and_then(|r| r.steps.as_ref()) {
+            let violations = steps.check_activation(&execution_result);
             if !violations.is_empty() {
                 for violation in &violations {
-                    tracing::error!(
+                    tracing::debug!(
                         workflow_id = %workflow_id,
                         run_id = %run_id,
                         step_id = violation.step_id.as_deref().unwrap_or_default(),
@@ -1061,12 +1127,34 @@ impl WorkflowDriver {
                 return non_deterministic(
                     violations
                         .iter()
-                        .map(ToString::to_string)
+                        .map(|violation| {
+                            let found = violation.to_string();
+                            found
+                                .strip_prefix("Non-deterministic workflow: ")
+                                .map(str::to_string)
+                                .unwrap_or(found)
+                        })
                         .collect::<Vec<_>>()
                         .join("; "),
                 );
             }
         }
+
+        if !execution_result.successful {
+            let error_msg = execution_result
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "Unknown error".to_string());
+            if let Some(ExecutionErrorType::NonDeterminism) =
+                execution_result.error.as_ref().map(|e| e.error_type)
+            {
+                return non_deterministic(error_msg);
+            }
+            self.forget_non_deterministic(&run_id);
+            return fail(error_msg);
+        }
+        self.forget_non_deterministic(&run_id);
 
         let query_results =
             self.convert_query_responses_to_proto(&execution_result.query_responses);
@@ -1085,6 +1173,62 @@ impl WorkflowDriver {
             },
             Err(e) => fail(format!("Command conversion failed: {}", e)),
         }
+    }
+
+    /// The report for an activation found non-deterministic: hand it back to
+    /// the engine after a pause that grows with each violation of the run in
+    /// a row, and log, once per activation, what was found and what to do.
+    fn retry_non_deterministic(
+        &self,
+        leftover: Leftover,
+        workflow_type: &str,
+        found: String,
+    ) -> Report {
+        let attempt = {
+            let mut runs = self
+                .non_deterministic
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Bounded: runs another worker carried on are never forgotten here.
+            if runs.len() >= 10_000 && !runs.contains_key(&leftover.run_id) {
+                runs.clear();
+            }
+            let attempt = runs.entry(leftover.run_id.clone()).or_insert(0);
+            *attempt = attempt.saturating_add(1);
+            *attempt
+        };
+        let after = non_determinism_backoff(
+            self.config.non_determinism_retry,
+            self.config.non_determinism_retry_max,
+            attempt,
+        );
+        tracing::error!(
+            workflow_type = %workflow_type,
+            workflow_id = %leftover.workflow_id,
+            run_id = %leftover.run_id,
+            attempt,
+            retry_in_ms = after.as_millis() as u64,
+            failure_type = NON_DETERMINISM_FAILURE_TYPE,
+            "Workflow {workflow_type:?} (id {:?}, run {:?}) is not deterministic: {found}. The \
+             workflow code no longer replays this run's journal: it changed incompatibly while \
+             the run was in flight, or it is not deterministic. This activation is not \
+             applied and the run stays open; it is tried again in {}. To carry the run on, \
+             deploy the code that recorded it (or code that replays its journal the same way), \
+             and let in-flight runs finish before deploying an incompatible change.",
+            leftover.workflow_id,
+            leftover.run_id,
+            humanize(after),
+        );
+        Report::Retry { leftover, after }
+    }
+
+    /// The run's activation was not found non-deterministic: the next one
+    /// that is starts the pause over.
+    fn forget_non_deterministic(&self, run_id: &str) {
+        self.non_deterministic
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(run_id);
     }
 
     /// Convert bridge commands to proto commands.
@@ -2785,6 +2929,25 @@ mod tests {
         assert_eq!(config.max_concurrent_executions, 100);
         assert_eq!(config.poller_count, 4);
         assert!(config.enable_heartbeat);
+    }
+
+    /// A run found non-deterministic again and again is tried at a pace
+    /// that slows to the cap and stays there.
+    #[test]
+    fn the_pause_before_a_non_deterministic_activation_is_retried_doubles_to_its_cap() {
+        let config = WorkflowDriverConfig::default();
+        let pause = |attempt| {
+            non_determinism_backoff(
+                config.non_determinism_retry,
+                config.non_determinism_retry_max,
+                attempt,
+            )
+        };
+        let seconds: Vec<u64> = (1..=8).map(|n| pause(n).as_secs()).collect();
+        assert_eq!(seconds, vec![2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(pause(u32::MAX), Duration::from_secs(60));
+        assert_eq!(humanize(Duration::from_millis(50)), "50ms");
+        assert_eq!(humanize(Duration::from_secs(60)), "60s");
     }
 
     #[test]
