@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.0](https://github.com/orcher-io/sdk-core/compare/v0.8.2...v0.9.0) (2026-10-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* `ExecutionResult` has a new field, `reached_steps`, and is `#[non_exhaustive]`; build one with `ExecutionResult::success` or `ExecutionResult::failed`. A non-deterministic activation is retried rather than reported to the engine as a non-retryable `NonDeterminismError` failure.
+
+### Bug Fixes
+
+* catch a replay that leaves recorded steps behind, and retry it instead of failing the run ([#13](https://github.com/orcher-io/sdk-core/issues/13)) ([5323169](https://github.com/orcher-io/sdk-core/commit/532316924fe0d19d9a6a98397676a0b1c4446450))
+
+
+### Documentation
+
+* read the version badge from the registry with a short cache ([#11](https://github.com/orcher-io/sdk-core/issues/11)) ([ebccb3c](https://github.com/orcher-io/sdk-core/commit/ebccb3c75a790bd70d6d1a21d6fd34179153dbe1))
+
 ## [0.8.2](https://github.com/orcher-io/sdk-core/compare/v0.8.1...v0.8.2) (2026-10-04)
 
 
