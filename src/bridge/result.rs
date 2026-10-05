@@ -21,7 +21,11 @@ use std::time::Duration;
 ///
 /// Carries the outcome of running the workflow code and the commands the workflow wants
 /// performed, such as scheduling tasks or starting timers.
+///
+/// Built with [`ExecutionResult::success`] or [`ExecutionResult::failed`], or deserialized
+/// from what a language SDK sends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ExecutionResult {
     /// Run ID of the request this result answers.
     pub run_id: String,
@@ -45,6 +49,18 @@ pub struct ExecutionResult {
 
     /// Set when the workflow wants to restart as a fresh run.
     pub restart_fresh: Option<RestartFreshRequest>,
+
+    /// The id of every step the workflow code reached in this activation, in the order it
+    /// reached them: each task, timer and child workflow it called for, whether the journal
+    /// already held the step's outcome or the step is issued in `commands`. A wait for an
+    /// event with a deadline reached its deadline timer whichever of the two came first.
+    ///
+    /// The driver checks it against the steps the journal recorded: a recorded step the
+    /// code did not reach, in an activation that issues new work or ends the workflow, means
+    /// the code no longer does what it did when the journal was written. `None` (absent on
+    /// the wire) when the SDK does not report it, and then only the commands are checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reached_steps: Option<Vec<String>>,
 }
 
 impl ExecutionResult {
@@ -58,6 +74,7 @@ impl ExecutionResult {
             update_results: Vec::new(),
             error: None,
             restart_fresh: None,
+            reached_steps: None,
         }
     }
 
@@ -71,7 +88,14 @@ impl ExecutionResult {
             update_results: Vec::new(),
             error: Some(error),
             restart_fresh: None,
+            reached_steps: None,
         }
+    }
+
+    /// Reports the steps the workflow code reached; see
+    /// [`reached_steps`](Self::reached_steps).
+    pub fn set_reached_steps(&mut self, steps: Vec<String>) {
+        self.reached_steps = Some(steps);
     }
 
     /// Appends a command.

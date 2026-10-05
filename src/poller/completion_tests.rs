@@ -1978,14 +1978,26 @@ fn schedule(task_id: &str, task_type: &str) -> BridgeCommand {
     })
 }
 
+/// Settings that hold a non-deterministic activation only briefly.
+fn retrying_soon() -> WorkflowDriverConfig {
+    WorkflowDriverConfig {
+        non_determinism_retry: Duration::from_millis(50),
+        non_determinism_retry_max: Duration::from_millis(50),
+        ..test_config()
+    }
+}
+
 /// A worker restarted on changed code reuses the step id `task_0` for
 /// another task type. The engine matches the command to the step by id
 /// alone, so sent on it would be served the `Charge` task's result as the
-/// `Refund` one's. The activation is failed as non-deterministic instead,
-/// naming the step, and the same run's activation from unchanged code — the
-/// open step issued again beside a new one — completes as before.
+/// `Refund` one's. The activation is not applied, and the run not failed:
+/// it is handed back to be tried again, and the error names the step. An
+/// SDK that finds non-determinism itself is treated the same way, and the
+/// same run's activation from unchanged code — the open step issued again
+/// beside a new one — completes as before.
 #[tokio::test]
-async fn an_activation_whose_commands_contradict_its_journal_is_failed_as_non_deterministic() {
+async fn an_activation_whose_commands_contradict_its_journal_is_retried_not_failed() {
+    let (logs, _logging) = capture_logs();
     let engine = Engine::default();
     {
         let mut script = engine.0.lock().unwrap();
@@ -1999,7 +2011,7 @@ async fn an_activation_whose_commands_contradict_its_journal_is_failed_as_non_de
             .polls
             .push_back(charged_activation("wf-sdk-found", "act1.c2Rr"));
     }
-    let (driver, mut work_rx, result_tx) = driver_for(&engine, test_config()).await;
+    let (driver, mut work_rx, result_tx) = driver_for(&engine, retrying_soon()).await;
     let mut driver = driver.with_completion_retry(quick());
     let shutdown = driver.shutdown_handle();
     let running = tokio::spawn(async move { driver.run().await });
@@ -2036,7 +2048,7 @@ async fn an_activation_whose_commands_contradict_its_journal_is_failed_as_non_de
             .unwrap();
     }
 
-    wait_for(|| engine.calls() >= 3).await;
+    wait_for(|| !engine.completes().is_empty() && engine.releases().len() >= 2).await;
     shutdown.shutdown();
     let _ = running.await;
 
@@ -2048,25 +2060,259 @@ async fn an_activation_whose_commands_contradict_its_journal_is_failed_as_non_de
         }],
         "only the unchanged code's activation completes"
     );
-    let fails = engine.fails();
-    let failures = engine.0.lock().unwrap().failures.clone();
-    assert_eq!(fails.len(), 2, "{failures:?}");
-    for (seen, failure) in fails.iter().zip(&failures) {
-        assert_eq!(failure.failure_type, "NonDeterminismError", "{failure:?}");
-        assert!(failure.non_retryable, "{failure:?}");
-        if seen.task_token == b"act1.Y2hhbmdlZA" {
-            for part in ["task_0", "Charge", "Refund"] {
-                assert!(failure.message.contains(part), "{}", failure.message);
-            }
-        } else {
-            assert_eq!(seen.task_token, b"act1.c2Rr".to_vec());
-            assert!(
-                failure.message.contains("the SDK found it"),
-                "{}",
-                failure.message
-            );
+    assert!(engine.fails().is_empty(), "no run is failed");
+    let mut released = engine.releases();
+    released.sort();
+    assert_eq!(
+        released,
+        vec![
+            ("wf-changed".to_string(), b"act1.Y2hhbmdlZA".to_vec()),
+            ("wf-sdk-found".to_string(), b"act1.c2Rr".to_vec()),
+        ],
+        "each non-deterministic activation is handed back with its token"
+    );
+    let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    let line = |workflow_id: &str| {
+        logs.lines()
+            .find(|line| line.contains("ERROR") && line.contains(workflow_id))
+            .unwrap_or_else(|| panic!("no error names {workflow_id}:\n{logs}"))
+            .to_string()
+    };
+    let changed = line("wf-changed");
+    for part in [
+        "task_0",
+        "Charge",
+        "Refund",
+        "not deterministic",
+        "tried again",
+    ] {
+        assert!(changed.contains(part), "{part:?} missing from {changed}");
+    }
+    assert!(line("wf-sdk-found").contains("the SDK found it"));
+}
+
+/// The activation of a run the old code recorded, three rounds of a loop
+/// that waits for a `status` event with a deadline and applies it with a
+/// task, as the engine journals them.
+fn three_rounds_activation(workflow_id: &str, token: &str) -> PollWorkflowExecutionResponse {
+    use crate::proto::orcher::v1::journal_entry::Attributes;
+    let mut journal = vec![(
+        EntryType::WorkflowExecutionStarted,
+        Attributes::WorkflowExecutionStarted(Default::default()),
+    )];
+    for round in 1..=3 {
+        let timer_id = format!("event_timeout_status_{round}");
+        journal.push((
+            EntryType::TimerStarted,
+            Attributes::TimerStarted(TimerStartedEventAttributes {
+                timer_id: timer_id.clone(),
+                ..Default::default()
+            }),
+        ));
+        journal.push((
+            EntryType::TimerFired,
+            Attributes::TimerFired(TimerFiredEventAttributes {
+                timer_id,
+                ..Default::default()
+            }),
+        ));
+        if round < 3 {
+            journal.push((
+                EntryType::TaskScheduled,
+                Attributes::TaskScheduled(TaskScheduledEventAttributes {
+                    task_id: format!("applyProviderStatus_{}", round - 1),
+                    task_type: "applyProviderStatus".into(),
+                    ..Default::default()
+                }),
+            ));
+            journal.push((
+                EntryType::TaskCompleted,
+                Attributes::TaskCompleted(Default::default()),
+            ));
         }
     }
+    PollWorkflowExecutionResponse {
+        workflow_type: "status-watch".into(),
+        journal: journal
+            .into_iter()
+            .enumerate()
+            .map(|(i, (entry_type, attributes))| JournalEntry {
+                entry_id: i as i64 + 1,
+                timestamp: None,
+                entry_type: entry_type as i32,
+                version: 1,
+                task_id: 0,
+                attributes: Some(attributes),
+            })
+            .collect(),
+        ..activation(workflow_id, token)
+    }
+}
+
+/// The result a language SDK sends for it, as JSON: the old code goes on to
+/// round three's task; the new code, which gives up after one quiet round,
+/// schedules the escalation where the journal holds round two.
+fn status_watch_result(run_id: &str, new_code: bool) -> ExecutionResult {
+    let (commands, reached) = if new_code {
+        (
+            r#"[{"ScheduleTask":{"sequence":1,"task_id":"escalateStuck_1","task_type":"escalateStuck","task_queue":"q","input":[],"timeout":{"secs":300,"nanos":0},"retry_policy":null,"headers":[]}}]"#,
+            r#"["event_timeout_status_1","applyProviderStatus_0","escalateStuck_1"]"#,
+        )
+    } else {
+        (
+            r#"[{"ScheduleTask":{"sequence":2,"task_id":"applyProviderStatus_2","task_type":"applyProviderStatus","task_queue":"q","input":[],"timeout":{"secs":300,"nanos":0},"retry_policy":null,"headers":[]}}]"#,
+            r#"["event_timeout_status_1","applyProviderStatus_0","event_timeout_status_2","applyProviderStatus_1","event_timeout_status_3","applyProviderStatus_2"]"#,
+        )
+    };
+    serde_json::from_str(&format!(
+        r#"{{"run_id":"{run_id}","successful":true,"commands":{commands},"query_responses":[],"update_results":[],"error":null,"restart_fresh":null,"reached_steps":{reached}}}"#
+    ))
+    .unwrap()
+}
+
+/// The divergence that used to complete silently: new code that leaves the
+/// recorded rounds behind. Its activation is handed back, not applied, with
+/// an error a developer can act on; the old code's activation of the same
+/// journal completes.
+#[tokio::test]
+async fn a_run_whose_recorded_steps_the_code_leaves_behind_is_retried_not_carried_on() {
+    let (logs, _logging) = capture_logs();
+    let engine = Engine::default();
+    {
+        let mut script = engine.0.lock().unwrap();
+        script
+            .polls
+            .push_back(three_rounds_activation("wf-new-code", "act1.bmV3"));
+        script
+            .polls
+            .push_back(three_rounds_activation("wf-old-code", "act1.b2xk"));
+    }
+    let (driver, mut work_rx, result_tx) = driver_for(&engine, retrying_soon()).await;
+    let mut driver = driver.with_completion_retry(quick());
+    let shutdown = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    for _ in 0..2 {
+        let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+            .await
+            .expect("an activation")
+            .expect("the driver is running");
+        let task = work.task;
+        let new_code = task.execution.workflow_id == "wf-new-code";
+        result_tx
+            .send(WorkflowWorkResult {
+                workflow_id: task.execution.workflow_id.clone(),
+                run_id: task.execution.run_id.clone(),
+                task_token: task.task_token.clone(),
+                stream_entry_id: work.stream_entry_id,
+                result: Ok(status_watch_result(&task.execution.run_id, new_code)),
+            })
+            .await
+            .unwrap();
+    }
+
+    wait_for(|| !engine.completes().is_empty() && !engine.releases().is_empty()).await;
+    shutdown.shutdown();
+    let _ = running.await;
+
+    assert_eq!(
+        engine
+            .completes()
+            .into_iter()
+            .map(|seen| seen.task_token)
+            .collect::<Vec<_>>(),
+        vec![b"act1.b2xk".to_vec()],
+        "only the old code's activation is applied"
+    );
+    assert!(engine.fails().is_empty(), "no run is failed");
+    assert_eq!(
+        engine.releases(),
+        vec![("wf-new-code".to_string(), b"act1.bmV3".to_vec())]
+    );
+    let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    let error = logs
+        .lines()
+        .find(|line| line.contains("ERROR") && line.contains("wf-new-code"))
+        .unwrap_or_else(|| panic!("no error names the run:\n{logs}"));
+    for part in [
+        r#"Workflow "status-watch" (id "wf-new-code", run "wf-new-code-exec") is not deterministic"#,
+        r#"step 3 of the journal (entry 6) is timer "event_timeout_status_2""#,
+        r#"issued new work, task "escalateStuck_1" of type "escalateStuck""#,
+        r#"task "applyProviderStatus_1" of type "applyProviderStatus" (entry 8)"#,
+        "the run stays open; it is tried again in 50ms",
+        "deploy the code that recorded it",
+        "let in-flight runs finish before deploying an incompatible change",
+    ] {
+        assert!(error.contains(part), "{part:?} missing from {error}");
+    }
+    assert!(
+        !logs
+            .lines()
+            .any(|line| line.contains("ERROR") && line.contains("wf-old-code")),
+        "{logs}"
+    );
+}
+
+/// An activation held to be tried again is handed back at once when the
+/// worker shuts down, so the code deployed in its place can take the run
+/// without waiting out the pause or the claim.
+#[tokio::test]
+async fn a_held_activation_is_handed_back_at_once_on_shutdown() {
+    let engine = Engine::default();
+    engine
+        .0
+        .lock()
+        .unwrap()
+        .polls
+        .push_back(three_rounds_activation("wf-held", "act1.aGVsZA"));
+    let (driver, mut work_rx, result_tx) = driver_for(
+        &engine,
+        WorkflowDriverConfig {
+            non_determinism_retry: Duration::from_secs(600),
+            non_determinism_retry_max: Duration::from_secs(600),
+            ..test_config()
+        },
+    )
+    .await;
+    let mut driver = driver.with_completion_retry(quick());
+    let shutdown = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+        .await
+        .expect("an activation")
+        .expect("the driver is running");
+    let task = work.task;
+    result_tx
+        .send(WorkflowWorkResult {
+            workflow_id: task.execution.workflow_id.clone(),
+            run_id: task.execution.run_id.clone(),
+            task_token: task.task_token.clone(),
+            stream_entry_id: work.stream_entry_id,
+            result: Ok(status_watch_result(&task.execution.run_id, true)),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(engine.releases().is_empty(), "held, not handed back yet");
+
+    let asked = Instant::now();
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("the driver stops")
+        .unwrap()
+        .unwrap();
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert_eq!(
+        engine.releases(),
+        vec![("wf-held".to_string(), b"act1.aGVsZA".to_vec())]
+    );
+    assert!(engine.completes().is_empty() && engine.fails().is_empty());
 }
 
 /// What a worker does with a message too large to send or receive.

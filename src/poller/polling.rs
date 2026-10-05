@@ -638,6 +638,7 @@ impl WorkflowExecutionPoller {
                 workflow_id: task.execution.workflow_id,
                 run_id: task.execution.run_id,
                 token,
+                retried: false,
             },
             super::lifecycle::SHUTDOWN_NOTICE_TIMEOUT,
         )

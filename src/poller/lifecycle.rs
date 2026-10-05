@@ -151,13 +151,16 @@ pub(crate) async fn announce_shutdown(
     }
 }
 
-/// An activation received but not run, to hand back.
+/// An activation to hand back: received but not run, or run and not applied
+/// so that it is tried again.
 #[derive(Debug, Clone)]
 pub(crate) struct Leftover {
     pub(crate) workflow_id: String,
     pub(crate) run_id: String,
     /// The activation token, as the poll carried it in `stream_entry_id`.
     pub(crate) token: Vec<u8>,
+    /// Run, and handed back to be tried again rather than applied.
+    pub(crate) retried: bool,
 }
 
 /// Hand an activation back to the engine over the driver's connection. One
@@ -215,6 +218,11 @@ pub(crate) async fn release_on(
     request.set_timeout(timeout);
     let sent = tokio::time::timeout(timeout, client.release_workflow_execution(request)).await;
     match sent {
+        Ok(Ok(_)) if leftover.retried => tracing::info!(
+            workflow_id = %leftover.workflow_id,
+            run_id = %leftover.run_id,
+            "Workflow activation not applied; handed back to the engine to be tried again"
+        ),
         Ok(Ok(_)) => tracing::info!(
             workflow_id = %leftover.workflow_id,
             run_id = %leftover.run_id,
@@ -237,6 +245,16 @@ pub(crate) async fn release_on(
 /// Log, at error, that an activation could not be handed back: it stays stuck
 /// until the engine's claim timeout.
 fn not_released(leftover: &Leftover, why: &str) {
+    if leftover.retried {
+        tracing::error!(
+            workflow_id = %leftover.workflow_id,
+            run_id = %leftover.run_id,
+            reason = %why,
+            "Workflow activation not applied and not handed back; it is tried again after \
+             the engine's claim timeout"
+        );
+        return;
+    }
     tracing::error!(
         workflow_id = %leftover.workflow_id,
         run_id = %leftover.run_id,
