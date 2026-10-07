@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/orcher-io/sdk-core/compare/v0.9.0...v0.9.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* let a running registration driver be stopped so the worker deregisters ([#15](https://github.com/orcher-io/sdk-core/issues/15)) ([408af46](https://github.com/orcher-io/sdk-core/commit/408af46f1ebf316c072802472f075c6c63daeaab))
+
 ## [0.9.0](https://github.com/orcher-io/sdk-core/compare/v0.8.2...v0.9.0) (2026-10-05)
 
 
