@@ -247,14 +247,23 @@ pub struct WorkflowWorkResult {
     pub result: Result<ExecutionResult>,
 }
 
-/// A handle that stops a running [`WorkflowDriver`] or [`TaskDriver`].
+/// A handle that stops a running [`WorkflowDriver`], [`TaskDriver`] or
+/// [`WorkerRegistrationDriver`](super::WorkerRegistrationDriver).
 ///
-/// Get one from [`WorkflowDriver::shutdown_handle`] or
-/// [`TaskDriver::shutdown_handle`].
+/// Get one from [`WorkflowDriver::shutdown_handle`],
+/// [`TaskDriver::shutdown_handle`] or
+/// [`WorkerRegistrationDriver::shutdown_handle`](super::WorkerRegistrationDriver::shutdown_handle).
+/// For the registration driver, [`shutdown`](Self::shutdown) ends the
+/// heartbeat loop and deregisters the worker; the rest of its description is
+/// about the work drivers.
 #[derive(Clone, Debug)]
 pub struct ShutdownHandle(tokio::sync::watch::Sender<bool>);
 
 impl ShutdownHandle {
+    pub(crate) fn from_sender(sender: tokio::sync::watch::Sender<bool>) -> Self {
+        Self(sender)
+    }
+
     /// Ask the driver to stop.
     ///
     /// The text below says "activations". For a task driver, read "tasks",
