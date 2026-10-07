@@ -25,7 +25,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[non_exhaustive]
 pub enum Error {
     /// gRPC transport error.
-    #[error("gRPC transport error: {0}")]
+    #[error("gRPC transport error: {}", with_causes(.0))]
     Transport(#[from] tonic::transport::Error),
 
     /// gRPC status error.
@@ -33,7 +33,7 @@ pub enum Error {
     /// A status that reports a message over a gRPC size limit arrives
     /// rewritten by [`crate::limits::clarify`]: OUT_OF_RANGE, saying which
     /// limit to raise or that the data belongs elsewhere.
-    #[error("gRPC status error: {0}")]
+    #[error("gRPC status error: {}", with_causes(.0))]
     GrpcStatus(#[source] tonic::Status),
 
     /// Workflow not found.
@@ -184,6 +184,26 @@ pub enum Error {
     /// Any other error, including a [`TaskFailure`].
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// `error` followed by each error in its source chain, as `error: cause: cause`.
+///
+/// A connection that fails at the TLS handshake surfaces as a bare
+/// "transport error"; the reason (an untrusted certificate, a client
+/// certificate the server required) is only in the chain. A cause whose text
+/// the message already contains is skipped.
+pub(crate) fn with_causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 impl From<tonic::Status> for Error {
@@ -619,6 +639,55 @@ impl From<serde_json::Error> for Error {
 
 #[cfg(test)]
 mod tests {
+
+    /// An error with an optional cause, like the layers of a failed connect.
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn a_transport_status_names_the_handshake_failure() {
+        // How tonic reports a connection the server refused at the handshake:
+        // the status says "transport error", the reason is in the chain.
+        let cause = Layer(
+            "transport error",
+            Some(Box::new(Layer(
+                "client error (Connect)",
+                Some(Box::new(Layer(
+                    "received fatal alert: CertificateRequired",
+                    None,
+                ))),
+            ))),
+        );
+        let err = Error::from(tonic::Status::from_error(Box::new(cause)));
+        let text = err.to_string();
+        assert!(
+            text.ends_with(": client error (Connect): received fatal alert: CertificateRequired"),
+            "{text}"
+        );
+        // The chain is still there for code that walks it.
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn a_cause_already_in_the_message_is_not_repeated() {
+        let err = Layer(
+            "connect failed: refused",
+            Some(Box::new(Layer("refused", None))),
+        );
+        assert_eq!(with_causes(&err), "connect failed: refused");
+    }
     use super::*;
 
     #[test]

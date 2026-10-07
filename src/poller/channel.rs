@@ -371,7 +371,7 @@ impl ChannelManager {
                 Err(Unconnected::Failed(Error::connection(format!(
                     "Failed to connect to {}: {} (next retry after {:?})",
                     self.server_url,
-                    e,
+                    crate::error::with_causes(&e),
                     state
                         .next_retry_at
                         .map(|t| t.saturating_duration_since(Instant::now()))
@@ -523,7 +523,13 @@ pub async fn connect_channel(server_url: &str, tls: Option<&TlsConfig>) -> Resul
     )?
     .connect()
     .await
-    .map_err(|e| Error::connection(format!("Failed to connect to {}: {}", server_url, e)))
+    .map_err(|e| {
+        Error::connection(format!(
+            "Failed to connect to {}: {}",
+            server_url,
+            crate::error::with_causes(&e)
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -608,6 +614,24 @@ mod connect_tests {
     async fn an_http_address_without_tls_config_stays_plaintext() {
         let sent = first_bytes_sent("http", None).await;
         assert!(sent.starts_with(b"PRI * HTTP/2.0"), "sent {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_tls_handshake_says_why() {
+        // A listener that hangs up instead of answering the ClientHello.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+        let err = connect_channel(&format!("https://localhost:{port}"), None)
+            .await
+            .expect_err("must fail");
+        let text = err.to_string();
+        // Not just tonic's bare "transport error": the cause follows it.
+        let after = text.split("transport error").nth(1).unwrap_or_default();
+        assert!(after.starts_with(": ") && after.len() > 2, "{text}");
     }
 
     #[tokio::test]
