@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::poller::channel::ChannelManager;
+use crate::poller::driver::ShutdownHandle;
 use crate::proto::orcher::v1::{
     worker_service_client::WorkerServiceClient, DeregisterWorkerRequest, RegisterWorkerRequest,
     WorkerCapabilities, WorkerHeartbeatRequest, WorkerLoadMetrics, WorkerRegistrationStatus,
@@ -105,7 +106,20 @@ impl Default for WorkerRegistrationConfig {
     }
 }
 
+/// How long [`WorkerRegistrationDriver::run`] spends deregistering on the way
+/// out, connecting included.
+///
+/// Deregistration is a courtesy: the server drops a registration that stops
+/// heartbeating anyway. So an unreachable or slow server must not hold up the
+/// worker's shutdown for longer than this.
+pub const DEREGISTER_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Drives a worker's registration: register, heartbeat, then deregister.
+///
+/// [`run`](Self::run) borrows the driver for as long as it runs, so take a
+/// [`shutdown_handle`](Self::shutdown_handle) before starting it and stop it
+/// through that. Aborting the task that runs it instead skips deregistration,
+/// and the server keeps listing the worker until the registration expires.
 pub struct WorkerRegistrationDriver {
     config: Arc<WorkerRegistrationConfig>,
     channel_manager: Arc<tokio::sync::Mutex<ChannelManager>>,
@@ -216,10 +230,13 @@ impl WorkerRegistrationDriver {
         }
     }
 
-    /// Runs the heartbeat loop until [`shutdown`](Self::shutdown) is called.
+    /// Runs the heartbeat loop until [`shutdown`](Self::shutdown) is called,
+    /// or [`ShutdownHandle::shutdown`] on a handle from
+    /// [`shutdown_handle`](Self::shutdown_handle).
     ///
-    /// On shutdown the worker is deregistered. A failed deregistration is
-    /// logged, not returned.
+    /// On shutdown the worker is deregistered, within
+    /// [`DEREGISTER_TIMEOUT`]. A failed or timed-out deregistration is logged,
+    /// not returned.
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!(
             service_id = %self.config.service_id,
@@ -249,12 +266,18 @@ impl WorkerRegistrationDriver {
             }
         }
 
-        if let Err(e) = self.deregister().await {
-            tracing::warn!(
+        match tokio::time::timeout(DEREGISTER_TIMEOUT, self.deregister()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
                 service_id = %self.config.service_id,
                 error = %e,
                 "Failed to deregister worker on shutdown"
-            );
+            ),
+            Err(_) => tracing::warn!(
+                service_id = %self.config.service_id,
+                timeout_secs = DEREGISTER_TIMEOUT.as_secs(),
+                "Worker deregistration timed out on shutdown"
+            ),
         }
 
         Ok(())
@@ -397,6 +420,16 @@ impl WorkerRegistrationDriver {
     /// Signals the driver to shut down.
     pub fn shutdown(&self) {
         let _ = self.shutdown_sender.send(true);
+    }
+
+    /// Returns a handle that stops this driver from outside.
+    ///
+    /// [`run`](Self::run) holds `&mut self`, so once it is running (usually in
+    /// a spawned task) this handle is the only way to stop it gracefully: the
+    /// loop ends and the worker deregisters. A handle used before `run` starts
+    /// still takes effect, and `run` deregisters and returns at once.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle::from_sender(self.shutdown_sender.clone())
     }
 
     /// Returns the registration ID, if the worker is registered.
