@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/orcher-io/sdk-core/compare/v0.9.1...v0.9.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* use TLS for https:// addresses without a TlsConfig and name transport error causes ([#18](https://github.com/orcher-io/sdk-core/issues/18)) ([40893aa](https://github.com/orcher-io/sdk-core/commit/40893aa51bccfc9bf37c7251d3925675445356f4))
+
 ## [0.9.1](https://github.com/orcher-io/sdk-core/compare/v0.9.0...v0.9.1) (2026-10-07)
 
 
