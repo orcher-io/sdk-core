@@ -7,6 +7,9 @@
 //! expires. These tests run the driver against a real gRPC server and read
 //! what arrived.
 
+// Protocol messages are built to keep building when fields are added.
+#![allow(clippy::needless_update)]
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +29,8 @@ const REGISTRATION_ID: &str = "reg-under-test";
 #[derive(Default)]
 struct Recorded {
     registered: usize,
+    /// The capabilities each registration declared.
+    capabilities: Vec<Option<WorkerCapabilities>>,
     deregistered: Vec<DeregisterWorkerRequest>,
 }
 
@@ -41,13 +46,19 @@ struct FakeWorkerService {
 impl WorkerService for FakeWorkerService {
     async fn register_worker(
         &self,
-        _: Request<RegisterWorkerRequest>,
+        request: Request<RegisterWorkerRequest>,
     ) -> Result<Response<RegisterWorkerResponse>, Status> {
-        self.recorded.lock().unwrap().registered += 1;
+        let mut recorded = self.recorded.lock().unwrap();
+        recorded.registered += 1;
+        recorded
+            .capabilities
+            .push(request.into_inner().capabilities);
+        drop(recorded);
         Ok(Response::new(RegisterWorkerResponse {
             success: true,
             registration_id: REGISTRATION_ID.to_string(),
             error_message: String::new(),
+            ..Default::default()
         }))
     }
 
@@ -59,6 +70,7 @@ impl WorkerService for FakeWorkerService {
             success: true,
             re_register: false,
             timestamp: 0,
+            ..Default::default()
         }))
     }
 
@@ -74,7 +86,10 @@ impl WorkerService for FakeWorkerService {
         if self.hang_on_deregister {
             std::future::pending::<()>().await;
         }
-        Ok(Response::new(DeregisterWorkerResponse { success: true }))
+        Ok(Response::new(DeregisterWorkerResponse {
+            success: true,
+            ..Default::default()
+        }))
     }
 }
 
@@ -97,7 +112,15 @@ async fn fake_server(hang_on_deregister: bool) -> (SocketAddr, Arc<Mutex<Recorde
 }
 
 async fn registered_driver(addr: SocketAddr) -> WorkerRegistrationDriver {
+    registered_driver_with(addr, |_| {}).await
+}
+
+async fn registered_driver_with(
+    addr: SocketAddr,
+    configure: impl FnOnce(&mut WorkerRegistrationConfig),
+) -> WorkerRegistrationDriver {
     let mut config = WorkerRegistrationConfig::default();
+    configure(&mut config);
     config.server_url = format!("http://{addr}");
     config.service_id = "service-under-test".to_string();
     // Long enough that no heartbeat is due while the test runs.
@@ -155,4 +178,35 @@ async fn a_server_that_never_answers_deregistration_does_not_hold_up_shutdown() 
 
     assert!(asked.elapsed() >= DEREGISTER_TIMEOUT - Duration::from_millis(100));
     assert_eq!(recorded.lock().unwrap().deregistered.len(), 1);
+}
+
+/// Registration declares the worker protocol version the language SDK set,
+/// and the baseline when it set none.
+#[tokio::test]
+async fn registration_declares_the_worker_protocol_version() {
+    let (addr, recorded) = fake_server(false).await;
+    let _baseline = registered_driver(addr).await;
+    let _cancel_aware = registered_driver_with(addr, |config| {
+        config.protocol_version = orcher_sdk_core::worker_protocol::CANCEL_REQUEST;
+    })
+    .await;
+
+    let versions: Vec<u32> = recorded
+        .lock()
+        .unwrap()
+        .capabilities
+        .iter()
+        .map(|c| {
+            c.as_ref()
+                .expect("no capabilities declared")
+                .protocol_version
+        })
+        .collect();
+    assert_eq!(
+        versions,
+        vec![
+            orcher_sdk_core::worker_protocol::BASELINE,
+            orcher_sdk_core::worker_protocol::CANCEL_REQUEST,
+        ]
+    );
 }

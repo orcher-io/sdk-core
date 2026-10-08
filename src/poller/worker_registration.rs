@@ -77,6 +77,14 @@ pub struct WorkerRegistrationConfig {
 
     /// Organization sent as `x-organization-id`, matching the pollers.
     pub organization_id: Option<String>,
+
+    /// The worker protocol version declared at registration; see
+    /// [`crate::worker_protocol`]. Default: [`crate::WORKER_PROTOCOL_VERSION`].
+    ///
+    /// For observability: the engine decides per activation from
+    /// [`WorkflowDriverConfig::protocol_version`](crate::WorkflowDriverConfig::protocol_version),
+    /// which should be the same.
+    pub protocol_version: u32,
 }
 
 /// Registration authenticates exactly as polling and reporting do; see
@@ -102,6 +110,7 @@ impl Default for WorkerRegistrationConfig {
             version_id: None,
             api_key: None,
             organization_id: None,
+            protocol_version: crate::WORKER_PROTOCOL_VERSION,
         }
     }
 }
@@ -191,9 +200,12 @@ impl WorkerRegistrationDriver {
                 task_types: self.config.task_types.clone(),
                 max_concurrent_workflows: self.config.max_concurrent_workflows,
                 max_concurrent_tasks: self.config.max_concurrent_tasks,
+                protocol_version: self.config.protocol_version,
+                ..Default::default()
             }),
             metadata: self.config.metadata.clone(),
             version_id: self.config.version_id.clone().unwrap_or_default(),
+            ..Default::default()
         };
 
         let channel = {
@@ -317,8 +329,10 @@ impl WorkerRegistrationDriver {
                     // zero as "not reported" rather than idle.
                     cpu_usage: 0.0,
                     memory_usage_bytes: 0,
+                    ..Default::default()
                 }
             }),
+            ..Default::default()
         };
 
         let result = {
@@ -391,6 +405,7 @@ impl WorkerRegistrationDriver {
         let request = DeregisterWorkerRequest {
             service_id: self.config.service_id.clone(),
             registration_id,
+            ..Default::default()
         };
 
         let channel = {

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use orcher_sdk_core::client::workflow::StartWorkflowOpts;
+use orcher_sdk_core::client::workflow::{CancelWorkflowOpts, StartWorkflowOpts};
 use orcher_sdk_core::poller::TlsConfig;
 use orcher_sdk_core::types::RetryPolicy;
 use orcher_sdk_core::{
@@ -22,6 +22,9 @@ fn options_build_with_their_methods() {
         .with_execution_timeout(Duration::from_secs(60));
     assert_eq!(opts.workflow_id, "wf-1");
     assert_eq!(opts.execution_timeout, Some(Duration::from_secs(60)));
+
+    let cancel = CancelWorkflowOpts::default().with_cleanup_timeout(Duration::from_secs(30));
+    assert_eq!(cancel.cleanup_timeout, Some(Duration::from_secs(30)));
 
     let list = ListWorkflowsOptions::default()
         .with_page_size(10)
@@ -54,6 +57,7 @@ fn options_build_with_their_methods() {
 fn driver_configs_build_from_default_and_field_assignment() {
     let mut workflow = WorkflowDriverConfig::default();
     workflow.task_queue = "orders".into();
+    workflow.protocol_version = orcher_sdk_core::worker_protocol::CANCEL_REQUEST;
     let mut task = TaskDriverConfig::default();
     task.tls_config = Some(TlsConfig::new());
     let mut actor = ActorDriverConfig::default();

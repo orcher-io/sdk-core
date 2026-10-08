@@ -182,6 +182,7 @@ impl ExecutionService for Engine {
             .push(request.into_inner().eager_task_capabilities);
         Ok(Response::new(CompleteWorkflowExecutionResponse {
             eager_tasks,
+            ..Default::default()
         }))
     }
     async fn fail_workflow_execution(
@@ -244,6 +245,7 @@ impl ExecutionService for Engine {
         }
         Ok(Response::new(RecordTaskHeartbeatResponse {
             cancel_requested: script.cancel_requested,
+            ..Default::default()
         }))
     }
     async fn respond_query_task(
@@ -273,7 +275,9 @@ impl ExecutionService for Engine {
         if script.old_engine {
             return Err(Status::unimplemented("unknown method"));
         }
-        Ok(Response::new(ShutdownWorkerResponse {}))
+        Ok(Response::new(ShutdownWorkerResponse {
+            ..Default::default()
+        }))
     }
 }
 
@@ -287,7 +291,10 @@ impl ActorService for Engine {
         if operations.is_empty() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        Ok(Response::new(PollActorOperationResponse { operations }))
+        Ok(Response::new(PollActorOperationResponse {
+            operations,
+            ..Default::default()
+        }))
     }
     async fn complete_actor_operation(
         &self,
@@ -311,6 +318,7 @@ impl ActorService for Engine {
                 } else {
                     "unknown operation".into()
                 },
+                ..Default::default()
             })),
             Err(code) => Err(Status::new(code, "scripted")),
         }
@@ -1544,7 +1552,8 @@ async fn eager_tasks_join_the_task_drivers_heartbeats_and_say_so() {
         engine.script().eager_capabilities,
         vec![
             Some(TaskCapabilities {
-                auto_heartbeat: true
+                auto_heartbeat: true,
+                ..Default::default()
             }),
             None
         ]

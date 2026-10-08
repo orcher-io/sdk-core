@@ -547,6 +547,7 @@ mod tests {
                 version: 0,
                 task_id: 0,
                 attributes: None,
+                ..Default::default()
             }],
             task_token: vec![],
             started_event_id: 1,
@@ -572,6 +573,7 @@ mod tests {
             version: 0,
             task_id: 0,
             attributes: None,
+            ..Default::default()
         }];
 
         let jobs = journal_to_jobs(&journal).unwrap();
@@ -593,7 +595,9 @@ mod tests {
             attributes: Some(Attributes::TimerFired(TimerFiredEventAttributes {
                 started_event_id: 0,
                 timer_id: "timer_5".to_string(),
+                ..Default::default()
             })),
+            ..Default::default()
         }];
 
         let jobs = journal_to_jobs(&journal).unwrap();

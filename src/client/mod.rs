@@ -13,4 +13,4 @@ pub mod workflow;
 
 pub use actor::CoreActorClient;
 pub use namespace::NamespaceClient;
-pub use workflow::{StartWorkflowOpts, WorkflowClient, WorkflowHandle};
+pub use workflow::{CancelWorkflowOpts, StartWorkflowOpts, WorkflowClient, WorkflowHandle};

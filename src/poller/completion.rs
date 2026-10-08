@@ -307,6 +307,9 @@ pub(crate) struct Caller {
     pub(crate) identity: String,
     pub(crate) api_key: Option<String>,
     pub(crate) organization_id: Option<String>,
+    /// Reported on workflow completions and failures; see
+    /// [`crate::worker_protocol`].
+    pub(crate) protocol_version: u32,
 }
 
 impl From<&WorkflowDriverConfig> for Caller {
@@ -316,6 +319,7 @@ impl From<&WorkflowDriverConfig> for Caller {
             identity: config.identity.clone(),
             api_key: config.api_key.clone(),
             organization_id: config.organization_id.clone(),
+            protocol_version: config.protocol_version,
         }
     }
 }
@@ -327,6 +331,8 @@ impl From<&TaskDriverConfig> for Caller {
             identity: config.identity.clone(),
             api_key: config.api_key.clone(),
             organization_id: config.organization_id.clone(),
+            // Task and actor reports carry no protocol version.
+            protocol_version: crate::WORKER_PROTOCOL_VERSION,
         }
     }
 }
@@ -338,6 +344,8 @@ impl From<&ActorDriverConfig> for Caller {
             identity: config.identity.clone(),
             api_key: config.api_key.clone(),
             organization_id: config.organization_id.clone(),
+            // Task and actor reports carry no protocol version.
+            protocol_version: crate::WORKER_PROTOCOL_VERSION,
         }
     }
 }
@@ -623,7 +631,10 @@ impl Completer {
                         .filter(|heartbeats| heartbeats.auto())
                         .map(|_| TaskCapabilities {
                             auto_heartbeat: true,
+                            ..Default::default()
                         }),
+                    protocol_version: self.caller.protocol_version,
+                    ..Default::default()
                 };
                 self.complete_or_fail_too_large(&workflow_id, &run_id, request)
                     .await;
@@ -650,8 +661,11 @@ impl Completer {
                         failure_type,
                         details: vec![],
                         non_retryable,
+                        ..Default::default()
                     }),
                     binary_checksum: vec![],
+                    protocol_version: self.caller.protocol_version,
+                    ..Default::default()
                 };
                 self.fail(&workflow_id, &run_id, request).await;
             }
@@ -857,6 +871,7 @@ impl Completer {
                     namespace: self.caller.namespace.clone(),
                     identity: self.caller.identity.clone(),
                     result,
+                    ..Default::default()
                 };
                 // A result too large to send fails the task instead, saying
                 // why. Sent anyway, it is refused on every attempt, and the
@@ -971,7 +986,9 @@ impl Completer {
                 failure_type,
                 details: vec![],
                 non_retryable,
+                ..Default::default()
             }),
+            ..Default::default()
         };
         let delivery = self
             .deliver(
@@ -1392,6 +1409,7 @@ fn without_payloads(
         task_token: request.task_token.clone(),
         stream_entry_id: request.stream_entry_id.clone(),
         eager_task_capabilities: request.eager_task_capabilities,
+        protocol_version: request.protocol_version,
         ..Default::default()
     }
 }
@@ -1418,8 +1436,11 @@ fn fail_workflow_instead(
                     failure_type: PAYLOAD_TOO_LARGE.to_string(),
                     details: vec![],
                     non_retryable: true,
+                    ..Default::default()
                 }),
+                ..Default::default()
             })),
+            ..Default::default()
         }],
         ..template
     }

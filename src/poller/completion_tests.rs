@@ -69,6 +69,9 @@ struct Script {
     poll_instance_ids: Vec<String>,
     /// The failures the failure reports carried, in order.
     failures: Vec<Failure>,
+    /// The worker protocol version each completion and failure report
+    /// carried, in order.
+    protocol_versions: Vec<u32>,
 }
 
 #[derive(Clone, Default)]
@@ -197,6 +200,7 @@ impl ExecutionService for Engine {
         let request = request.into_inner();
         let (delay, gate) = {
             let mut script = self.0.lock().unwrap();
+            script.protocol_versions.push(request.protocol_version);
             script.completes.push(Seen {
                 task_token: request.task_token,
                 stream_entry_id: Some(request.stream_entry_id),
@@ -216,6 +220,7 @@ impl ExecutionService for Engine {
     ) -> Result<Response<FailWorkflowExecutionResponse>, Status> {
         let request = request.into_inner();
         let mut script = self.0.lock().unwrap();
+        script.protocol_versions.push(request.protocol_version);
         script.fails.push(Seen {
             task_token: request.task_token,
             stream_entry_id: None,
@@ -270,7 +275,9 @@ impl ExecutionService for Engine {
         if script.old_engine {
             return Err(Status::unimplemented("unknown method"));
         }
-        Ok(Response::new(ReleaseWorkflowExecutionResponse {}))
+        Ok(Response::new(ReleaseWorkflowExecutionResponse {
+            ..Default::default()
+        }))
     }
     async fn shutdown_worker(
         &self,
@@ -281,7 +288,9 @@ impl ExecutionService for Engine {
         if script.old_engine {
             return Err(Status::unimplemented("unknown method"));
         }
-        Ok(Response::new(ShutdownWorkerResponse {}))
+        Ok(Response::new(ShutdownWorkerResponse {
+            ..Default::default()
+        }))
     }
 }
 
@@ -1941,6 +1950,7 @@ fn charged_activation(workflow_id: &str, token: &str) -> PollWorkflowExecutionRe
         version: 1,
         task_id: 0,
         attributes: Some(attributes),
+        ..Default::default()
     };
     PollWorkflowExecutionResponse {
         journal: vec![
@@ -2143,6 +2153,7 @@ fn three_rounds_activation(workflow_id: &str, token: &str) -> PollWorkflowExecut
                 version: 1,
                 task_id: 0,
                 attributes: Some(attributes),
+                ..Default::default()
             })
             .collect(),
         ..activation(workflow_id, token)
@@ -2431,7 +2442,9 @@ mod size_limits {
                 .unwrap()
                 .task_failures
                 .extend(request.into_inner().failure);
-            Ok(Response::new(FailTaskExecutionResponse {}))
+            Ok(Response::new(FailTaskExecutionResponse {
+                ..Default::default()
+            }))
         }
         async fn cancel_task_execution(
             &self,
@@ -2511,8 +2524,12 @@ mod size_limits {
             commands: vec![Command {
                 command_type: CommandType::CompleteWorkflow as i32,
                 attributes: Some(Attributes::CompleteWorkflow(
-                    CompleteWorkflowCommandAttributes { result },
+                    CompleteWorkflowCommandAttributes {
+                        result,
+                        ..Default::default()
+                    },
                 )),
+                ..Default::default()
             }],
             query_results: vec![],
             update_results: vec![],
@@ -2647,6 +2664,36 @@ mod size_limits {
         );
     }
 
+    /// Failing the workflow in place of a completion too large to send still
+    /// says which protocol the worker speaks: the engine reads it on the
+    /// activation the failure answers.
+    #[tokio::test]
+    async fn a_completion_replaced_for_its_size_keeps_the_protocol_version() {
+        let engine = SizeEngine::default();
+        let mut harness = completer_with_limit(&engine, 64 * 1024).await;
+        let mut caller = (*harness.completer.caller).clone();
+        caller.protocol_version = crate::worker_protocol::CANCEL_REQUEST;
+        harness.completer.caller = Arc::new(caller);
+
+        harness
+            .completer
+            .send(completing_with(vec![b'x'; 100 * 1024]))
+            .await;
+
+        let seen = engine.seen.lock().unwrap();
+        let [completion] = seen.completions.as_slice() else {
+            panic!("expected one completion, got {}", seen.completions.len());
+        };
+        assert!(
+            failed_with(completion).is_some(),
+            "the workflow was not failed"
+        );
+        assert_eq!(
+            completion.protocol_version,
+            crate::worker_protocol::CANCEL_REQUEST
+        );
+    }
+
     /// A workflow completion the engine refuses as too large is followed by
     /// one that fails the workflow, instead of the activation being handed
     /// out again to be refused again.
@@ -2710,4 +2757,82 @@ mod size_limits {
         shutdown.shutdown();
         let _ = tokio::time::timeout(Duration::from_secs(5), running).await;
     }
+}
+
+fn reports_for(workflow_id: &str) -> [Report; 2] {
+    [
+        Report::Complete {
+            workflow_id: workflow_id.into(),
+            run_id: "exec-1".into(),
+            token: b"act1.tok".to_vec(),
+            stream_entry_id: "act1.tok".into(),
+            commands: vec![],
+            query_results: vec![],
+            update_results: vec![],
+        },
+        Report::Fail {
+            workflow_id: workflow_id.into(),
+            run_id: "exec-1".into(),
+            token: b"act2.tok".to_vec(),
+            message: "boom".into(),
+            failure_type: "WorkflowExecutionError".into(),
+            non_retryable: false,
+        },
+    ]
+}
+
+/// Workflow completions and failure reports carry the worker protocol
+/// version the language SDK configured: the engine reads it on each
+/// activation to decide whether workflow code saw a cancellation request.
+#[tokio::test]
+async fn workflow_reports_carry_the_configured_protocol_version() {
+    let engine = Engine::default();
+    let addr = serve(engine.clone()).await;
+    let url = format!("http://{addr}");
+    let (_shutdown, shutdown_rx) = watch::channel(false);
+    let config = WorkflowDriverConfig {
+        server_url: url.clone(),
+        protocol_version: crate::worker_protocol::CANCEL_REQUEST,
+        ..WorkflowDriverConfig::default()
+    };
+    let completer = Completer {
+        caller: Arc::new(Caller::from(&config)),
+        channel_manager: Arc::new(ChannelManager::new(url)),
+        retry: quick(),
+        shutdown: shutdown_rx,
+        eager_task_injector: None,
+        heartbeats: None,
+    };
+
+    for report in reports_for("wf-1") {
+        completer.send(report).await;
+    }
+
+    assert_eq!(
+        engine.0.lock().unwrap().protocol_versions,
+        vec![crate::worker_protocol::CANCEL_REQUEST; 2]
+    );
+}
+
+/// Unless the language SDK says otherwise, a worker reports the baseline:
+/// it promises nothing about cancellation requests, so the engine keeps
+/// ending a cancelled run at once.
+#[tokio::test]
+async fn workflow_reports_default_to_the_baseline_protocol_version() {
+    let engine = Engine::default();
+    let addr = serve(engine.clone()).await;
+    let harness = completer_for(format!("http://{addr}"), quick());
+
+    for report in reports_for("wf-1") {
+        harness.completer.send(report).await;
+    }
+
+    assert_eq!(
+        engine.0.lock().unwrap().protocol_versions,
+        vec![crate::worker_protocol::BASELINE; 2]
+    );
+    assert_eq!(
+        crate::WORKER_PROTOCOL_VERSION,
+        crate::worker_protocol::BASELINE
+    );
 }

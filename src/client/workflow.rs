@@ -171,6 +171,49 @@ impl StartWorkflowOpts {
     }
 }
 
+/// Options for cancelling a workflow.
+///
+/// The struct is `#[non_exhaustive]` so that adding an option is not a
+/// breaking change. Start from [`CancelWorkflowOpts::default`] and the
+/// `with_*` methods.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct CancelWorkflowOpts {
+    /// How long the workflow may spend cleaning up after it observes the
+    /// cancellation, after which the engine terminates it.
+    ///
+    /// `None` sets no limit; terminating the workflow stops it at any time.
+    /// An engine that does not deliver cancellation to workflow code ignores
+    /// it and ends the run at once.
+    pub cleanup_timeout: Option<Duration>,
+}
+
+impl CancelWorkflowOpts {
+    /// Terminates the workflow if its cleanup takes longer than `timeout`.
+    pub fn with_cleanup_timeout(mut self, timeout: Duration) -> Self {
+        self.cleanup_timeout = Some(timeout);
+        self
+    }
+}
+
+/// The request cancelling `workflow_id` in `namespace` with `opts`.
+fn cancel_request(
+    namespace: &str,
+    workflow_id: &str,
+    run_id: Option<String>,
+    opts: CancelWorkflowOpts,
+) -> CancelWorkflowRequest {
+    CancelWorkflowRequest {
+        workflow_id: workflow_id.to_string(),
+        execution_id: run_id.unwrap_or_default(),
+        namespace: namespace.to_string(),
+        reason: String::new(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        cleanup_timeout: opts.cleanup_timeout.map(to_proto_duration),
+        ..Default::default()
+    }
+}
+
 /// Maps a refused start to an error.
 ///
 /// ALREADY_EXISTS is the one refusal a start can attribute to its workflow: it
@@ -441,6 +484,7 @@ impl WorkflowClient {
                     seconds: window.as_secs() as i64,
                     nanos: 0,
                 }),
+                ..Default::default()
             };
 
             let inner = match self.client.clone().get_workflow_result(request).await {
@@ -619,6 +663,7 @@ impl WorkflowClient {
             start_delay: None,
             schedule_config: None,
             workflow_id_reuse_policy: 0,
+            ..Default::default()
         };
         self.start_workflow_request(request).await
     }
@@ -689,6 +734,7 @@ impl WorkflowClient {
             start_delay: None,
             schedule_config: None,
             workflow_id_reuse_policy: opts.id_reuse_policy.map_or(0, |p| p as i32),
+            ..Default::default()
         };
         self.start_workflow_request(request).await
     }
@@ -709,6 +755,7 @@ impl WorkflowClient {
 
         let batch_request = BatchStartWorkflowRequest {
             workflows: requests.clone(),
+            ..Default::default()
         };
 
         let response = self
@@ -758,6 +805,7 @@ impl WorkflowClient {
             event_name: event_name.into(),
             payload: input_bytes,
             request_id: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
         };
 
         self.client
@@ -796,6 +844,7 @@ impl WorkflowClient {
             namespace: self.namespace.clone(),
             query_type: query_name.into(),
             query_args: args_bytes,
+            ..Default::default()
         };
 
         let response = self
@@ -845,6 +894,7 @@ impl WorkflowClient {
             update_type: update_name.into(),
             args: args_bytes,
             update_id: String::new(),
+            ..Default::default()
         };
 
         let response = self
@@ -884,6 +934,7 @@ impl WorkflowClient {
             workflow_id: workflow_id.clone(),
             execution_id: run_id.unwrap_or_default(),
             namespace: self.namespace.clone(),
+            ..Default::default()
         };
 
         let response = self
@@ -907,14 +958,26 @@ impl WorkflowClient {
         workflow_id: impl Into<String>,
         run_id: Option<String>,
     ) -> Result<()> {
+        self.cancel_workflow_with(workflow_id, run_id, CancelWorkflowOpts::default())
+            .await
+    }
+
+    /// Requests cancellation of a workflow execution with the options in
+    /// [`CancelWorkflowOpts`].
+    ///
+    /// # Arguments
+    ///
+    /// * `workflow_id` - ID of the workflow to cancel
+    /// * `run_id` - Optional run ID
+    /// * `opts` - How the cancellation is carried out
+    pub async fn cancel_workflow_with(
+        &self,
+        workflow_id: impl Into<String>,
+        run_id: Option<String>,
+        opts: CancelWorkflowOpts,
+    ) -> Result<()> {
         let workflow_id: String = workflow_id.into();
-        let request = CancelWorkflowRequest {
-            workflow_id: workflow_id.clone(),
-            execution_id: run_id.unwrap_or_default(),
-            namespace: self.namespace.clone(),
-            reason: String::new(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-        };
+        let request = cancel_request(&self.namespace, &workflow_id, run_id, opts);
 
         self.client
             .clone()
@@ -944,6 +1007,7 @@ impl WorkflowClient {
             workflow_id: workflow_id.clone(),
             execution_id: run_id.unwrap_or_default(),
             namespace: self.namespace.clone(),
+            ..Default::default()
         };
 
         let response = self
@@ -1011,6 +1075,7 @@ impl WorkflowClient {
             start_time_begin: None,
             start_time_end: None,
             sort_order: options.sort_order.map(i32::from).unwrap_or(0),
+            ..Default::default()
         };
 
         let response = self
@@ -1065,6 +1130,7 @@ impl WorkflowClient {
             next_page_token: options.next_page_token,
             query: query.into(),
             sort_fields: vec![],
+            ..Default::default()
         };
 
         let response = self
@@ -1101,6 +1167,7 @@ impl WorkflowClient {
             namespace: self.namespace.clone(),
             reason: reason.into(),
             details: vec![],
+            ..Default::default()
         };
 
         self.client
@@ -1129,6 +1196,7 @@ impl WorkflowClient {
             namespace: self.namespace.clone(),
             target_event_id,
             reason: reason.into(),
+            ..Default::default()
         };
 
         let response = self
@@ -1305,10 +1373,17 @@ impl WorkflowHandle {
 
     /// Requests cancellation of this workflow.
     pub async fn cancel(&self) -> Result<()> {
+        self.cancel_with(CancelWorkflowOpts::default()).await
+    }
+
+    /// Requests cancellation of this workflow with the options in
+    /// [`CancelWorkflowOpts`].
+    pub async fn cancel_with(&self, opts: CancelWorkflowOpts) -> Result<()> {
         self.client
-            .cancel_workflow(
+            .cancel_workflow_with(
                 &self.execution.workflow_id,
                 Some(self.execution.run_id.clone()),
+                opts,
             )
             .await
     }
@@ -1408,6 +1483,34 @@ mod tests {
             organization_id: None,
         };
         assert!(auth.call(tonic::Request::new(())).is_err());
+    }
+
+    #[test]
+    fn a_cancellation_sets_no_cleanup_limit_by_default() {
+        let request = cancel_request("ns", "order-1", None, CancelWorkflowOpts::default());
+        assert_eq!(request.workflow_id, "order-1");
+        assert_eq!(request.namespace, "ns");
+        assert_eq!(request.execution_id, "");
+        assert_eq!(request.cleanup_timeout, None);
+        assert!(!request.request_id.is_empty());
+    }
+
+    #[test]
+    fn a_cancellation_carries_its_cleanup_limit() {
+        let request = cancel_request(
+            "ns",
+            "order-1",
+            Some("run-1".into()),
+            CancelWorkflowOpts::default().with_cleanup_timeout(Duration::from_millis(90_500)),
+        );
+        assert_eq!(request.execution_id, "run-1");
+        assert_eq!(
+            request.cleanup_timeout,
+            Some(prost_types::Duration {
+                seconds: 90,
+                nanos: 500_000_000,
+            })
+        );
     }
 
     #[test]

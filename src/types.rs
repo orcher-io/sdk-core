@@ -59,6 +59,7 @@ impl From<WorkflowExecution> for proto::WorkflowExecution {
         Self {
             workflow_id: exec.workflow_id,
             execution_id: exec.run_id,
+            ..Default::default()
         }
     }
 }
@@ -249,6 +250,7 @@ impl From<RetryPolicy> for proto::RetryPolicy {
             }),
             maximum_attempts: policy.max_attempts,
             non_retryable_error_types: policy.non_retryable_error_types,
+            ..Default::default()
         }
     }
 }
@@ -314,6 +316,7 @@ impl From<Failure> for proto::Failure {
             failure_type: failure.error_type,
             details: vec![],
             non_retryable: false,
+            ..Default::default()
         }
     }
 }
@@ -378,6 +381,7 @@ impl From<Header> for proto::Header {
     fn from(header: Header) -> Self {
         Self {
             fields: header.fields,
+            ..Default::default()
         }
     }
 }

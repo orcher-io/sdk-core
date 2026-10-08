@@ -499,6 +499,7 @@ async fn send(
             namespace: registry.caller.namespace.clone(),
             identity: registry.caller.identity.clone(),
             details: details.unwrap_or_default(),
+            ..Default::default()
         },
         registry.caller.api_key.as_deref(),
         registry.caller.organization_id.as_deref(),

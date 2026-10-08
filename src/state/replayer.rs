@@ -979,6 +979,7 @@ mod tests {
             version: 1,
             task_id: 0,
             attributes: None,
+            ..Default::default()
         }
     }
 
@@ -1004,8 +1005,10 @@ mod tests {
                     annotations: Default::default(),
                     labels: Default::default(),
                     started_by: "test".to_string(),
+                    ..Default::default()
                 },
             )),
+            ..Default::default()
         }
     }
 
@@ -1225,6 +1228,7 @@ mod tests {
                     version: 1,
                     task_id: 0,
                     attributes: Some(attributes),
+                    ..Default::default()
                 }
             }))
             .collect()

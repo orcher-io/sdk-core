@@ -89,6 +89,7 @@ impl CoreActorClient {
             timeout_ms: timeout_ms.unwrap_or(0),
             idempotency_key: idempotency_key.unwrap_or_default(),
             metadata: HashMap::new(),
+            ..Default::default()
         };
 
         let response = self

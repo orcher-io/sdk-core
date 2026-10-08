@@ -103,6 +103,7 @@ pub(crate) async fn announce_shutdown(
         identity: caller.identity.clone(),
         worker_instance_id: worker_instance_id().to_string(),
         task_queues,
+        ..Default::default()
     };
     let sent = tokio::time::timeout(timeout, async {
         // Respect the breaker: a connection known to be down is not worth
@@ -212,6 +213,7 @@ pub(crate) async fn release_on(
         namespace: namespace.to_string(),
         identity: identity.to_string(),
         task_token: leftover.token.clone(),
+        ..Default::default()
     };
     let mut request =
         crate::poller::credentials::credentialed_request(body, api_key, organization_id);
