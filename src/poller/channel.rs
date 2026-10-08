@@ -371,7 +371,7 @@ impl ChannelManager {
                 Err(Unconnected::Failed(Error::connection(format!(
                     "Failed to connect to {}: {} (next retry after {:?})",
                     self.server_url,
-                    e,
+                    crate::error::with_causes(&e),
                     state
                         .next_retry_at
                         .map(|t| t.saturating_duration_since(Instant::now()))
@@ -436,6 +436,12 @@ impl ChannelManager {
 /// plaintext and fail at the handshake with a bare "transport error", just
 /// after the driver had logged that it was connected.
 ///
+/// An `https://` address with no `tls` gets TLS verified against the system
+/// trust store, as tonic's `Endpoint::new` would do; `Endpoint::from_shared`,
+/// used here, does not, and would fail with "Connecting to HTTPS without TLS
+/// enabled". An `http://` address stays plaintext, with or without `tls`:
+/// tonic only negotiates TLS for the `https` scheme.
+///
 /// # Errors
 ///
 /// Returns `Error::configuration` if `server_url` is not a valid address or
@@ -452,6 +458,16 @@ pub fn build_endpoint(
         })?
         .connect_timeout(connect_timeout)
         .timeout(rpc_timeout);
+
+    let native_roots_only;
+    let tls = match tls {
+        Some(tls) => Some(tls),
+        None if is_https(&endpoint) => {
+            native_roots_only = TlsConfig::new();
+            Some(&native_roots_only)
+        }
+        None => None,
+    };
 
     if let Some(tls) = tls {
         // A custom CA pins verification to a private authority. Without one,
@@ -481,6 +497,14 @@ pub fn build_endpoint(
     Ok(endpoint)
 }
 
+/// Whether the endpoint's address uses the `https` scheme.
+fn is_https(endpoint: &Endpoint) -> bool {
+    endpoint
+        .uri()
+        .scheme_str()
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+}
+
 /// Connects to the server with the given TLS settings and the default timeouts.
 ///
 /// Pollers call this to open their own channel. It shares the manager's code
@@ -499,7 +523,13 @@ pub async fn connect_channel(server_url: &str, tls: Option<&TlsConfig>) -> Resul
     )?
     .connect()
     .await
-    .map_err(|e| Error::connection(format!("Failed to connect to {}: {}", server_url, e)))
+    .map_err(|e| {
+        Error::connection(format!(
+            "Failed to connect to {}: {}",
+            server_url,
+            crate::error::with_causes(&e)
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -533,6 +563,75 @@ mod connect_tests {
         )
         .expect_err("must fail");
         assert!(err.to_string().contains("Invalid server address"), "{err}");
+    }
+
+    /// Connects to a bare TCP listener and returns the first bytes the client
+    /// sent, which tell a TLS ClientHello from an HTTP/2 preface.
+    async fn first_bytes_sent(scheme: &str, tls: Option<&TlsConfig>) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16];
+            let n = socket.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            buf
+        });
+        let endpoint = build_endpoint(
+            &format!("{scheme}://localhost:{port}"),
+            tls,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .expect("endpoint builds");
+        // The listener hangs up after reading, so the connect itself fails;
+        // only what reached the wire matters here.
+        let _ = endpoint.connect().await;
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("the client wrote something")
+            .unwrap()
+    }
+
+    /// A TLS record starts with content type 22 (handshake).
+    const TLS_HANDSHAKE: u8 = 0x16;
+
+    #[tokio::test]
+    async fn an_https_address_without_tls_config_still_speaks_tls() {
+        let sent = first_bytes_sent("https", None).await;
+        assert_eq!(sent.first(), Some(&TLS_HANDSHAKE), "sent {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn an_uppercase_https_scheme_also_speaks_tls() {
+        let sent = first_bytes_sent("HTTPS", None).await;
+        assert_eq!(sent.first(), Some(&TLS_HANDSHAKE), "sent {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn an_http_address_without_tls_config_stays_plaintext() {
+        let sent = first_bytes_sent("http", None).await;
+        assert!(sent.starts_with(b"PRI * HTTP/2.0"), "sent {sent:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_tls_handshake_says_why() {
+        // A listener that hangs up instead of answering the ClientHello.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+        let err = connect_channel(&format!("https://localhost:{port}"), None)
+            .await
+            .expect_err("must fail");
+        let text = err.to_string();
+        // Not just tonic's bare "transport error": the cause follows it.
+        let after = text.split("transport error").nth(1).unwrap_or_default();
+        assert!(after.starts_with(": ") && after.len() > 2, "{text}");
     }
 
     #[tokio::test]
