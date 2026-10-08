@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.0](https://github.com/orcher-io/sdk-core/compare/v0.9.2...v0.10.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* `orcher_sdk_core::proto` now re-exports orcher-proto 0.2, so a crate that also depends on orcher-proto directly moves to 0.2 with it.
+
+### Features
+
+* build against orcher-proto 0.2, with a cancellation cleanup limit and the worker protocol version ([#20](https://github.com/orcher-io/sdk-core/issues/20)) ([fd8cf1a](https://github.com/orcher-io/sdk-core/commit/fd8cf1ab851d856af6af86638e9d77a6419fc2c3))
+
 ## [0.9.2](https://github.com/orcher-io/sdk-core/compare/v0.9.1...v0.9.2) (2026-10-08)
 
 
