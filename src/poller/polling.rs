@@ -335,6 +335,7 @@ impl WorkflowExecutionPoller {
             // Which process this is, so a shutdown it announces stops its own
             // polls and not those of a later process reusing its identity.
             worker_instance_id: super::lifecycle::worker_instance_id().to_string(),
+            ..Default::default()
         };
 
         let poller = Self {
@@ -846,8 +847,10 @@ impl TaskExecutionPoller {
             task_capabilities: config.auto_heartbeat.then_some(
                 crate::proto::orcher::v1::TaskCapabilities {
                     auto_heartbeat: true,
+                    ..Default::default()
                 },
             ),
+            ..Default::default()
         };
 
         let poller = Self {
@@ -1319,6 +1322,7 @@ impl ActorOperationPoller {
             service_id: config.service_id.clone(),
             max_operations: config.max_operations,
             timeout_ms: config.poll_timeout_ms,
+            ..Default::default()
         };
 
         Ok(Self {

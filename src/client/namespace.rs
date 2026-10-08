@@ -117,7 +117,10 @@ impl NamespaceClient {
     pub async fn get_namespace(&self, name: impl Into<String>) -> Result<NamespaceInfo> {
         let mut client = self.client.clone();
         let response = client
-            .get_namespace(GetNamespaceRequest { name: name.into() })
+            .get_namespace(GetNamespaceRequest {
+                name: name.into(),
+                ..Default::default()
+            })
             .await
             .map_err(|e| Error::internal(format!("Failed to get namespace: {}", e)))?;
 
@@ -140,6 +143,7 @@ impl NamespaceClient {
             .list_namespaces(ListNamespacesRequest {
                 page_size,
                 page_offset,
+                ..Default::default()
             })
             .await
             .map_err(|e| Error::internal(format!("Failed to list namespaces: {}", e)))?;
@@ -179,7 +183,10 @@ impl NamespaceClient {
     pub async fn deprecate_namespace(&self, name: impl Into<String>) -> Result<NamespaceInfo> {
         let mut client = self.client.clone();
         let response = client
-            .deprecate_namespace(DeprecateNamespaceRequest { name: name.into() })
+            .deprecate_namespace(DeprecateNamespaceRequest {
+                name: name.into(),
+                ..Default::default()
+            })
             .await
             .map_err(|e| Error::internal(format!("Failed to deprecate namespace: {}", e)))?;
 
@@ -196,7 +203,10 @@ impl NamespaceClient {
     pub async fn delete_namespace(&self, name: impl Into<String>) -> Result<()> {
         let mut client = self.client.clone();
         client
-            .delete_namespace(DeleteNamespaceRequest { name: name.into() })
+            .delete_namespace(DeleteNamespaceRequest {
+                name: name.into(),
+                ..Default::default()
+            })
             .await
             .map_err(|e| Error::internal(format!("Failed to delete namespace: {}", e)))?;
         Ok(())

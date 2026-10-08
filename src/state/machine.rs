@@ -261,8 +261,10 @@ impl WorkflowStateMachine {
                     heartbeat_timeout: None,
                     retry_policy: None,
                     headers: std::collections::HashMap::new(),
+                    ..Default::default()
                 },
             )),
+            ..Default::default()
         };
 
         self.add_command(command);
@@ -281,8 +283,10 @@ impl WorkflowStateMachine {
                         seconds: fire_after_seconds,
                         nanos: 0,
                     }),
+                    ..Default::default()
                 },
             )),
+            ..Default::default()
         };
 
         self.add_command(command);
@@ -295,8 +299,12 @@ impl WorkflowStateMachine {
         let command = proto::Command {
             command_type: CommandType::CompleteWorkflow as i32,
             attributes: Some(proto::command::Attributes::CompleteWorkflow(
-                proto::CompleteWorkflowCommandAttributes { result },
+                proto::CompleteWorkflowCommandAttributes {
+                    result,
+                    ..Default::default()
+                },
             )),
+            ..Default::default()
         };
 
         self.add_command(command);
@@ -312,8 +320,10 @@ impl WorkflowStateMachine {
             attributes: Some(proto::command::Attributes::FailWorkflow(
                 proto::FailWorkflowCommandAttributes {
                     failure: Some(failure),
+                    ..Default::default()
                 },
             )),
+            ..Default::default()
         };
 
         self.add_command(command);
@@ -473,6 +483,7 @@ mod tests {
             version: 0,
             task_id: 0,
             attributes: None,
+            ..Default::default()
         }
     }
 

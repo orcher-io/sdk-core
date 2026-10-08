@@ -189,6 +189,14 @@ pub struct WorkflowDriverConfig {
     /// [`non_determinism_retry`](Self::non_determinism_retry). Default: one
     /// minute.
     pub non_determinism_retry_max: Duration,
+
+    /// The worker protocol version reported on every workflow completion and
+    /// failure; see [`crate::worker_protocol`]. Default:
+    /// [`crate::WORKER_PROTOCOL_VERSION`].
+    ///
+    /// The engine reads it on the activation it answers, so it must match
+    /// what the language SDK really does with every activation it is given.
+    pub protocol_version: u32,
 }
 
 impl Default for WorkflowDriverConfig {
@@ -210,6 +218,7 @@ impl Default for WorkflowDriverConfig {
             max_message_bytes: crate::limits::default_max_message_bytes(),
             non_determinism_retry: Duration::from_secs(2),
             non_determinism_retry_max: Duration::from_secs(60),
+            protocol_version: crate::WORKER_PROTOCOL_VERSION,
         }
     }
 }
@@ -1275,10 +1284,13 @@ impl WorkflowDriver {
                                 failure_type: f.failure_type,
                                 details: vec![],
                                 non_retryable: false,
+                                ..Default::default()
                             }),
                             execution_attempt: cmd.execution_attempt,
+                            ..Default::default()
                         },
                     )),
+                    ..Default::default()
                 },
 
                 BridgeCommand::ScheduleTask(cmd) => {
@@ -1294,6 +1306,7 @@ impl WorkflowDriver {
                         }),
                         maximum_attempts: rp.max_attempts as i32,
                         non_retryable_error_types: rp.non_retryable_errors.clone(),
+                        ..Default::default()
                     });
 
                     let headers = cmd
@@ -1340,7 +1353,9 @@ impl WorkflowDriver {
                             }),
                             retry_policy,
                             headers,
+                            ..Default::default()
                         })),
+                        ..Default::default()
                     }
                 }
 
@@ -1352,14 +1367,18 @@ impl WorkflowDriver {
                             seconds: cmd.duration.as_secs() as i64,
                             nanos: (cmd.duration.as_nanos() % 1_000_000_000) as i32,
                         }),
+                        ..Default::default()
                     })),
+                    ..Default::default()
                 },
 
                 BridgeCommand::CancelTimer(cmd) => ProtoCommand {
                     command_type: CommandType::CancelTimer as i32,
                     attributes: Some(Attributes::CancelTimer(CancelTimerCommandAttributes {
                         timer_id: cmd.timer_id,
+                        ..Default::default()
                     })),
+                    ..Default::default()
                 },
 
                 BridgeCommand::CompleteWorkflow(cmd) => ProtoCommand {
@@ -1367,8 +1386,10 @@ impl WorkflowDriver {
                     attributes: Some(Attributes::CompleteWorkflow(
                         CompleteWorkflowCommandAttributes {
                             result: cmd.result.data,
+                            ..Default::default()
                         },
                     )),
+                    ..Default::default()
                 },
 
                 BridgeCommand::FailWorkflow(cmd) => ProtoCommand {
@@ -1382,8 +1403,11 @@ impl WorkflowDriver {
                             failure_type: cmd.error_type,
                             details: cmd.details.map(|d| d.data).unwrap_or_default(),
                             non_retryable: false,
+                            ..Default::default()
                         }),
+                        ..Default::default()
                     })),
+                    ..Default::default()
                 },
 
                 BridgeCommand::CancelWorkflowExecution(cmd) => ProtoCommand {
@@ -1391,8 +1415,10 @@ impl WorkflowDriver {
                     attributes: Some(Attributes::CancelWorkflow(
                         CancelWorkflowCommandAttributes {
                             details: cmd.details.map(|d| d.data).unwrap_or_default(),
+                            ..Default::default()
                         },
                     )),
+                    ..Default::default()
                 },
 
                 BridgeCommand::RestartFresh(cmd) => ProtoCommand {
@@ -1418,7 +1444,9 @@ impl WorkflowDriver {
                         retry_policy: None,
                         annotations: Default::default(),
                         labels: Default::default(),
+                        ..Default::default()
                     })),
+                    ..Default::default()
                 },
 
                 // WaitForEvent is a client-side parking hint with no proto command.
@@ -1436,7 +1464,9 @@ impl WorkflowDriver {
                             event_name: cmd.event_name,
                             payload,
                             headers: Default::default(),
+                            ..Default::default()
                         })),
+                        ..Default::default()
                     }
                 }
 
@@ -1481,8 +1511,10 @@ impl WorkflowDriver {
                                 namespace: self.config.namespace.clone(),
                                 annotations: Default::default(),
                                 labels: Default::default(),
+                                ..Default::default()
                             },
                         )),
+                        ..Default::default()
                     }
                 }
 
@@ -1492,8 +1524,10 @@ impl WorkflowDriver {
                         CancelChildWorkflowCommandAttributes {
                             workflow_id: cmd.workflow_id,
                             run_id: cmd.run_id,
+                            ..Default::default()
                         },
                     )),
+                    ..Default::default()
                 },
 
                 other => {
@@ -1537,6 +1571,7 @@ impl WorkflowDriver {
                     query_id: resp.query_id.clone(),
                     result_type,
                     result,
+                    ..Default::default()
                 }
             })
             .collect()
@@ -1569,6 +1604,7 @@ impl WorkflowDriver {
                     update_id: resp.update_id.clone(),
                     result_type,
                     result,
+                    ..Default::default()
                 }
             })
             .collect()
@@ -2821,6 +2857,7 @@ impl ActorDriver {
             error_message,
             error_code: String::new(),
             duration_ms: 0,
+            ..Default::default()
         }
     }
 
@@ -2854,7 +2891,9 @@ impl ActorDriver {
                 avg_duration_ms: 0.0,
                 cpu_usage: 0.0,
                 memory_usage_bytes: 0,
+                ..Default::default()
             }),
+            ..Default::default()
         };
 
         // Heartbeats are periodic, so a failed one is not retried: the next

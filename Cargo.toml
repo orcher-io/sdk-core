@@ -12,7 +12,9 @@ categories = ["asynchronous", "network-programming"]
 
 [dependencies]
 # Protocol definitions
-orcher-proto = "0.1"
+# Pinned to the protos commit that becomes orcher-proto 0.2.0 until that is
+# published; then this becomes `orcher-proto = "0.2"`.
+orcher-proto = { git = "https://github.com/orcher-io/protos", rev = "fa43abb582c444a3c33faa7e724b48734e9348e7" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

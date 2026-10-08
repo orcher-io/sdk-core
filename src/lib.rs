@@ -1,4 +1,8 @@
 #![allow(clippy::result_large_err)]
+// Protocol messages are built with `..Default::default()` even when every
+// field is set today: a field added to the protocol then leaves an older
+// release of this crate building, sending the field unset.
+#![allow(clippy::needless_update)]
 //! # ORCHER SDK Core
 //!
 //! The shared engine behind the ORCHER language SDKs. It handles:
@@ -172,6 +176,36 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The namespace used when none is configured.
 pub const DEFAULT_NAMESPACE: &str = "default";
+
+/// Worker protocol versions, numbered as in the protocol's
+/// `WorkerCapabilities.protocol_version`.
+///
+/// A worker reports its version when it registers and on every workflow
+/// completion and failure, so the engine only asks of it what it can handle.
+/// What a version promises covers the whole worker, the language SDK on top
+/// of this crate included, so the language SDK chooses it:
+/// [`WorkflowDriverConfig::protocol_version`] and
+/// [`WorkerRegistrationConfig::protocol_version`].
+pub mod worker_protocol {
+    /// What every worker from before protocol versions handles.
+    pub const BASELINE: u32 = 0;
+
+    /// The worker hands a workflow cancellation request in the journal
+    /// ([`crate::bridge::RequestJob::CancelWorkflow`]) to workflow code,
+    /// letting the workflow clean up before it ends.
+    ///
+    /// Report it only once workflow code really sees the request. The engine
+    /// then waits for the workflow to end itself, so a worker that reports it
+    /// and drops the request leaves a cancelled run running until it is
+    /// terminated or its cleanup limit passes. Below it, the engine ends the
+    /// run as cancelled at once, as it did before cancellation requests.
+    pub const CANCEL_REQUEST: u32 = 1;
+}
+
+/// The worker protocol version reported unless the language SDK sets one:
+/// [`worker_protocol::BASELINE`], which is what this crate guarantees on its
+/// own.
+pub const WORKER_PROTOCOL_VERSION: u32 = worker_protocol::BASELINE;
 
 /// Default timeout for a long-poll request, in seconds.
 ///
