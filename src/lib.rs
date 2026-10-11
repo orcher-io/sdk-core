@@ -70,6 +70,7 @@
 //!   worker/
 //!     drivers/   workflow, task, actor and registration drivers: the API for language SDKs
 //!     poll/      long-polling, and reporting results (eager tasks included)
+//!     governor/  each driver's slots, and the reports it still has in flight
 //!     heartbeat, lifecycle, metrics
 //!   transport/   gRPC channels and TLS, credentials, message size limits
 //!   client/      start, query and manage workflows, namespaces and actors

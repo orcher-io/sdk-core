@@ -11,6 +11,7 @@
 //! handlers, and sends the results back. Core handles all gRPC communication.
 
 pub mod drivers;
+pub(crate) mod governor;
 pub mod heartbeat;
 mod lifecycle;
 pub mod metrics;

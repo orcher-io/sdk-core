@@ -11,13 +11,14 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::PollTaskExecutionResponse;
 use crate::transport::channel::ChannelManager;
+use crate::worker::governor::{InFlight, SlotBudget, SlotPermit};
 use crate::worker::heartbeat::{TaskHeartbeat, TaskHeartbeats};
 use crate::worker::poll::completion::{
     Caller, Completer, CompletionRetryConfig, TaskIds, TaskReport,
 };
 use crate::worker::poll::polling::{PollerConfig, TaskExecutionPoller, TaskExecutionTask};
 
-use super::{announce_shutdown, InFlight, ShutdownHandle};
+use super::{announce_shutdown, ShutdownHandle};
 
 /// Convert an eagerly returned `PollTaskExecutionResponse` into a `TaskWork`.
 ///
@@ -476,12 +477,10 @@ impl TaskDriver {
             "Starting task driver"
         );
 
-        let slots = Arc::new(tokio::sync::Semaphore::new(
-            self.completion_retry
-                .max_in_flight
-                .unwrap_or(self.config.max_concurrent_executions)
-                .max(1),
-        ));
+        let slots = SlotBudget::for_reports(
+            self.completion_retry.max_in_flight,
+            self.config.max_concurrent_executions,
+        );
         // Each report is sent from its own task. Sent inline, one report
         // being retried, or merely slow to be answered, would hold up every
         // other result and the hand-off of every polled task behind it.
@@ -518,7 +517,7 @@ impl TaskDriver {
         // before a polled task is taken. While every slot is held by a report
         // still being sent, neither is taken, so the language SDK and the
         // pollers wait instead of the backlog growing.
-        let mut slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
+        let mut slot: Option<SlotPermit> = None;
         // Room in the work channel, reserved before a polled task is taken.
         // Nothing in this loop may wait on a send: a full work channel would
         // stop it reading results, and a language SDK that frees room for
@@ -577,8 +576,8 @@ impl TaskDriver {
                     break;
                 }
 
-                permit = Arc::clone(&slots).acquire_owned(), if slot.is_none() => {
-                    slot = permit.ok();
+                permit = slots.acquire(), if slot.is_none() => {
+                    slot = Some(permit);
                 }
 
                 reserved = self.work_sender.clone().reserve_owned(),
@@ -634,7 +633,7 @@ impl TaskDriver {
                 }
 
                 // Reap finished reports so the set does not grow without bound.
-                Some(finished) = in_flight.set.join_next(), if !in_flight.set.is_empty() => {
+                Some(finished) = in_flight.join_next(), if !in_flight.is_empty() => {
                     in_flight.reaped(finished);
                 }
             }
