@@ -423,4 +423,59 @@ mod tests {
             assert_eq!(value, (i + 1) as i32);
         }
     }
+
+    /// Every float comes back as the same number, bit for bit, both as a
+    /// typed value and inside a `serde_json::Value`. Without serde_json's
+    /// float_roundtrip, about a third of all f64 values came back one unit in
+    /// the last place off.
+    #[test]
+    fn floats_round_trip_exactly() {
+        let converter = JsonPayloadConverter::new();
+        let mut values = vec![
+            0.1 + 0.2,
+            1.0715660391465826e-75,
+            -1.81996730402717e-179,
+            -1.603964615428183e143,
+            f64::MIN_POSITIVE,
+            5e-324,
+            f64::MAX,
+            f64::MIN,
+            f64::EPSILON,
+            9007199254740993.0,
+            -0.0,
+        ];
+        // A spread of bit patterns, reproducibly.
+        let mut bits: u64 = 0x9E37_79B9_7F4A_7C15;
+        while values.len() < 10_000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            let value = f64::from_bits(bits);
+            if value.is_finite() {
+                values.push(value);
+            }
+        }
+
+        for value in values {
+            let back: f64 = converter
+                .from_payload(&converter.to_payload(&value).unwrap())
+                .unwrap();
+            assert_eq!(
+                back.to_bits(),
+                value.to_bits(),
+                "{value:e} came back as {back:e}"
+            );
+
+            let wrapped = serde_json::json!({ "amount": value });
+            let back: serde_json::Value = converter
+                .from_payload(&converter.to_payload(&wrapped).unwrap())
+                .unwrap();
+            let back = back["amount"].as_f64().unwrap();
+            assert_eq!(
+                back.to_bits(),
+                value.to_bits(),
+                "{value:e} came back as {back:e} in a Value"
+            );
+        }
+    }
 }
