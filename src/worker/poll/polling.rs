@@ -40,7 +40,7 @@ use crate::proto::orcher::v1::{
 use crate::types::WorkflowExecution;
 
 /// Configuration for a poller.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct PollerConfig {
     /// Namespace to poll from.
@@ -104,6 +104,39 @@ pub struct PollerConfig {
     /// The largest message the poller receives, and tells the engine it can
     /// receive. [`crate::transport::limits::default_max_message_bytes`] unless set.
     pub max_message_bytes: usize,
+}
+
+// Written by hand so the secret is never printed; destructured so that a new
+// field must be added here to compile.
+impl std::fmt::Debug for PollerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            namespace,
+            task_queue,
+            poll_timeout_seconds,
+            max_concurrent_polls,
+            identity,
+            organization_id,
+            api_key,
+            tls_config,
+            version_id,
+            auto_heartbeat,
+            max_message_bytes,
+        } = self;
+        f.debug_struct("PollerConfig")
+            .field("namespace", namespace)
+            .field("task_queue", task_queue)
+            .field("poll_timeout_seconds", poll_timeout_seconds)
+            .field("max_concurrent_polls", max_concurrent_polls)
+            .field("identity", identity)
+            .field("organization_id", organization_id)
+            .field("api_key", &crate::transport::credentials::redacted(api_key))
+            .field("tls_config", tls_config)
+            .field("version_id", version_id)
+            .field("auto_heartbeat", auto_heartbeat)
+            .field("max_message_bytes", max_message_bytes)
+            .finish()
+    }
 }
 
 impl Default for PollerConfig {
@@ -1212,7 +1245,7 @@ impl TaskExecutionPoller {
 // ============================================================================
 
 /// Configuration for an actor operation poller.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct ActorPollerConfig {
     /// ID of this actor worker.
@@ -1239,6 +1272,33 @@ pub struct ActorPollerConfig {
     /// The largest message the poller receives; see
     /// `PollerConfig::max_message_bytes`.
     pub max_message_bytes: usize,
+}
+
+// Written by hand so the secret is never printed; destructured so that a new
+// field must be added here to compile.
+impl std::fmt::Debug for ActorPollerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            service_id,
+            poll_timeout_ms,
+            max_operations,
+            identity,
+            organization_id,
+            api_key,
+            tls_config,
+            max_message_bytes,
+        } = self;
+        f.debug_struct("ActorPollerConfig")
+            .field("service_id", service_id)
+            .field("poll_timeout_ms", poll_timeout_ms)
+            .field("max_operations", max_operations)
+            .field("identity", identity)
+            .field("organization_id", organization_id)
+            .field("api_key", &crate::transport::credentials::redacted(api_key))
+            .field("tls_config", tls_config)
+            .field("max_message_bytes", max_message_bytes)
+            .finish()
+    }
 }
 
 impl Default for ActorPollerConfig {

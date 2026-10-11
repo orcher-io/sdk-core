@@ -26,7 +26,7 @@ pub enum ActorDriverEvent {
 }
 
 /// Configuration for the actor driver.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct ActorDriverConfig {
     /// Server address.
@@ -74,6 +74,45 @@ pub struct ActorDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+}
+
+// Written by hand so the secret is never printed; destructured so that a new
+// field must be added here to compile.
+impl std::fmt::Debug for ActorDriverConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server_url,
+            namespace,
+            service_id,
+            max_concurrent_executions,
+            identity,
+            poll_timeout,
+            poller_count,
+            organization_id,
+            api_key,
+            enable_heartbeat,
+            heartbeat_interval,
+            registration_id,
+            tls_config,
+            max_message_bytes,
+        } = self;
+        f.debug_struct("ActorDriverConfig")
+            .field("server_url", server_url)
+            .field("namespace", namespace)
+            .field("service_id", service_id)
+            .field("max_concurrent_executions", max_concurrent_executions)
+            .field("identity", identity)
+            .field("poll_timeout", poll_timeout)
+            .field("poller_count", poller_count)
+            .field("organization_id", organization_id)
+            .field("api_key", &crate::transport::credentials::redacted(api_key))
+            .field("enable_heartbeat", enable_heartbeat)
+            .field("heartbeat_interval", heartbeat_interval)
+            .field("registration_id", registration_id)
+            .field("tls_config", tls_config)
+            .field("max_message_bytes", max_message_bytes)
+            .finish()
+    }
 }
 
 impl Default for ActorDriverConfig {
