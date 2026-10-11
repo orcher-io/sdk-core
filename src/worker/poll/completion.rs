@@ -1183,7 +1183,7 @@ impl Completer {
                 Err(status) => {
                     // A message over a size limit is refused the same way on
                     // every attempt, whatever its code says about trying again.
-                    let status = crate::transport::limits::clarify(status);
+                    let status = crate::transport::clarify(status);
                     let code = status.code();
                     if next_after(code) == Next::Drop {
                         self.log_declined(subject, &status);
