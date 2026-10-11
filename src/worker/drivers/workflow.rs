@@ -14,8 +14,8 @@ use crate::protocol::{
     QueryResponse, QueryResult as BridgeQueryResult, UpdateResponse,
     UpdateResult as BridgeUpdateResult,
 };
-use crate::replay::cache::WorkflowCache;
-use crate::replay::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
+use crate::state::cache::WorkflowCache;
+use crate::state::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
 use crate::transport::channel::ChannelManager;
 use crate::types::WorkflowExecution;
 use crate::worker::lifecycle::Leftover;

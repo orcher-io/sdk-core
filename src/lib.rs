@@ -65,7 +65,7 @@
 //!
 //! ```text
 //! src/
-//!   replay/      state machines, the replayer and determinism checks, the workflow cache
+//!   state/       state machines, the replayer and determinism checks, the workflow cache
 //!   protocol/    activations in (ExecutionRequest), commands out (ExecutionResult)
 //!   worker/
 //!     drivers/   workflow, task, actor and registration drivers: the API for language SDKs
@@ -77,7 +77,7 @@
 //!   error, types, interceptor
 //! ```
 //!
-//! - **replay** - State management and deterministic execution.
+//! - **state** - State machines, deterministic replay and determinism checks.
 //! - **protocol** - The request/result types exchanged with language SDKs.
 //! - **worker** - Drivers and polling; the main API for language SDKs.
 //! - **transport** - The connection to the engine.
@@ -131,7 +131,7 @@ pub mod error;
 pub mod interceptor;
 pub mod payload;
 pub mod protocol;
-pub mod replay;
+pub mod state;
 pub mod transport;
 pub mod types;
 pub mod worker;
@@ -139,7 +139,7 @@ pub mod worker;
 // The paths these modules had before the sources were organised by role.
 mod compat;
 #[allow(deprecated)]
-pub use compat::{bridge, codec, converter, limits, poller, state};
+pub use compat::{bridge, codec, converter, limits, poller};
 
 // Commonly used types, re-exported at the crate root.
 
@@ -155,8 +155,8 @@ pub use worker::{
     WorkflowExecutionTask, WorkflowWork, WorkflowWorkResult,
 };
 
-// Replay types
-pub use replay::{
+// State machine and replay types
+pub use state::{
     cache::{CachedWorkflowState, WorkflowCache},
     machine::{
         ActiveTimer, PendingTask, TaskState, TaskStateMachine, WorkflowState, WorkflowStateMachine,

@@ -11,12 +11,6 @@ pub mod bridge {
     pub use crate::protocol::*;
 }
 
-/// Moved to [`crate::replay`].
-#[deprecated(note = "moved to `orcher_sdk_core::replay`")]
-pub mod state {
-    pub use crate::replay::*;
-}
-
 /// Moved to [`crate::payload::codec`].
 #[deprecated(note = "moved to `orcher_sdk_core::payload::codec`")]
 pub mod codec {

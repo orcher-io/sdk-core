@@ -1,7 +1,6 @@
-//! Deterministic replay: the workflow and task state machines, the replayer
-//! that checks workflow code against its journal step by step, and the cache
-//! of live workflow state. Formerly the `state` module, which still
-//! re-exports it.
+//! Workflow state: the workflow and task state machines, the replayer that
+//! checks workflow code against its journal step by step, and the cache of
+//! live workflow state.
 //!
 //! ## Terminology
 //!

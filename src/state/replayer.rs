@@ -41,7 +41,7 @@
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::protocol::{Command, ExecutionResult};
-use crate::replay::machine::WorkflowStateMachine;
+use crate::state::machine::WorkflowStateMachine;
 use crate::types::WorkflowExecution;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -588,7 +588,7 @@ impl ReplayResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::replay::{Replayer, ReplayConfig};
+/// use orcher_sdk_core::state::{Replayer, ReplayConfig};
 /// use orcher_sdk_core::types::WorkflowExecution;
 ///
 /// let config = ReplayConfig::default();
@@ -686,7 +686,7 @@ impl Replayer {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// # use orcher_sdk_core::replay::{Replayer, ReplayConfig};
+    /// # use orcher_sdk_core::state::{Replayer, ReplayConfig};
     /// # use orcher_sdk_core::types::WorkflowExecution;
     /// let replayer = Replayer::new(ReplayConfig::default());
     /// let execution = WorkflowExecution {

@@ -34,7 +34,7 @@ pub struct CachedWorkflowState {
 /// # Examples
 ///
 /// ```
-/// use orcher_sdk_core::replay::WorkflowCache;
+/// use orcher_sdk_core::state::WorkflowCache;
 ///
 /// let cache = WorkflowCache::new(1000); // Cache up to 1000 workflows
 /// ```
@@ -50,7 +50,7 @@ impl WorkflowCache {
     /// # Examples
     ///
     /// ```
-    /// use orcher_sdk_core::replay::WorkflowCache;
+    /// use orcher_sdk_core::state::WorkflowCache;
     ///
     /// let cache = WorkflowCache::new(1000);
     /// ```

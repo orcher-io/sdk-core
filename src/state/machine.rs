@@ -41,7 +41,7 @@ pub enum WorkflowState {
 /// # Examples
 ///
 /// ```
-/// use orcher_sdk_core::replay::WorkflowStateMachine;
+/// use orcher_sdk_core::state::WorkflowStateMachine;
 /// use orcher_sdk_core::types::WorkflowExecution;
 ///
 /// let execution = WorkflowExecution::new("my-workflow", "run-123");
@@ -383,7 +383,7 @@ pub enum TaskState {
 /// # Examples
 ///
 /// ```
-/// use orcher_sdk_core::replay::TaskStateMachine;
+/// use orcher_sdk_core::state::TaskStateMachine;
 ///
 /// let state_machine = TaskStateMachine::new("task-123");
 /// ```
