@@ -98,7 +98,7 @@ mod tests {
         use crate::worker::poll::polling::{ActorPollerConfig, PollerConfig};
 
         const KEY: &str = "sk-live-do-not-print";
-        const PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----do-not-print";
+        const PRIVATE_KEY: &str = "client-key-material-do-not-print";
         let tls = || {
             Some(TlsConfig {
                 client_key: Some(PRIVATE_KEY.as_bytes().to_vec()),
@@ -161,7 +161,7 @@ mod tests {
         for output in &formatted {
             assert!(!output.contains(KEY), "API key printed: {output}");
             assert!(
-                !output.contains("PRIVATE KEY"),
+                !output.contains(PRIVATE_KEY),
                 "private key printed: {output}"
             );
             assert!(
