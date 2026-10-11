@@ -35,7 +35,7 @@ use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
     actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
     ActorOperation, JournalEntry, PollActorOperationRequest, PollTaskExecutionRequest,
-    PollWorkflowExecutionRequest, QueryRequest, UpdateRequest,
+    PollWorkflowExecutionRequest, PollWorkflowExecutionResponse, QueryRequest, UpdateRequest,
 };
 use crate::types::WorkflowExecution;
 
@@ -749,6 +749,8 @@ impl WorkflowExecutionPoller {
             return Ok(None);
         }
 
+        crate::worker::record::activation(&poll_response);
+
         tracing::debug!(
             workflow_id = %poll_response.workflow_id,
             execution_id = %poll_response.execution_id,
@@ -757,6 +759,15 @@ impl WorkflowExecutionPoller {
             "Polled workflow execution task"
         );
 
+        Ok(Some(WorkflowExecutionTask::from(poll_response)))
+    }
+}
+
+/// The work an activation the engine sent asks for. This is what a poll
+/// hands the driver, and what a recorded activation (see
+/// [`crate::worker::record`]) is replayed as.
+impl From<PollWorkflowExecutionResponse> for WorkflowExecutionTask {
+    fn from(poll_response: PollWorkflowExecutionResponse) -> Self {
         // The poll response has no task token field; the engine returns the
         // activation token in `stream_entry_id` instead. It is carried as the
         // task token too, because a failure report has nowhere else to put
@@ -766,7 +777,7 @@ impl WorkflowExecutionPoller {
         // that returns no token gets an empty one back, which it ignores.
         let task_token = poll_response.stream_entry_id.clone().into_bytes();
 
-        let task = WorkflowExecutionTask {
+        WorkflowExecutionTask {
             execution: WorkflowExecution::new(
                 poll_response.workflow_id,
                 poll_response.execution_id,
@@ -789,9 +800,7 @@ impl WorkflowExecutionPoller {
             // Pending queries and updates from the server.
             queries: poll_response.queries,
             updates: poll_response.updates,
-        };
-
-        Ok(Some(task))
+        }
     }
 }
 

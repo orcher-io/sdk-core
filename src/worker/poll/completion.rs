@@ -636,6 +636,7 @@ impl Completer {
                     protocol_version: self.caller.protocol_version,
                     ..Default::default()
                 };
+                crate::worker::record::completion(&request);
                 self.complete_or_fail_too_large(&workflow_id, &run_id, request)
                     .await;
             }
@@ -667,6 +668,7 @@ impl Completer {
                     protocol_version: self.caller.protocol_version,
                     ..Default::default()
                 };
+                crate::worker::record::failure(&request);
                 self.fail(&workflow_id, &run_id, request).await;
             }
             // Once, not retried: a release that does not land leaves the

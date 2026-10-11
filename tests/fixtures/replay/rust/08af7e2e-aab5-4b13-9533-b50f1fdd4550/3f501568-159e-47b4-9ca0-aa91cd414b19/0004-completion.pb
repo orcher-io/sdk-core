@@ -1,0 +1,3 @@
+
+$08af7e2e-aab5-4b13-9533-b50f1fdd4550$3f501568-159e-47b4-9ca0-aa91cd414b19contract"rust-worker*8act1.M2Y1MDE1NjgtMTU5ZS00N2I0LTljYTAtYWE5MWNkNDE0YjE5OjI2j
+{"echoed":"reset-me"}R8act1.M2Y1MDE1NjgtMTU5ZS00N2I0LTljYTAtYWE5MWNkNDE0YjE5OjIbh
