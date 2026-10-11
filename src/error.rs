@@ -31,7 +31,7 @@ pub enum Error {
     /// gRPC status error.
     ///
     /// A status that reports a message over a gRPC size limit arrives
-    /// rewritten by [`crate::limits::clarify`]: OUT_OF_RANGE, saying which
+    /// rewritten by [`crate::transport::limits::clarify`]: OUT_OF_RANGE, saying which
     /// limit to raise or that the data belongs elsewhere.
     #[error("gRPC status error: {}", with_causes(.0))]
     GrpcStatus(#[source] tonic::Status),
@@ -208,7 +208,7 @@ pub(crate) fn with_causes(error: &(dyn std::error::Error + 'static)) -> String {
 
 impl From<tonic::Status> for Error {
     fn from(status: tonic::Status) -> Self {
-        Error::GrpcStatus(crate::limits::clarify(status))
+        Error::GrpcStatus(crate::transport::limits::clarify(status))
     }
 }
 

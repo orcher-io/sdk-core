@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use orcher_sdk_core::client::workflow::{CancelWorkflowOpts, StartWorkflowOpts};
-use orcher_sdk_core::poller::TlsConfig;
+use orcher_sdk_core::transport::TlsConfig;
 use orcher_sdk_core::types::RetryPolicy;
 use orcher_sdk_core::{
     ActorDriverConfig, ActorPollerConfig, Error, ListWorkflowsOptions, ListWorkflowsSortOrder,

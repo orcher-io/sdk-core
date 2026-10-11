@@ -42,7 +42,7 @@
 //! │              ORCHER SDK Core (this crate)               │
 //! │                                                         │
 //! │  ┌────────────────┐  ┌──────────────┐  ┌─────────────┐  │
-//! │  │ Workflow Client│  │   Poller     │  │  Replayer   │  │
+//! │  │ Workflow Client│  │   Worker     │  │  Replayer   │  │
 //! │  │  (gRPC calls)  │  │  (Drivers)   │  │  (State     │  │
 //! │  │                │  │              │  │  Machine)   │  │
 //! │  └────────────────┘  └──────────────┘  └─────────────┘  │
@@ -61,23 +61,36 @@
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## Modules
+//! ## Layout
 //!
+//! ```text
+//! src/
+//!   replay/      state machines, the replayer and determinism checks, the workflow cache
+//!   protocol/    activations in (ExecutionRequest), commands out (ExecutionResult)
+//!   worker/
+//!     drivers/   workflow, task, actor and registration drivers: the API for language SDKs
+//!     poll/      long-polling, and reporting results (eager tasks included)
+//!     heartbeat, lifecycle, metrics
+//!   transport/   gRPC channels and TLS, credentials, message size limits
+//!   client/      start, query and manage workflows, namespaces and actors
+//!   payload/     the Payload type, converters and codecs
+//!   error, types, interceptor
+//! ```
+//!
+//! - **replay** - State management and deterministic execution.
+//! - **protocol** - The request/result types exchanged with language SDKs.
+//! - **worker** - Drivers and polling; the main API for language SDKs.
+//! - **transport** - The connection to the engine.
 //! - **client** - Start, query and manage workflows, namespaces and actors.
-//! - **poller** - Polling and drivers.
-//!   - **driver** - Workflow, task and actor drivers; the main API for language SDKs.
-//!   - **polling** - Long-polling.
-//!   - **channel** - gRPC channel setup, including TLS.
-//! - **state** - State management and deterministic execution.
-//!   - **machine** - Workflow and task state machines.
-//!   - **replayer** - Deterministic replay.
-//!   - **cache** - Workflow state cache.
-//! - **bridge** - The request/result types exchanged with language SDKs.
+//! - **payload** - Payloads, their conversion from values ([`payload::converter`])
+//!   and their encoding ([`payload::codec`]: compression, encryption).
 //! - **interceptor** - Shared types for interceptors (logging, metrics, tracing).
-//! - **codec** - Payload encoding and decoding (compression, encryption).
-//! - **converter** - Conversion between values and payloads.
 //! - **error** - Error types.
 //! - **types** - Common type definitions.
+//!
+//! The modules `poller`, `state`, `bridge`, `codec`, `converter` and `limits`
+//! are the paths these lived at before; they re-export the new ones and are
+//! deprecated.
 //!
 //! ## Usage
 //!
@@ -113,25 +126,28 @@
 // The generated protocol types, re-exported for convenience.
 pub use orcher_proto as proto;
 
-pub mod bridge;
 pub mod client;
-pub mod codec;
-pub mod converter;
 pub mod error;
 pub mod interceptor;
-pub mod limits;
 pub mod payload;
-pub mod poller;
-pub mod state;
+pub mod protocol;
+pub mod replay;
+pub mod transport;
 pub mod types;
+pub mod worker;
+
+// The paths these modules had before the sources were organised by role.
+mod compat;
+#[allow(deprecated)]
+pub use compat::{bridge, codec, converter, limits, poller, state};
 
 // Commonly used types, re-exported at the crate root.
 
 // Client types
 pub use client::{NamespaceClient, WorkflowClient, WorkflowHandle};
 
-// Poller/Driver types (for language SDK integration)
-pub use poller::{
+// Worker/Driver types (for language SDK integration)
+pub use worker::{
     ActorDriver, ActorDriverConfig, ActorDriverEvent, ActorOperationPoller, ActorPollerConfig,
     ActorWork, ActorWorkResult, PollerConfig, TaskDriver, TaskDriverConfig, TaskExecutionPoller,
     TaskExecutionTask, TaskWork, TaskWorkResult, WorkerRegistrationConfig,
@@ -139,8 +155,8 @@ pub use poller::{
     WorkflowExecutionTask, WorkflowWork, WorkflowWorkResult,
 };
 
-// State types
-pub use state::{
+// Replay types
+pub use replay::{
     cache::{CachedWorkflowState, WorkflowCache},
     machine::{
         ActiveTimer, PendingTask, TaskState, TaskStateMachine, WorkflowState, WorkflowStateMachine,
@@ -164,8 +180,8 @@ pub use types::{
     WorkflowStatus,
 };
 
-// Bridge types - for language SDK integration
-pub use bridge::{
+// Protocol types - for language SDK integration
+pub use protocol::{
     task_to_execution_request, validate_execution_result, Command, CompleteTaskJob,
     ExecutionRequest, ExecutionResult, FireTimerJob, HandleEventJob, RequestJob, StartWorkflowJob,
     TaskExecutionResult as BridgeTaskResult,
@@ -191,7 +207,7 @@ pub mod worker_protocol {
     pub const BASELINE: u32 = 0;
 
     /// The worker hands a workflow cancellation request in the journal
-    /// ([`crate::bridge::RequestJob::CancelWorkflow`]) to workflow code,
+    /// ([`crate::protocol::RequestJob::CancelWorkflow`]) to workflow code,
     /// letting the workflow clean up before it ends.
     ///
     /// Report it only once workflow code really sees the request. The engine

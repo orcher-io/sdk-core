@@ -14,11 +14,11 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use orcher_sdk_core::poller::worker_registration::DEREGISTER_TIMEOUT;
 use orcher_sdk_core::proto::orcher::v1::worker_service_server::{
     WorkerService, WorkerServiceServer,
 };
 use orcher_sdk_core::proto::orcher::v1::*;
+use orcher_sdk_core::worker::drivers::registration::DEREGISTER_TIMEOUT;
 use orcher_sdk_core::{WorkerRegistrationConfig, WorkerRegistrationDriver};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
