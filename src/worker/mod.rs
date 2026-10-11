@@ -24,6 +24,10 @@ pub use drivers::{
     TaskWorkResult, WorkflowDriver, WorkflowDriverConfig, WorkflowWork, WorkflowWorkResult,
 };
 
+// Which of the work drivers a worker starts, and the built-in task types that
+// do not count towards it.
+pub use drivers::{NeededDrivers, BUILT_IN_TASK_TYPES, SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
+
 // A running task's heartbeat, as the language SDK sees it.
 pub use heartbeat::{CancellationToken, TaskHeartbeat};
 
