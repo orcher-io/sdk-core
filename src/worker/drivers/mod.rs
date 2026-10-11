@@ -16,6 +16,7 @@
 //! - [`task`]: the task driver, and eager tasks.
 //! - [`actor`]: the actor driver.
 //! - [`registration`]: registers the worker and heartbeats it; polls nothing.
+//! - [`needed`]: which of the work drivers a worker starts.
 //!
 //! What the work drivers share for stopping lives here. Their slots and the
 //! reports they still have in flight live in the crate-internal
@@ -28,11 +29,13 @@ use crate::worker::lifecycle::{self};
 use crate::worker::poll::completion::Completer;
 
 pub mod actor;
+pub mod needed;
 pub mod registration;
 pub mod task;
 pub mod workflow;
 
 pub use actor::{ActorDriver, ActorDriverConfig, ActorDriverEvent, ActorWork, ActorWorkResult};
+pub use needed::{NeededDrivers, BUILT_IN_TASK_TYPES, SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
 pub use registration::{WorkerRegistrationConfig, WorkerRegistrationDriver};
 pub(crate) use task::proto_task_to_task_work;
 pub use task::{
