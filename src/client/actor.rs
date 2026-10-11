@@ -106,24 +106,28 @@ impl CoreActorClient {
                     "Actor operation {}.{} on key '{}' failed: {} (code: {})",
                     actor_name, operation, key, response.error_message, response.error_code
                 ),
+                status: crate::types::WorkflowStatus::Failed,
             }),
             Ok(ExecutionStatus::Timeout) => Err(Error::WorkflowExecutionFailed {
                 message: format!(
                     "Actor operation {}.{} on key '{}' timed out",
                     actor_name, operation, key
                 ),
+                status: crate::types::WorkflowStatus::TimedOut,
             }),
             Ok(ExecutionStatus::Cancelled) => Err(Error::WorkflowExecutionFailed {
                 message: format!(
                     "Actor operation {}.{} on key '{}' was cancelled",
                     actor_name, operation, key
                 ),
+                status: crate::types::WorkflowStatus::Cancelled,
             }),
             _ => Err(Error::WorkflowExecutionFailed {
                 message: format!(
                     "Actor operation {}.{} on key '{}' returned unknown status: {}",
                     actor_name, operation, key, response.status
                 ),
+                status: crate::types::WorkflowStatus::Failed,
             }),
         }
     }

@@ -540,15 +540,7 @@ impl WorkflowClient {
                 }
             };
 
-            return match inner.outcome {
-                Some(crate::proto::orcher::v1::get_workflow_result_response::Outcome::Error(
-                    error,
-                )) => Err(Error::WorkflowExecutionFailed { message: error }),
-                Some(crate::proto::orcher::v1::get_workflow_result_response::Outcome::Result(
-                    result_bytes,
-                )) => Ok(result_bytes),
-                None => Err(Error::internal("Workflow result missing outcome")),
-            };
+            return result_from_answer(inner);
         }
     }
 
@@ -1431,8 +1423,128 @@ impl WorkflowHandle {
     }
 }
 
+/// The caller's answer from the engine's final word on a workflow: its
+/// result, or an error saying how it ended without one.
+///
+/// The engine sends the run's status with every answer. It used to be
+/// dropped, so a cancelled, terminated or timed-out run all read as "failed"
+/// unless the caller asked for the status again. A timed-out run comes with
+/// no outcome at all, which read as an internal error.
+fn result_from_answer(
+    answer: crate::proto::orcher::v1::GetWorkflowResultResponse,
+) -> Result<Vec<u8>> {
+    use crate::proto::orcher::v1::get_workflow_result_response::Outcome;
+    let reported = WorkflowStatus::from(answer.status);
+    match answer.outcome {
+        Some(Outcome::Result(result)) => Ok(result),
+        // An engine that sends no status (or a non-final one) with an error
+        // has still reported a failure.
+        Some(Outcome::Error(message)) => {
+            let status = if reported.is_terminal() {
+                reported
+            } else {
+                WorkflowStatus::Failed
+            };
+            Err(Error::workflow_ended(status, message))
+        }
+        None if reported.is_terminal() && reported != WorkflowStatus::Completed => Err(
+            Error::workflow_ended(reported, ended_without_message(reported)),
+        ),
+        None => Err(Error::internal("Workflow result missing outcome")),
+    }
+}
+
+/// What to say about a run that ended without a result and without a reason.
+fn ended_without_message(status: WorkflowStatus) -> &'static str {
+    match status {
+        WorkflowStatus::Cancelled => "Workflow was canceled",
+        WorkflowStatus::Terminated => "Workflow was terminated",
+        WorkflowStatus::TimedOut => "Workflow timed out",
+        _ => "Workflow ended without a result",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    mod result_from_answer {
+        use super::super::result_from_answer;
+        use crate::error::Error;
+        use crate::proto::orcher::v1::{
+            get_workflow_result_response::Outcome, GetWorkflowResultResponse,
+            WorkflowStatus as Wire,
+        };
+        use crate::types::WorkflowStatus;
+
+        fn answer(status: Wire, outcome: Option<Outcome>) -> GetWorkflowResultResponse {
+            GetWorkflowResultResponse {
+                status: status as i32,
+                outcome,
+                ..Default::default()
+            }
+        }
+
+        fn ended(result: crate::error::Result<Vec<u8>>) -> (WorkflowStatus, String) {
+            match result {
+                Err(Error::WorkflowExecutionFailed {
+                    status, message, ..
+                }) => (status, message),
+                other => panic!("expected the run's end, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_result_is_returned() {
+            let result = result_from_answer(answer(
+                Wire::Completed,
+                Some(Outcome::Result(b"7".to_vec())),
+            ));
+            assert_eq!(result.unwrap(), b"7");
+        }
+
+        #[test]
+        fn each_way_of_ending_is_reported_as_itself() {
+            for (wire, expected) in [
+                (Wire::Failed, WorkflowStatus::Failed),
+                (Wire::Canceled, WorkflowStatus::Cancelled),
+                (Wire::Terminated, WorkflowStatus::Terminated),
+                (Wire::TimedOut, WorkflowStatus::TimedOut),
+            ] {
+                let (status, message) = ended(result_from_answer(answer(
+                    wire,
+                    Some(Outcome::Error("why".into())),
+                )));
+                assert_eq!(status, expected);
+                assert_eq!(message, "why");
+            }
+        }
+
+        /// The engine sends a timed-out run's status with no outcome.
+        #[test]
+        fn a_timed_out_run_without_an_outcome_is_a_timeout_not_an_internal_error() {
+            let error = result_from_answer(answer(Wire::TimedOut, None)).unwrap_err();
+            assert_eq!(error.workflow_status(), Some(WorkflowStatus::TimedOut));
+            assert!(error.to_string().contains("timed out"), "{error}");
+        }
+
+        /// An engine that sends no status still reported a failure.
+        #[test]
+        fn an_error_without_a_status_is_a_failure() {
+            let (status, _) = ended(result_from_answer(answer(
+                Wire::Unspecified,
+                Some(Outcome::Error("boom".into())),
+            )));
+            assert_eq!(status, WorkflowStatus::Failed);
+        }
+
+        #[test]
+        fn no_outcome_for_a_completed_or_running_run_is_still_an_internal_error() {
+            for wire in [Wire::Completed, Wire::Running, Wire::Unspecified] {
+                let error = result_from_answer(answer(wire, None)).unwrap_err();
+                assert_eq!(error.workflow_status(), None, "{wire:?}");
+            }
+        }
+    }
+
     use super::*;
 
     use tonic::service::Interceptor;

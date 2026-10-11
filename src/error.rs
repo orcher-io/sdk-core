@@ -56,10 +56,23 @@ pub enum Error {
         run_id: Option<String>,
     },
 
-    /// Workflow execution failed.
+    /// A workflow (or actor operation) ended without a result.
+    ///
+    /// `status` says how it ended: [`WorkflowStatus::Failed`],
+    /// [`WorkflowStatus::Cancelled`], [`WorkflowStatus::Terminated`] or
+    /// [`WorkflowStatus::TimedOut`], so a caller can tell a cancellation from
+    /// a failure without asking for the status separately.
+    ///
+    /// [`WorkflowStatus::Failed`]: crate::types::WorkflowStatus::Failed
+    /// [`WorkflowStatus::Cancelled`]: crate::types::WorkflowStatus::Cancelled
+    /// [`WorkflowStatus::Terminated`]: crate::types::WorkflowStatus::Terminated
+    /// [`WorkflowStatus::TimedOut`]: crate::types::WorkflowStatus::TimedOut
     #[error("Workflow execution failed: {message}")]
     #[non_exhaustive]
-    WorkflowExecutionFailed { message: String },
+    WorkflowExecutionFailed {
+        message: String,
+        status: crate::types::WorkflowStatus,
+    },
 
     /// Task execution failed.
     #[error("Task execution failed: task_id={task_id}, reason={reason}")]
@@ -381,8 +394,27 @@ impl Error {
 
     /// Creates a workflow execution failed error.
     pub fn workflow_execution_failed(message: impl Into<String>) -> Self {
+        Self::workflow_ended(crate::types::WorkflowStatus::Failed, message)
+    }
+
+    /// Creates the error for a workflow that ended without a result, with how
+    /// it ended.
+    pub fn workflow_ended(
+        status: crate::types::WorkflowStatus,
+        message: impl Into<String>,
+    ) -> Self {
         Self::WorkflowExecutionFailed {
             message: message.into(),
+            status,
+        }
+    }
+
+    /// How the workflow ended, when this error reports one that ended without
+    /// a result.
+    pub fn workflow_status(&self) -> Option<crate::types::WorkflowStatus> {
+        match self {
+            Self::WorkflowExecutionFailed { status, .. } => Some(*status),
+            _ => None,
         }
     }
 
