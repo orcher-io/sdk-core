@@ -7,18 +7,18 @@
 //! Unlike `WorkflowDriver`/`TaskDriver`, this driver does no polling — it only
 //! manages the registration lifecycle.
 
-use crate::poller::metrics::WorkerMetrics;
+use crate::worker::metrics::WorkerMetrics;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::poller::channel::ChannelManager;
-use crate::poller::driver::ShutdownHandle;
 use crate::proto::orcher::v1::{
     worker_service_client::WorkerServiceClient, DeregisterWorkerRequest, RegisterWorkerRequest,
     WorkerCapabilities, WorkerHeartbeatRequest, WorkerLoadMetrics, WorkerRegistrationStatus,
 };
+use crate::transport::channel::ChannelManager;
+use crate::worker::drivers::ShutdownHandle;
 
 /// Configuration for worker registration.
 #[derive(Debug, Clone)]
@@ -65,7 +65,7 @@ pub struct WorkerRegistrationConfig {
     pub version_id: Option<String>,
 
     /// TLS configuration; `None` connects without TLS.
-    pub tls_config: Option<super::TlsConfig>,
+    pub tls_config: Option<crate::transport::TlsConfig>,
 
     /// API key sent as `authorization: Bearer <key>` on registration,
     /// heartbeat and deregistration.
@@ -88,9 +88,9 @@ pub struct WorkerRegistrationConfig {
 }
 
 /// Registration authenticates exactly as polling and reporting do; see
-/// [`crate::poller::credentials::credentialed_request`]. Re-exported here for
+/// [`crate::transport::credentials::credentialed_request`]. Re-exported here for
 /// callers that import it from this module.
-pub use crate::poller::credentials::credentialed_request;
+pub use crate::transport::credentials::credentialed_request;
 
 impl Default for WorkerRegistrationConfig {
     fn default() -> Self {

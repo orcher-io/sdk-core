@@ -67,18 +67,18 @@ use tokio::sync::{mpsc, watch};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use crate::limits::{refused_as_too_large, sized, too_large_to_send, PAYLOAD_TOO_LARGE};
-use crate::poller::channel::{Breaker, ChannelManager, Unconnected};
-use crate::poller::driver::{
-    proto_task_to_task_work, ActorDriverConfig, TaskDriverConfig, TaskWork, WorkflowDriverConfig,
-};
-use crate::poller::heartbeat::TaskHeartbeats;
 use crate::proto::orcher::v1::{
     actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
     Command, CompleteActorOperationRequest, CompleteTaskExecutionRequest,
     CompleteWorkflowExecutionRequest, FailTaskExecutionRequest, FailWorkflowExecutionRequest,
     Failure, QueryResult, TaskCapabilities, UpdateResult,
 };
+use crate::transport::channel::{Breaker, ChannelManager, Unconnected};
+use crate::transport::limits::{refused_as_too_large, sized, too_large_to_send, PAYLOAD_TOO_LARGE};
+use crate::worker::drivers::{
+    proto_task_to_task_work, ActorDriverConfig, TaskDriverConfig, TaskWork, WorkflowDriverConfig,
+};
+use crate::worker::heartbeat::TaskHeartbeats;
 use prost::Message as _;
 
 /// How hard to try to deliver one completion or failure report — for a
@@ -491,13 +491,13 @@ pub(crate) enum Report {
         non_retryable: bool,
     },
     /// Not run at all: handed back for the next poll to take.
-    Release(crate::poller::lifecycle::Leftover),
+    Release(crate::worker::lifecycle::Leftover),
     /// Run, and not to be applied: held for `after`, or until the worker
     /// shuts down, then handed back to be tried again. Nothing is recorded
     /// against the workflow, so the run stays open with its journal as it
     /// was.
     Retry {
-        leftover: crate::poller::lifecycle::Leftover,
+        leftover: crate::worker::lifecycle::Leftover,
         after: Duration,
     },
 }
@@ -579,14 +579,14 @@ pub(crate) struct Completer {
 
 impl Completer {
     fn credentialed<T>(&self, body: T) -> tonic::Request<T> {
-        let mut request = crate::poller::credentials::credentialed_request(
+        let mut request = crate::transport::credentials::credentialed_request(
             body,
             self.caller.api_key.as_deref(),
             self.caller.organization_id.as_deref(),
         );
         // What this worker can receive, which bounds the tasks the engine
         // hands back with its answer.
-        crate::limits::state_receive_limit(&mut request, self.max_message_bytes());
+        crate::transport::limits::state_receive_limit(&mut request, self.max_message_bytes());
         request
     }
 
@@ -673,7 +673,7 @@ impl Completer {
             // activation to its claim timeout, which is where it was anyway.
             // Bounded by the grace, since it is mostly sent during shutdown.
             Report::Release(leftover) => {
-                crate::poller::lifecycle::release(
+                crate::worker::lifecycle::release(
                     &self.caller,
                     &self.channel_manager,
                     leftover,
@@ -692,7 +692,7 @@ impl Completer {
                     _ = tokio::time::sleep(after) => {}
                     _ = shutdown.wait_for(|stopping| *stopping) => {}
                 }
-                crate::poller::lifecycle::release(
+                crate::worker::lifecycle::release(
                     &self.caller,
                     &self.channel_manager,
                     leftover,
@@ -1183,7 +1183,7 @@ impl Completer {
                 Err(status) => {
                     // A message over a size limit is refused the same way on
                     // every attempt, whatever its code says about trying again.
-                    let status = crate::limits::clarify(status);
+                    let status = crate::transport::limits::clarify(status);
                     let code = status.code();
                     if next_after(code) == Next::Drop {
                         self.log_declined(subject, &status);
@@ -1334,7 +1334,7 @@ impl Completer {
 }
 
 /// Whether a report declined with `code` was refused for its size: what
-/// [`crate::limits::clarify`] makes of every size refusal before the decision
+/// [`crate::transport::limits::clarify`] makes of every size refusal before the decision
 /// to retry, and an answer the engine gives for nothing else.
 fn declined_as_too_large(code: Code) -> bool {
     code == Code::OutOfRange
@@ -1391,7 +1391,7 @@ fn workflow_completion_named(request: &CompleteWorkflowExecutionRequest) -> Stri
     match largest {
         Some((what, size)) => format!(
             "the workflow's completion (largest: {what}, {})",
-            crate::limits::format_bytes(size)
+            crate::transport::limits::format_bytes(size)
         ),
         None => "the workflow's completion".to_string(),
     }

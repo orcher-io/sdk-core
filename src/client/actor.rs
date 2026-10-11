@@ -42,9 +42,9 @@ impl CoreActorClient {
         Self {
             // Operation payloads and results up to the configured message
             // limit, not tonic's 4 MiB default.
-            client: crate::limits::sized!(
+            client: crate::transport::limits::sized!(
                 ActorServiceClient::with_interceptor(channel, auth),
-                crate::limits::default_max_message_bytes()
+                crate::transport::limits::default_max_message_bytes()
             ),
         }
     }

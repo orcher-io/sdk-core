@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-A language SDK builds on the drivers instead: `WorkflowDriver`, `TaskDriver` and `ActorDriver` poll the engine and pass each piece of work to the SDK as a request, and the SDK answers with a result that the driver reports back. The request and result types live in the `bridge` module; see [docs.rs](https://docs.rs/orcher-sdk-core) for the full API.
+A language SDK builds on the drivers instead: `WorkflowDriver`, `TaskDriver` and `ActorDriver` poll the engine and pass each piece of work to the SDK as a request, and the SDK answers with a result that the driver reports back. The drivers live in the `worker` module and the request and result types in the `protocol` module; see [docs.rs](https://docs.rs/orcher-sdk-core) for the full API.
 
 <br />
 

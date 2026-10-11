@@ -1,4 +1,7 @@
-//! Bridge between ORCHER Core and the language SDKs.
+//! The protocol between this crate and a language SDK: activations go in as
+//! [`ExecutionRequest`]s, commands come out in [`ExecutionResult`]s.
+//!
+//! Formerly the `bridge` module, which still re-exports it.
 //!
 //! Defines the interface that language SDKs (Rust, Python, TypeScript) implement
 //! to run workflow code. Core polls work from the server, converts it to an

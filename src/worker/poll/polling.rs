@@ -76,7 +76,7 @@ pub struct PollerConfig {
     /// The driver that owns this poller connects with the same setting. A
     /// poller connecting without it would dial a TLS server in plaintext and
     /// fail at the handshake, while the driver reports itself connected.
-    pub tls_config: Option<super::TlsConfig>,
+    pub tls_config: Option<crate::transport::TlsConfig>,
 
     /// The code release this worker is running, if declared.
     ///
@@ -94,7 +94,7 @@ pub struct PollerConfig {
     ///
     /// When set, each task poll tells the engine that the tasks it brings back
     /// are heartbeated on a timer until their results are sent. The
-    /// [`TaskDriver`](crate::poller::TaskDriver) does that when its own
+    /// [`TaskDriver`](crate::worker::TaskDriver) does that when its own
     /// `auto_heartbeat` is on, and sets this to match. The engine then holds a
     /// task that sets no heartbeat timeout to a default one, so a poller used
     /// on its own must leave this off (the default) unless whatever runs its
@@ -102,7 +102,7 @@ pub struct PollerConfig {
     pub auto_heartbeat: bool,
 
     /// The largest message the poller receives, and tells the engine it can
-    /// receive. [`crate::limits::default_max_message_bytes`] unless set.
+    /// receive. [`crate::transport::limits::default_max_message_bytes`] unless set.
     pub max_message_bytes: usize,
 }
 
@@ -123,7 +123,7 @@ impl Default for PollerConfig {
             version_id: None,
             tls_config: None,
             auto_heartbeat: false,
-            max_message_bytes: crate::limits::default_max_message_bytes(),
+            max_message_bytes: crate::transport::limits::default_max_message_bytes(),
         }
     }
 }
@@ -242,7 +242,7 @@ pub struct TaskExecutionTask {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::poller::{WorkflowExecutionPoller, PollerConfig};
+/// use orcher_sdk_core::worker::{WorkflowExecutionPoller, PollerConfig};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = PollerConfig::default();
@@ -310,7 +310,9 @@ impl WorkflowExecutionPoller {
         // Through the same builder as the driver's channel manager, so this
         // connection carries the same TLS setting as the one that was just
         // reported connected.
-        let channel = super::channel::connect_channel(&address, config.tls_config.as_ref()).await?;
+        let channel =
+            crate::transport::channel::connect_channel(&address, config.tls_config.as_ref())
+                .await?;
 
         tracing::info!(
             server_url = %address,
@@ -334,12 +336,12 @@ impl WorkflowExecutionPoller {
             version_id: config.version_id.clone().unwrap_or_default(),
             // Which process this is, so a shutdown it announces stops its own
             // polls and not those of a later process reusing its identity.
-            worker_instance_id: super::lifecycle::worker_instance_id().to_string(),
+            worker_instance_id: crate::worker::lifecycle::worker_instance_id().to_string(),
             ..Default::default()
         };
 
         let poller = Self {
-            client: crate::limits::sized!(
+            client: crate::transport::limits::sized!(
                 ExecutionServiceClient::new(channel),
                 config.max_message_bytes
             ),
@@ -433,7 +435,7 @@ impl WorkflowExecutionPoller {
                 }
 
                 // Recreate channel/client after cool-off
-                let channel = super::channel::connect_channel(
+                let channel = crate::transport::channel::connect_channel(
                     &self.server_url,
                     self.config.tls_config.as_ref(),
                 )
@@ -441,7 +443,7 @@ impl WorkflowExecutionPoller {
                 .map_err(|e| {
                     Error::connection(format!("Failed to reconnect to {}: {}", self.server_url, e))
                 })?;
-                self.client = crate::limits::sized!(
+                self.client = crate::transport::limits::sized!(
                     ExecutionServiceClient::new(channel),
                     self.config.max_message_bytes
                 );
@@ -625,23 +627,23 @@ impl WorkflowExecutionPoller {
     /// exit before it is answered. That leaves the activation to its claim
     /// timeout, just as if no release had been sent.
     async fn release(&self, task: WorkflowExecutionTask) {
-        let token = crate::poller::completion::activation_token(
+        let token = crate::worker::poll::completion::activation_token(
             task.task_token,
             task.stream_entry_id.as_deref(),
         );
-        super::lifecycle::release_on(
+        crate::worker::lifecycle::release_on(
             self.client.clone(),
             &self.config.namespace,
             &self.config.identity,
             self.config.api_key.as_deref(),
             self.config.organization_id.as_deref(),
-            super::lifecycle::Leftover {
+            crate::worker::lifecycle::Leftover {
                 workflow_id: task.execution.workflow_id,
                 run_id: task.execution.run_id,
                 token,
                 retried: false,
             },
-            super::lifecycle::SHUTDOWN_NOTICE_TIMEOUT,
+            crate::worker::lifecycle::SHUTDOWN_NOTICE_TIMEOUT,
         )
         .await;
     }
@@ -676,7 +678,7 @@ impl WorkflowExecutionPoller {
 
         // How much this poller can receive, so the engine fails what will
         // not fit rather than handing it out to be refused here.
-        crate::limits::state_receive_limit(&mut request, self.config.max_message_bytes);
+        crate::transport::limits::state_receive_limit(&mut request, self.config.max_message_bytes);
 
         // This is the hot path: only work and errors are logged, not every poll.
 
@@ -693,7 +695,7 @@ impl WorkflowExecutionPoller {
             }
             // A message over the size limit is said as such, not as tonic's
             // "decoded message length too large".
-            let e = crate::limits::clarify(e);
+            let e = crate::transport::limits::clarify(e);
             tracing::warn!(
                 error_code = ?e.code(),
                 error_message = %e.message(),
@@ -767,7 +769,7 @@ impl WorkflowExecutionPoller {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::poller::{TaskExecutionPoller, PollerConfig};
+/// use orcher_sdk_core::worker::{TaskExecutionPoller, PollerConfig};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = PollerConfig::default();
@@ -823,7 +825,9 @@ impl TaskExecutionPoller {
         // Through the same builder as the driver's channel manager, so this
         // connection carries the same TLS setting as the one that was just
         // reported connected.
-        let channel = super::channel::connect_channel(&address, config.tls_config.as_ref()).await?;
+        let channel =
+            crate::transport::channel::connect_channel(&address, config.tls_config.as_ref())
+                .await?;
 
         tracing::info!(
             server_url = %address,
@@ -843,7 +847,7 @@ impl TaskExecutionPoller {
             }),
             task_queue_metadata: std::collections::HashMap::new(),
             // See the workflow poller.
-            worker_instance_id: super::lifecycle::worker_instance_id().to_string(),
+            worker_instance_id: crate::worker::lifecycle::worker_instance_id().to_string(),
             task_capabilities: config.auto_heartbeat.then_some(
                 crate::proto::orcher::v1::TaskCapabilities {
                     auto_heartbeat: true,
@@ -854,7 +858,7 @@ impl TaskExecutionPoller {
         };
 
         let poller = Self {
-            client: crate::limits::sized!(
+            client: crate::transport::limits::sized!(
                 ExecutionServiceClient::new(channel),
                 config.max_message_bytes
             ),
@@ -1127,7 +1131,7 @@ impl TaskExecutionPoller {
 
         // How much this poller can receive, so the engine fails what will
         // not fit rather than handing it out to be refused here.
-        crate::limits::state_receive_limit(&mut request, self.config.max_message_bytes);
+        crate::transport::limits::state_receive_limit(&mut request, self.config.max_message_bytes);
 
         let start = std::time::Instant::now();
 
@@ -1151,7 +1155,7 @@ impl TaskExecutionPoller {
                         tracing::trace!("Poll timeout (expected)");
                         return Error::timeout("poll task execution");
                     }
-                    let e = crate::limits::clarify(e);
+                    let e = crate::transport::limits::clarify(e);
                     tracing::warn!(error = %e, code = ?e.code(), "Task poll gRPC error");
                     Error::GrpcStatus(e)
                 })?;
@@ -1230,7 +1234,7 @@ pub struct ActorPollerConfig {
     pub api_key: Option<String>,
 
     /// TLS for the poller's own connection; see `PollerConfig::tls_config`.
-    pub tls_config: Option<super::TlsConfig>,
+    pub tls_config: Option<crate::transport::TlsConfig>,
 
     /// The largest message the poller receives; see
     /// `PollerConfig::max_message_bytes`.
@@ -1247,7 +1251,7 @@ impl Default for ActorPollerConfig {
             organization_id: None,
             api_key: None,
             tls_config: None,
-            max_message_bytes: crate::limits::default_max_message_bytes(),
+            max_message_bytes: crate::transport::limits::default_max_message_bytes(),
         }
     }
 }
@@ -1309,7 +1313,9 @@ impl ActorOperationPoller {
         // Through the same builder as the driver's channel manager, so this
         // connection carries the same TLS setting as the one that was just
         // reported connected.
-        let channel = super::channel::connect_channel(&address, config.tls_config.as_ref()).await?;
+        let channel =
+            crate::transport::channel::connect_channel(&address, config.tls_config.as_ref())
+                .await?;
 
         tracing::info!(
             server_url = %address,
@@ -1326,7 +1332,7 @@ impl ActorOperationPoller {
         };
 
         Ok(Self {
-            client: crate::limits::sized!(
+            client: crate::transport::limits::sized!(
                 ActorServiceClient::new(channel),
                 config.max_message_bytes
             ),
@@ -1389,7 +1395,7 @@ impl ActorOperationPoller {
                 }
 
                 // Recreate channel/client after cool-off
-                let channel = super::channel::connect_channel(
+                let channel = crate::transport::channel::connect_channel(
                     &self.server_url,
                     self.config.tls_config.as_ref(),
                 )
@@ -1397,7 +1403,7 @@ impl ActorOperationPoller {
                 .map_err(|e| {
                     Error::connection(format!("Failed to reconnect to {}: {}", self.server_url, e))
                 })?;
-                self.client = crate::limits::sized!(
+                self.client = crate::transport::limits::sized!(
                     ActorServiceClient::new(channel),
                     self.config.max_message_bytes
                 );

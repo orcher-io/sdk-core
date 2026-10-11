@@ -44,12 +44,12 @@ use tonic::Code;
 
 pub use tokio_util::sync::CancellationToken;
 
-use crate::poller::channel::{Breaker, ChannelManager};
-use crate::poller::completion::{note_connection_failure, Caller};
-use crate::poller::polling::TaskExecutionTask;
 use crate::proto::orcher::v1::{
     execution_service_client::ExecutionServiceClient, RecordTaskHeartbeatRequest,
 };
+use crate::transport::channel::{Breaker, ChannelManager};
+use crate::worker::poll::completion::{note_connection_failure, Caller};
+use crate::worker::poll::polling::TaskExecutionTask;
 
 /// The longest wait between two heartbeats of a task, whatever its heartbeat timeout.
 ///
@@ -493,7 +493,7 @@ async fn send(
             return Err(Code::Unavailable);
         }
     };
-    let mut request = crate::poller::credentials::credentialed_request(
+    let mut request = crate::transport::credentials::credentialed_request(
         RecordTaskHeartbeatRequest {
             task_token: beat.token.clone(),
             namespace: registry.caller.namespace.clone(),
@@ -505,7 +505,7 @@ async fn send(
         registry.caller.organization_id.as_deref(),
     );
     request.set_timeout(period.min(MAX_CALL_TIMEOUT));
-    match crate::limits::sized!(
+    match crate::transport::limits::sized!(
         ExecutionServiceClient::new(channel),
         registry.channel_manager.max_message_bytes()
     )

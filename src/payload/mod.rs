@@ -1,10 +1,14 @@
 //! # Payloads
 //!
+//! What workflow and task data travels as, and how it gets there: the
+//! [`Payload`] type, [converters](converter) between values and payloads, and
+//! [codecs](codec) that compress or encrypt payloads.
+//!
 //! A [`Payload`] is the unit in which workflow and task inputs and results
 //! travel: opaque bytes plus metadata saying how they are encoded. Because the
 //! encoding travels with the data, every language SDK can read what another
 //! wrote, serialization formats are pluggable (JSON, Protobuf, MessagePack),
-//! and [codecs](crate::codec) can compress or encrypt data transparently.
+//! and [codecs](crate::payload::codec) can compress or encrypt data transparently.
 //!
 //! ## Usage
 //!
@@ -33,6 +37,9 @@
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+pub mod codec;
+pub mod converter;
 
 /// Serialized data together with metadata describing its encoding.
 ///

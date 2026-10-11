@@ -9,7 +9,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use orcher_sdk_core::converter::{DataConverter, JsonPayloadConverter};
+//! use orcher_sdk_core::payload::converter::{DataConverter, JsonPayloadConverter};
 //! use serde::{Serialize, Deserialize};
 //!
 //! #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -29,8 +29,8 @@
 //! # Ok::<(), orcher_sdk_core::error::Error>(())
 //! ```
 
-use crate::converter::DataConverter;
 use crate::error::{Error, Result};
+use crate::payload::converter::DataConverter;
 use crate::payload::Payload;
 use std::collections::HashMap;
 
@@ -48,7 +48,7 @@ use std::collections::HashMap;
 /// ## Basic Usage
 ///
 /// ```rust
-/// use orcher_sdk_core::converter::{DataConverter, JsonPayloadConverter};
+/// use orcher_sdk_core::payload::converter::{DataConverter, JsonPayloadConverter};
 ///
 /// let converter = JsonPayloadConverter::default();
 /// let payload = converter.to_payload(&42)?;
@@ -61,7 +61,7 @@ use std::collections::HashMap;
 /// ## Complex Types
 ///
 /// ```rust
-/// use orcher_sdk_core::converter::{DataConverter, JsonPayloadConverter};
+/// use orcher_sdk_core::payload::converter::{DataConverter, JsonPayloadConverter};
 /// use serde::{Serialize, Deserialize};
 /// use std::collections::HashMap;
 ///
@@ -88,7 +88,7 @@ use std::collections::HashMap;
 /// ## Human-Readable Output
 ///
 /// ```rust
-/// use orcher_sdk_core::converter::{DataConverter, JsonPayloadConverter};
+/// use orcher_sdk_core::payload::converter::{DataConverter, JsonPayloadConverter};
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Serialize, Deserialize)]
@@ -115,7 +115,7 @@ impl JsonPayloadConverter {
     /// # Examples
     ///
     /// ```rust
-    /// use orcher_sdk_core::converter::JsonPayloadConverter;
+    /// use orcher_sdk_core::payload::converter::JsonPayloadConverter;
     ///
     /// let converter = JsonPayloadConverter::new();
     /// ```

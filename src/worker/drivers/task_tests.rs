@@ -16,12 +16,16 @@ use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
 
 use super::*;
-use crate::poller::metrics::WorkerMetrics as Metrics;
 use crate::proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
 use crate::proto::orcher::v1::execution_service_server::{
     ExecutionService, ExecutionServiceServer,
 };
 use crate::proto::orcher::v1::*;
+use crate::worker::drivers::{
+    ActorDriver, ActorDriverConfig, ActorWorkResult, WorkflowDriverConfig,
+};
+use crate::worker::metrics::WorkerMetrics as Metrics;
+use crate::worker::poll::completion::{EagerTasks, Report};
 
 #[derive(Default)]
 struct Script {
@@ -1054,7 +1058,7 @@ async fn a_task_driver_tells_the_engine_it_is_shutting_down_and_stops_at_once() 
     assert_eq!(shutdown.identity, "task-worker");
     assert_eq!(
         shutdown.worker_instance_id,
-        crate::poller::worker_instance_id()
+        crate::worker::worker_instance_id()
     );
     assert_eq!(shutdown.task_queues, vec!["q-1", "q-1__session__w"]);
     assert!(script.poll_instance_ids.len() >= 2);
@@ -1062,7 +1066,7 @@ async fn a_task_driver_tells_the_engine_it_is_shutting_down_and_stops_at_once() 
         script
             .poll_instance_ids
             .iter()
-            .all(|id| id == crate::poller::worker_instance_id()),
+            .all(|id| id == crate::worker::worker_instance_id()),
         "a poll did not name the process: {:?}",
         script.poll_instance_ids
     );

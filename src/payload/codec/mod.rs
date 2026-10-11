@@ -55,7 +55,7 @@ pub trait PayloadCodec: Send + Sync {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use orcher_sdk_core::codec::{PayloadCodec, GzipPayloadCodec};
+    /// use orcher_sdk_core::payload::codec::{PayloadCodec, GzipPayloadCodec};
     ///
     /// let codec = GzipPayloadCodec::default();
     /// let original = Payload::json(br#"{"key":"value"}"#.to_vec());
@@ -80,7 +80,7 @@ pub trait PayloadCodec: Send + Sync {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// use orcher_sdk_core::codec::{PayloadCodec, GzipPayloadCodec};
+    /// use orcher_sdk_core::payload::codec::{PayloadCodec, GzipPayloadCodec};
     ///
     /// let codec = GzipPayloadCodec::default();
     /// let original = Payload::json(br#"{"key":"value"}"#.to_vec());
@@ -103,7 +103,7 @@ pub trait PayloadCodec: Send + Sync {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::codec::{CodecChain, GzipPayloadCodec, EncryptionPayloadCodec};
+/// use orcher_sdk_core::payload::codec::{CodecChain, GzipPayloadCodec, EncryptionPayloadCodec};
 ///
 /// let chain = CodecChain::new()
 ///     .with_codec(EncryptionPayloadCodec::new(b"32-byte-secret-key-for-aes-256!!"))

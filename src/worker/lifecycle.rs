@@ -47,12 +47,12 @@ use std::time::Duration;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use crate::poller::channel::{Breaker, ChannelManager};
-use crate::poller::completion::Caller;
 use crate::proto::orcher::v1::{
     execution_service_client::ExecutionServiceClient, ReleaseWorkflowExecutionRequest,
     ShutdownWorkerRequest,
 };
+use crate::transport::channel::{Breaker, ChannelManager};
+use crate::worker::poll::completion::Caller;
 
 /// The most task queues one shutdown may name. A driver polling more than
 /// this names none, which the engine reads as every queue its credential may
@@ -112,7 +112,7 @@ pub(crate) async fn announce_shutdown(
             .connection(Breaker::Respect)
             .await
             .map_err(|e| Status::unavailable(format!("{e:?}")))?;
-        let mut request = crate::poller::credentials::credentialed_request(
+        let mut request = crate::transport::credentials::credentialed_request(
             body,
             caller.api_key.as_deref(),
             caller.organization_id.as_deref(),
@@ -216,7 +216,7 @@ pub(crate) async fn release_on(
         ..Default::default()
     };
     let mut request =
-        crate::poller::credentials::credentialed_request(body, api_key, organization_id);
+        crate::transport::credentials::credentialed_request(body, api_key, organization_id);
     request.set_timeout(timeout);
     let sent = tokio::time::timeout(timeout, client.release_workflow_execution(request)).await;
     match sent {

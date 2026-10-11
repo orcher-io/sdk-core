@@ -5,7 +5,7 @@
 //! - [`default_data_converter()`] - returns the JSON converter
 //!
 //! Implement [`DataConverter`] for other formats such as MessagePack or Protobuf.
-//! A converter produces the payload; a [codec](crate::codec) can then compress or
+//! A converter produces the payload; a [codec](crate::payload::codec) can then compress or
 //! encrypt it, and must be decoded before the converter reads it back.
 
 use crate::error::Result;

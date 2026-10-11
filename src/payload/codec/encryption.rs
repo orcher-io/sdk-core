@@ -20,7 +20,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use orcher_sdk_core::codec::{PayloadCodec, EncryptionPayloadCodec};
+//! use orcher_sdk_core::payload::codec::{PayloadCodec, EncryptionPayloadCodec};
 //!
 //! // AES-256 needs a 32-byte key.
 //! let key = b"32-byte-secret-key-for-aes-256!!";
@@ -59,7 +59,7 @@
 //! ## Chaining with Compression
 //!
 //! ```rust,ignore
-//! use orcher_sdk_core::codec::{CodecChain, EncryptionPayloadCodec, GzipPayloadCodec};
+//! use orcher_sdk_core::payload::codec::{CodecChain, EncryptionPayloadCodec, GzipPayloadCodec};
 //!
 //! // Codecs run in the order added, so this chain encrypts, then compresses.
 //! let chain = CodecChain::new()
@@ -72,13 +72,13 @@
 //!
 //! **Choosing the order.** Ciphertext looks random and barely compresses, so the
 //! chain above spends CPU on gzip for almost no size reduction. To save space,
-//! add [`GzipPayloadCodec`](crate::codec::GzipPayloadCodec) first so data is
+//! add [`GzipPayloadCodec`](crate::payload::codec::GzipPayloadCodec) first so data is
 //! compressed before it is encrypted. Compressing before encrypting lets the
 //! ciphertext length reveal something about the plaintext, which matters when
 //! an attacker can control part of the input and observe the result.
 
-use crate::codec::PayloadCodec;
 use crate::error::{Error, Result};
+use crate::payload::codec::PayloadCodec;
 use crate::payload::Payload;
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -106,7 +106,7 @@ use rand::Rng;
 /// # Examples
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::codec::{PayloadCodec, EncryptionPayloadCodec};
+/// use orcher_sdk_core::payload::codec::{PayloadCodec, EncryptionPayloadCodec};
 /// use orcher_sdk_core::payload::Payload;
 ///
 /// let key = b"32-byte-secret-key-for-aes-256!!";
@@ -135,7 +135,7 @@ impl EncryptionPayloadCodec {
     /// # Examples
     ///
     /// ```rust
-    /// use orcher_sdk_core::codec::EncryptionPayloadCodec;
+    /// use orcher_sdk_core::payload::codec::EncryptionPayloadCodec;
     ///
     /// let key = b"32-byte-secret-key-for-aes-256!!";
     /// let codec = EncryptionPayloadCodec::new(key);
@@ -160,7 +160,7 @@ impl EncryptionPayloadCodec {
     /// # Examples
     ///
     /// ```rust
-    /// use orcher_sdk_core::codec::EncryptionPayloadCodec;
+    /// use orcher_sdk_core::payload::codec::EncryptionPayloadCodec;
     ///
     /// let key_vec = vec![0u8; 32];
     /// let codec = EncryptionPayloadCodec::from_slice(&key_vec).unwrap();
@@ -183,7 +183,7 @@ impl EncryptionPayloadCodec {
     /// # Examples
     ///
     /// ```rust
-    /// use orcher_sdk_core::codec::EncryptionPayloadCodec;
+    /// use orcher_sdk_core::payload::codec::EncryptionPayloadCodec;
     ///
     /// let key = EncryptionPayloadCodec::generate_key();
     /// let codec = EncryptionPayloadCodec::new(&key);

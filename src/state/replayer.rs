@@ -31,16 +31,16 @@
 //! Replayed against its journal, deterministic code reaches every recorded step again: it
 //! takes the step's outcome from the journal, or, for one still open, issues it again. An
 //! activation in which the language SDK reports the steps it reached
-//! ([`ExecutionResult::reached_steps`](crate::bridge::ExecutionResult::reached_steps)) is held
+//! ([`ExecutionResult::reached_steps`](crate::protocol::ExecutionResult::reached_steps)) is held
 //! to that: if a recorded step was not reached, and the activation issues a step the journal
 //! never recorded or ends the workflow, the code no longer does what it did when the journal
 //! was written, and continuing would run a different workflow on top of the old one's history.
 //! A run whose journal records a cancellation request is not held to it, since a language SDK
 //! may stop the code short on cancellation.
 
-use crate::bridge::{Command, ExecutionResult};
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
+use crate::protocol::{Command, ExecutionResult};
 use crate::state::machine::WorkflowStateMachine;
 use crate::types::WorkflowExecution;
 use std::collections::{HashMap, HashSet};
@@ -50,7 +50,7 @@ use std::fmt;
 /// journal.
 ///
 /// Such an activation is not applied: the
-/// [`WorkflowDriver`](crate::poller::WorkflowDriver) logs the violation and
+/// [`WorkflowDriver`](crate::worker::WorkflowDriver) logs the violation and
 /// hands the activation back to the engine to be tried again after a pause,
 /// so the run stays open until code that replays its journal picks it up.
 pub const NON_DETERMINISM_FAILURE_TYPE: &str = "NonDeterminismError";
@@ -626,7 +626,7 @@ pub struct ReplayConfig {
 
     /// Compare the workflow code's commands with the steps the journal recorded, where the
     /// commands are given: [`Replayer::replay_with_commands`], and every activation a
-    /// [`WorkflowDriver`](crate::poller::WorkflowDriver) completes. Default: `true`.
+    /// [`WorkflowDriver`](crate::worker::WorkflowDriver) completes. Default: `true`.
     pub verify_commands: bool,
 
     /// Maximum number of entries a journal may have; longer journals are rejected. 0 means
@@ -1189,13 +1189,13 @@ mod tests {
 
     // ── Commands against the journal ────────────────────────────────────
 
-    use crate::bridge::{
-        CompleteWorkflowCommand, RecordStepResultCommand, ScheduleTaskCommand, SendEventCommand,
-        StartChildWorkflowCommand, StartTimerCommand, WaitForEventCommand,
-    };
     use crate::proto::orcher::v1::{
         journal_entry::Attributes, ChildWorkflowExecutionStartedEventAttributes,
         TaskCompletedEventAttributes, TaskScheduledEventAttributes, TimerStartedEventAttributes,
+    };
+    use crate::protocol::{
+        CompleteWorkflowCommand, RecordStepResultCommand, ScheduleTaskCommand, SendEventCommand,
+        StartChildWorkflowCommand, StartTimerCommand, WaitForEventCommand,
     };
     use std::time::Duration;
 
@@ -1299,7 +1299,7 @@ mod tests {
             task_queue: String::new(),
             input: vec![],
             timeout: None,
-            orphan_policy: crate::bridge::OrphanPolicy::Abandon,
+            orphan_policy: crate::protocol::OrphanPolicy::Abandon,
         })
     }
 
@@ -1626,10 +1626,10 @@ mod tests {
     // `TaskScheduled`, and what the workflow is handed (fired timers, events,
     // task results, closure results) has entries of its own.
 
-    use crate::bridge::{ExecutionError, FailWorkflowCommand};
     use crate::proto::orcher::v1::{
         EventReceivedEventAttributes, StepCompletedEventAttributes, TimerFiredEventAttributes,
     };
+    use crate::protocol::{ExecutionError, FailWorkflowCommand};
 
     fn timer_fired(timer_id: &str) -> Attributes {
         Attributes::TimerFired(TimerFiredEventAttributes {

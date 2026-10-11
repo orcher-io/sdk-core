@@ -16,12 +16,12 @@ use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
 
 use super::*;
-use crate::bridge::{Command as BridgeCommand, CompleteWorkflowCommand, ExecutionResult};
-use crate::poller::driver::{WorkflowDriver, WorkflowWorkResult};
 use crate::proto::orcher::v1::execution_service_server::{
     ExecutionService, ExecutionServiceServer,
 };
 use crate::proto::orcher::v1::*;
+use crate::protocol::{Command as BridgeCommand, CompleteWorkflowCommand, ExecutionResult};
+use crate::worker::drivers::{WorkflowDriver, WorkflowWorkResult};
 
 /// One call as it arrived: the token it carried, and `stream_entry_id` for a
 /// completion.
@@ -919,7 +919,7 @@ async fn callers_without_a_connection_share_one_connect() {
         let manager = Arc::clone(&manager);
         asking.spawn(async move {
             manager
-                .connection(crate::poller::channel::Breaker::Respect)
+                .connection(crate::transport::channel::Breaker::Respect)
                 .await
                 .map(|_| ())
         });
@@ -969,7 +969,7 @@ async fn driver_for(engine: &Engine, config: WorkflowDriverConfig) -> WorkflowDr
 
 type WorkflowDriverParts = (
     WorkflowDriver,
-    tokio::sync::mpsc::Receiver<crate::poller::driver::WorkflowWork>,
+    tokio::sync::mpsc::Receiver<crate::worker::drivers::WorkflowWork>,
     tokio::sync::mpsc::Sender<WorkflowWorkResult>,
 );
 
@@ -1068,7 +1068,7 @@ async fn completions_in_flight_are_capped_and_counted_when_they_land() {
         },
     )
     .await;
-    let metrics = crate::poller::metrics::WorkerMetrics::new();
+    let metrics = crate::worker::metrics::WorkerMetrics::new();
     let mut driver = driver
         .with_completion_retry(quick())
         .with_metrics(Arc::clone(&metrics));
@@ -1431,7 +1431,7 @@ async fn a_driver_left_with_no_sdk_stops() {
 /// A language SDK that runs every activation it is given and hands back a
 /// completion for it, recording which workflows it ran.
 fn completing_sdk(
-    mut work_rx: tokio::sync::mpsc::Receiver<crate::poller::driver::WorkflowWork>,
+    mut work_rx: tokio::sync::mpsc::Receiver<crate::worker::drivers::WorkflowWork>,
     result_tx: tokio::sync::mpsc::Sender<WorkflowWorkResult>,
     delay: Duration,
 ) -> Arc<StdMutex<Vec<String>>> {
@@ -1649,7 +1649,7 @@ async fn shutdown_tells_the_engine_and_an_idle_driver_stops_at_once() {
     assert_eq!(shutdown.identity, "wf-worker");
     assert_eq!(
         shutdown.worker_instance_id,
-        crate::poller::worker_instance_id()
+        crate::worker::worker_instance_id()
     );
     assert_eq!(shutdown.task_queues, vec!["q-1"]);
     assert!(!script.poll_instance_ids.is_empty());
@@ -1657,7 +1657,7 @@ async fn shutdown_tells_the_engine_and_an_idle_driver_stops_at_once() {
         script
             .poll_instance_ids
             .iter()
-            .all(|id| id == crate::poller::worker_instance_id()),
+            .all(|id| id == crate::worker::worker_instance_id()),
         "a poll did not name the process: {:?}",
         script.poll_instance_ids
     );
@@ -1974,7 +1974,7 @@ fn charged_activation(workflow_id: &str, token: &str) -> PollWorkflowExecutionRe
 }
 
 fn schedule(task_id: &str, task_type: &str) -> BridgeCommand {
-    BridgeCommand::ScheduleTask(crate::bridge::ScheduleTaskCommand {
+    BridgeCommand::ScheduleTask(crate::protocol::ScheduleTaskCommand {
         sequence: 0,
         task_id: task_id.into(),
         task_type: task_type.into(),
@@ -2043,7 +2043,7 @@ async fn an_activation_whose_commands_contradict_its_journal_is_retried_not_fail
             ),
             _ => ExecutionResult::failed(
                 task.execution.run_id.clone(),
-                crate::bridge::ExecutionError::non_determinism("the SDK found it".into(), None),
+                crate::protocol::ExecutionError::non_determinism("the SDK found it".into(), None),
             ),
         };
         result_tx
@@ -2335,8 +2335,8 @@ async fn a_held_activation_is_handed_back_at_once_on_shutdown() {
 /// 4 MiB default could not be received at all.
 mod size_limits {
     use super::*;
-    use crate::limits::{MAX_RECEIVE_MESSAGE_BYTES_HEADER, PAYLOAD_TOO_LARGE};
     use crate::proto::orcher::v1::command::Attributes;
+    use crate::transport::limits::{MAX_RECEIVE_MESSAGE_BYTES_HEADER, PAYLOAD_TOO_LARGE};
 
     const MIB: usize = 1024 * 1024;
 
@@ -2612,7 +2612,9 @@ mod size_limits {
     #[tokio::test]
     async fn a_task_result_over_the_grpc_default_is_sent_whole() {
         let engine = SizeEngine::default();
-        let harness = completer_with_limit(&engine, crate::limits::DEFAULT_MAX_MESSAGE_BYTES).await;
+        let harness =
+            completer_with_limit(&engine, crate::transport::limits::DEFAULT_MAX_MESSAGE_BYTES)
+                .await;
 
         let delivery = harness
             .completer
@@ -2625,7 +2627,9 @@ mod size_limits {
         assert!(seen.task_failures.is_empty());
         assert_eq!(
             seen.stated,
-            vec![Some(crate::limits::DEFAULT_MAX_MESSAGE_BYTES.to_string())]
+            vec![Some(
+                crate::transport::limits::DEFAULT_MAX_MESSAGE_BYTES.to_string()
+            )]
         );
     }
 

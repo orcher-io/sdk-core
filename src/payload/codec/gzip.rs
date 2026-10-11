@@ -10,8 +10,8 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use orcher_sdk_core::codec::{PayloadCodec, GzipPayloadCodec};
-//! use orcher_sdk_core::converter::{DataConverter, JsonPayloadConverter};
+//! use orcher_sdk_core::payload::codec::{PayloadCodec, GzipPayloadCodec};
+//! use orcher_sdk_core::payload::converter::{DataConverter, JsonPayloadConverter};
 //!
 //! let converter = JsonPayloadConverter::default();
 //! let codec = GzipPayloadCodec::default();
@@ -41,7 +41,7 @@
 //! ## Compression Levels
 //!
 //! ```rust,ignore
-//! use orcher_sdk_core::codec::GzipPayloadCodec;
+//! use orcher_sdk_core::payload::codec::GzipPayloadCodec;
 //! use flate2::Compression;
 //!
 //! // Fastest compression (level 1).
@@ -54,8 +54,8 @@
 //! let default_codec = GzipPayloadCodec::default();
 //! ```
 
-use crate::codec::PayloadCodec;
 use crate::error::{Error, Result};
+use crate::payload::codec::PayloadCodec;
 use crate::payload::Payload;
 use flate2::read::{GzDecoder, GzEncoder};
 use flate2::Compression;
@@ -70,7 +70,7 @@ use std::io::Read;
 /// # Examples
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::codec::{PayloadCodec, GzipPayloadCodec};
+/// use orcher_sdk_core::payload::codec::{PayloadCodec, GzipPayloadCodec};
 /// use orcher_sdk_core::payload::Payload;
 ///
 /// let codec = GzipPayloadCodec::default();
@@ -97,7 +97,7 @@ impl GzipPayloadCodec {
     /// # Examples
     ///
     /// ```rust
-    /// use orcher_sdk_core::codec::GzipPayloadCodec;
+    /// use orcher_sdk_core::payload::codec::GzipPayloadCodec;
     /// use flate2::Compression;
     ///
     /// let fast = GzipPayloadCodec::new(Compression::fast());

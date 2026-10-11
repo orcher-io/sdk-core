@@ -1,4 +1,4 @@
-//! Conversions between the executor's internal types and the bridge types
+//! Conversions between the executor's internal types and the protocol types
 //! exchanged with language SDKs.
 //!
 //! ## Conversion flow
@@ -13,17 +13,17 @@
 //!                                          gRPC Response
 //! ```
 
-use crate::bridge::{
+use crate::error::{Error, Result};
+use crate::proto::orcher::v1::{EntryType, JournalEntry};
+use crate::protocol::{
     CancelWorkflowJob, ChildWorkflowCanceledJob, ChildWorkflowCompletedJob, ChildWorkflowFailedJob,
     ChildWorkflowFailure, ChildWorkflowStartedJob, ChildWorkflowTerminatedJob,
     ChildWorkflowTimedOutJob, ChildWorkflowTimeoutType, CompleteStepJob, EvictFromCacheJob,
     EvictionReason, ExecutionRequest, ExecutionResult, FireTimerJob, HandleEventJob,
     ProcessQueryJob, RequestJob, RequestStepFailure, StartWorkflowJob, UpdateStateJob,
 };
-use crate::error::{Error, Result};
-use crate::poller::{TaskExecutionTask, WorkflowExecutionTask};
-use crate::proto::orcher::v1::{EntryType, JournalEntry};
 use crate::types::{Payload, WorkflowExecution};
+use crate::worker::{TaskExecutionTask, WorkflowExecutionTask};
 use std::time::SystemTime;
 
 /// Converts a workflow task polled from the server into an [`ExecutionRequest`] for the SDK.
@@ -498,7 +498,7 @@ pub fn extract_commands(result: ExecutionResult) -> Result<ExecutionResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::{Command, CompleteWorkflowCommand};
+    use crate::protocol::{Command, CompleteWorkflowCommand};
     use crate::types::Payload;
 
     #[test]
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_validate_execution_result_multiple_terminal_commands() {
-        use crate::bridge::FailWorkflowCommand;
+        use crate::protocol::FailWorkflowCommand;
 
         let mut result = ExecutionResult::success("run-123".to_string(), vec![]);
         result.add_command(Command::CompleteWorkflow(CompleteWorkflowCommand {
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_validate_execution_result_terminal_not_last() {
-        use crate::bridge::StartTimerCommand;
+        use crate::protocol::StartTimerCommand;
         use std::time::Duration;
 
         let mut result = ExecutionResult::success("run-123".to_string(), vec![]);

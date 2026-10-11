@@ -1,8 +1,6 @@
-//! State tracking and replay for deterministic workflow execution.
-//!
-//! This module holds the workflow and task state machines, the replayer that
-//! checks workflow code against its recorded history, and the cache of live
-//! workflow state.
+//! Workflow state: the workflow and task state machines, the replayer that
+//! checks workflow code against its journal step by step, and the cache of
+//! live workflow state.
 //!
 //! ## Terminology
 //!

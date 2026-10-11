@@ -10,7 +10,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use orcher_sdk_core::converter::{DataConverter, BinaryPayloadConverter};
+//! use orcher_sdk_core::payload::converter::{DataConverter, BinaryPayloadConverter};
 //!
 //! let converter = BinaryPayloadConverter::default();
 //! let data = vec![0x01, 0x02, 0x03, 0x04];
@@ -23,8 +23,8 @@
 //! # Ok::<(), orcher_sdk_core::error::Error>(())
 //! ```
 
-use crate::converter::DataConverter;
 use crate::error::{Error, Result};
+use crate::payload::converter::DataConverter;
 use crate::payload::Payload;
 use std::collections::HashMap;
 
@@ -48,7 +48,7 @@ use std::collections::HashMap;
 /// ## Basic Usage
 ///
 /// ```rust
-/// use orcher_sdk_core::converter::{DataConverter, BinaryPayloadConverter};
+/// use orcher_sdk_core::payload::converter::{DataConverter, BinaryPayloadConverter};
 ///
 /// let converter = BinaryPayloadConverter::default();
 /// let data = vec![0x01, 0x02, 0x03];
@@ -62,7 +62,7 @@ use std::collections::HashMap;
 /// ## With Protobuf
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::converter::{DataConverter, BinaryPayloadConverter};
+/// use orcher_sdk_core::payload::converter::{DataConverter, BinaryPayloadConverter};
 /// use prost::Message;
 ///
 /// // With a real message type:
@@ -85,7 +85,7 @@ use std::collections::HashMap;
 /// ## Large Binary Data
 ///
 /// ```rust,ignore
-/// use orcher_sdk_core::converter::{DataConverter, BinaryPayloadConverter};
+/// use orcher_sdk_core::payload::converter::{DataConverter, BinaryPayloadConverter};
 ///
 /// let converter = BinaryPayloadConverter::default();
 ///
@@ -104,7 +104,7 @@ impl BinaryPayloadConverter {
     /// # Examples
     ///
     /// ```rust
-    /// use orcher_sdk_core::converter::BinaryPayloadConverter;
+    /// use orcher_sdk_core::payload::converter::BinaryPayloadConverter;
     ///
     /// let converter = BinaryPayloadConverter::new();
     /// ```

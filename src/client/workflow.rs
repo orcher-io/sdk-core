@@ -324,13 +324,13 @@ impl WorkflowClient {
     /// [`WorkflowClient::with_organization_id`].
     pub fn from_channel(channel: Channel) -> Self {
         let auth = AuthInterceptor::default();
-        let max_message_bytes = crate::limits::default_max_message_bytes();
+        let max_message_bytes = crate::transport::limits::default_max_message_bytes();
         Self {
-            client: crate::limits::sized!(
+            client: crate::transport::limits::sized!(
                 WorkflowServiceClient::with_interceptor(channel.clone(), auth.clone()),
                 max_message_bytes
             ),
-            query_client: crate::limits::sized!(
+            query_client: crate::transport::limits::sized!(
                 QueryServiceClient::with_interceptor(channel.clone(), auth.clone()),
                 max_message_bytes
             ),
@@ -345,7 +345,7 @@ impl WorkflowClient {
     /// Sends and receives messages of up to `max_message_bytes`: a workflow's
     /// input, its result, an event's payload.
     ///
-    /// [`crate::limits::default_max_message_bytes`] unless set:
+    /// [`crate::transport::limits::default_max_message_bytes`] unless set:
     /// `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's default. A message
     /// over the limit on either side fails with an OUT_OF_RANGE status that
     /// says which limit to raise.
@@ -370,11 +370,11 @@ impl WorkflowClient {
     /// The interceptor is bound when the clients are constructed, so changing
     /// `auth` alone would leave the existing clients sending the old headers.
     fn rebuild_clients(&mut self) {
-        self.client = crate::limits::sized!(
+        self.client = crate::transport::limits::sized!(
             WorkflowServiceClient::with_interceptor(self.channel.clone(), self.auth.clone()),
             self.max_message_bytes
         );
-        self.query_client = crate::limits::sized!(
+        self.query_client = crate::transport::limits::sized!(
             QueryServiceClient::with_interceptor(self.channel.clone(), self.auth.clone()),
             self.max_message_bytes
         );
