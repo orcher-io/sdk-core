@@ -728,7 +728,7 @@ impl WorkflowExecutionPoller {
             }
             // A message over the size limit is said as such, not as tonic's
             // "decoded message length too large".
-            let e = crate::transport::limits::clarify(e);
+            let e = crate::transport::clarify(e);
             tracing::warn!(
                 error_code = ?e.code(),
                 error_message = %e.message(),
@@ -1188,7 +1188,7 @@ impl TaskExecutionPoller {
                         tracing::trace!("Poll timeout (expected)");
                         return Error::timeout("poll task execution");
                     }
-                    let e = crate::transport::limits::clarify(e);
+                    let e = crate::transport::clarify(e);
                     tracing::warn!(error = %e, code = ?e.code(), "Task poll gRPC error");
                     Error::GrpcStatus(e)
                 })?;
@@ -1639,9 +1639,11 @@ mod tests {
         assert_eq!(secs(u32::MAX), 30);
     }
 
-    /// The status a proxy produces while the engine restarts. The status
-    /// table does not retry it, so the poller must survive it on the
-    /// unexpected-error path.
+    /// A protocol error with nothing saying where it came from. A proxy's
+    /// page carries its content type and is restated as the engine being
+    /// unavailable (`transport::non_grpc`); without one, the status table does
+    /// not retry it, so the poller must survive it on the unexpected-error
+    /// path.
     #[test]
     fn a_protocol_error_from_a_proxy_is_not_retryable_by_the_status_table() {
         let status = tonic::Status::internal(

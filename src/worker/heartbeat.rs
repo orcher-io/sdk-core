@@ -514,6 +514,7 @@ async fn send(
     {
         Ok(response) => Ok(response.into_inner().cancel_requested),
         Err(status) => {
+            let status = crate::transport::clarify(status);
             note_connection_failure(&registry.channel_manager, &status, generation);
             tracing::debug!(
                 task_id = %beat.task_id,

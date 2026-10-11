@@ -221,7 +221,7 @@ pub(crate) fn with_causes(error: &(dyn std::error::Error + 'static)) -> String {
 
 impl From<tonic::Status> for Error {
     fn from(status: tonic::Status) -> Self {
-        Error::GrpcStatus(crate::transport::limits::clarify(status))
+        Error::GrpcStatus(crate::transport::clarify(status))
     }
 }
 
