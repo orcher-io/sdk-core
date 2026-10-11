@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.1](https://github.com/orcher-io/sdk-core/compare/v0.10.0...v0.10.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* never print an API key or mTLS private key in Debug output ([#45](https://github.com/orcher-io/sdk-core/issues/45)) ([b9657f2](https://github.com/orcher-io/sdk-core/commit/b9657f2cf444664c453b36c14e5d196c11be1ba1))
+* return every float in a payload as the same number ([#46](https://github.com/orcher-io/sdk-core/issues/46)) ([8384be2](https://github.com/orcher-io/sdk-core/commit/8384be23da07a9d7187e6977ccec53eba06871dc)), closes [#4](https://github.com/orcher-io/sdk-core/issues/4)
+
+
+### Changes
+
+* give worker capacity one home in worker/governor ([#23](https://github.com/orcher-io/sdk-core/issues/23)) ([d4966ab](https://github.com/orcher-io/sdk-core/commit/d4966ab1417b13e2785a16549f63fae8483e3678))
+* organise sources by role (state, protocol, worker drivers, transport, payload) ([#22](https://github.com/orcher-io/sdk-core/issues/22)) ([a1d7f62](https://github.com/orcher-io/sdk-core/commit/a1d7f62120559df1fc46a80b2e3bfb41e6663a8b))
+
 ## [0.10.0](https://github.com/orcher-io/sdk-core/compare/v0.9.2...v0.10.0) (2026-10-08)
 
 
