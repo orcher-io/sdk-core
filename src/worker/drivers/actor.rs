@@ -12,12 +12,11 @@ use crate::proto::orcher::v1::{
     ExecutionStatus, HeartbeatRequest, WorkerMetrics, WorkerStatus,
 };
 use crate::transport::channel::{Breaker, ChannelManager};
+use crate::worker::governor::{InFlight, SlotBudget, SlotPermit};
 use crate::worker::poll::completion::{
     note_connection_failure, Caller, Completer, CompletionRetryConfig,
 };
 use crate::worker::poll::polling::{ActorOperationPoller, ActorPollerConfig};
-
-use super::InFlight;
 
 /// Events emitted by the ActorDriver to notify the language SDK.
 #[derive(Debug, Clone)]
@@ -295,12 +294,10 @@ impl ActorDriver {
         // first heartbeat goes out one interval after start.
         heartbeat_ticker.tick().await;
 
-        let slots = Arc::new(tokio::sync::Semaphore::new(
-            self.completion_retry
-                .max_in_flight
-                .unwrap_or(self.config.max_concurrent_executions)
-                .max(1),
-        ));
+        let slots = SlotBudget::for_reports(
+            self.completion_retry.max_in_flight,
+            self.config.max_concurrent_executions,
+        );
         // Each report is sent, and retried, from its own task. Retried
         // inline, one report would hold up every other result and the
         // hand-off of new operations for as long as it kept trying.
@@ -309,7 +306,7 @@ impl ActorDriver {
         // A slot for the next report, taken before a result is accepted, so
         // a backlog of reports holds the language SDK back rather than
         // growing without bound.
-        let mut slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
+        let mut slot: Option<SlotPermit> = None;
         // Room in the work channel, reserved before an operation is taken, so
         // handing one over never waits. The task driver's run loop explains why.
         let mut room: Option<mpsc::OwnedPermit<ActorWork>> = None;
@@ -332,8 +329,8 @@ impl ActorDriver {
                     }
                 }
 
-                permit = Arc::clone(&slots).acquire_owned(), if slot.is_none() => {
-                    slot = permit.ok();
+                permit = slots.acquire(), if slot.is_none() => {
+                    slot = Some(permit);
                 }
 
                 reserved = self.work_sender.clone().reserve_owned(),
@@ -394,7 +391,7 @@ impl ActorDriver {
                 }
 
                 // Reap finished reports so the set does not grow without bound.
-                Some(finished) = in_flight.set.join_next(), if !in_flight.set.is_empty() => {
+                Some(finished) = in_flight.join_next(), if !in_flight.is_empty() => {
                     in_flight.reaped(finished);
                 }
             }
