@@ -21,7 +21,7 @@ use crate::transport::channel::ChannelManager;
 use crate::worker::drivers::ShutdownHandle;
 
 /// Configuration for worker registration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct WorkerRegistrationConfig {
     /// Server address.
@@ -85,6 +85,49 @@ pub struct WorkerRegistrationConfig {
     /// [`WorkflowDriverConfig::protocol_version`](crate::WorkflowDriverConfig::protocol_version),
     /// which should be the same.
     pub protocol_version: u32,
+}
+
+// Written by hand so the secret is never printed; destructured so that a new
+// field must be added here to compile.
+impl std::fmt::Debug for WorkerRegistrationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server_url,
+            service_id,
+            identity,
+            task_queue,
+            namespace,
+            workflow_types,
+            task_types,
+            max_concurrent_workflows,
+            max_concurrent_tasks,
+            heartbeat_interval,
+            metadata,
+            version_id,
+            tls_config,
+            api_key,
+            organization_id,
+            protocol_version,
+        } = self;
+        f.debug_struct("WorkerRegistrationConfig")
+            .field("server_url", server_url)
+            .field("service_id", service_id)
+            .field("identity", identity)
+            .field("task_queue", task_queue)
+            .field("namespace", namespace)
+            .field("workflow_types", workflow_types)
+            .field("task_types", task_types)
+            .field("max_concurrent_workflows", max_concurrent_workflows)
+            .field("max_concurrent_tasks", max_concurrent_tasks)
+            .field("heartbeat_interval", heartbeat_interval)
+            .field("metadata", metadata)
+            .field("version_id", version_id)
+            .field("tls_config", tls_config)
+            .field("api_key", &crate::transport::credentials::redacted(api_key))
+            .field("organization_id", organization_id)
+            .field("protocol_version", protocol_version)
+            .finish()
+    }
 }
 
 /// Registration authenticates exactly as polling and reporting do; see

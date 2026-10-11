@@ -85,7 +85,7 @@ impl From<mpsc::Sender<TaskWork>> for EagerTaskInjector {
 }
 
 /// Configuration for the task driver.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct TaskDriverConfig {
     /// Server address.
@@ -151,6 +151,47 @@ pub struct TaskDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+}
+
+// Written by hand so the secret is never printed; destructured so that a new
+// field must be added here to compile.
+impl std::fmt::Debug for TaskDriverConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server_url,
+            namespace,
+            task_queue,
+            max_concurrent_executions,
+            identity,
+            poll_timeout,
+            enable_heartbeat,
+            heartbeat_interval,
+            poller_count,
+            organization_id,
+            api_key,
+            tls_config,
+            version_id,
+            auto_heartbeat,
+            max_message_bytes,
+        } = self;
+        f.debug_struct("TaskDriverConfig")
+            .field("server_url", server_url)
+            .field("namespace", namespace)
+            .field("task_queue", task_queue)
+            .field("max_concurrent_executions", max_concurrent_executions)
+            .field("identity", identity)
+            .field("poll_timeout", poll_timeout)
+            .field("enable_heartbeat", enable_heartbeat)
+            .field("heartbeat_interval", heartbeat_interval)
+            .field("poller_count", poller_count)
+            .field("organization_id", organization_id)
+            .field("api_key", &crate::transport::credentials::redacted(api_key))
+            .field("tls_config", tls_config)
+            .field("version_id", version_id)
+            .field("auto_heartbeat", auto_heartbeat)
+            .field("max_message_bytes", max_message_bytes)
+            .finish()
+    }
 }
 
 impl Default for TaskDriverConfig {

@@ -6,7 +6,7 @@ use tonic::transport::{Channel, Endpoint};
 /// TLS configuration for gRPC connections.
 ///
 /// Used by `ChannelManager` and driver configs to establish TLS/mTLS connections.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct TlsConfig {
     /// CA certificate PEM bytes for verifying the server.
@@ -22,6 +22,28 @@ pub struct TlsConfig {
     pub client_key: Option<Vec<u8>>,
     /// Domain name to use for SNI and certificate verification instead of the URL's host.
     pub domain_name: Option<String>,
+}
+
+// Written by hand so the secret is never printed; destructured so that a new
+// field must be added here to compile.
+impl std::fmt::Debug for TlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            ca_cert,
+            client_cert,
+            client_key,
+            domain_name,
+        } = self;
+        f.debug_struct("TlsConfig")
+            .field("ca_cert", ca_cert)
+            .field("client_cert", client_cert)
+            .field(
+                "client_key",
+                &crate::transport::credentials::redacted(client_key),
+            )
+            .field("domain_name", domain_name)
+            .finish()
+    }
 }
 
 impl TlsConfig {

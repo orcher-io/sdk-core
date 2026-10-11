@@ -35,6 +35,24 @@ pub fn credentialed_request<T>(
     request
 }
 
+/// Shows that a secret is set without showing it, for `Debug` output.
+///
+/// Configs carrying an API key or a private key implement `Debug` by hand
+/// with this, because a derived `Debug` prints them in plain text into any
+/// log line or panic message that formats the config.
+pub(crate) fn redacted<T>(secret: &Option<T>) -> Option<Redacted> {
+    secret.as_ref().map(|_| Redacted)
+}
+
+/// The `Debug` stand-in for a secret: prints `<redacted>`.
+pub(crate) struct Redacted;
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +83,95 @@ mod tests {
         let request = credentialed_request((), Some("key\nwith\nnewlines"), Some("org\nid"));
         assert!(request.metadata().get("authorization").is_none());
         assert!(request.metadata().get("x-organization-id").is_none());
+    }
+
+    /// No config that carries a secret prints it when formatted with `{:?}`,
+    /// as a log line or a panic message would; each still shows that one is
+    /// set. The mTLS key travels inside every driver config's TLS settings.
+    #[test]
+    fn formatting_a_config_never_prints_its_secrets() {
+        use crate::transport::TlsConfig;
+        use crate::worker::drivers::{
+            actor::ActorDriverConfig, registration::WorkerRegistrationConfig,
+            task::TaskDriverConfig, workflow::WorkflowDriverConfig,
+        };
+        use crate::worker::poll::polling::{ActorPollerConfig, PollerConfig};
+
+        const KEY: &str = "sk-live-do-not-print";
+        const PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----do-not-print";
+        let tls = || {
+            Some(TlsConfig {
+                client_key: Some(PRIVATE_KEY.as_bytes().to_vec()),
+                ..TlsConfig::default()
+            })
+        };
+
+        let formatted = [
+            format!("{:?}", tls().unwrap()),
+            format!(
+                "{:?}",
+                TaskDriverConfig {
+                    api_key: Some(KEY.into()),
+                    tls_config: tls(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                WorkflowDriverConfig {
+                    api_key: Some(KEY.into()),
+                    tls_config: tls(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                WorkerRegistrationConfig {
+                    api_key: Some(KEY.into()),
+                    tls_config: tls(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                ActorDriverConfig {
+                    api_key: Some(KEY.into()),
+                    tls_config: tls(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:#?}",
+                PollerConfig {
+                    api_key: Some(KEY.into()),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                ActorPollerConfig {
+                    api_key: Some(KEY.into()),
+                    ..Default::default()
+                }
+            ),
+        ];
+        // Byte form too: a derived Debug printed the key as a byte array.
+        let key_bytes = format!("{:?}", &PRIVATE_KEY.as_bytes()[..8]);
+        let key_bytes = key_bytes.trim_end_matches(']');
+        for output in &formatted {
+            assert!(!output.contains(KEY), "API key printed: {output}");
+            assert!(
+                !output.contains("PRIVATE KEY"),
+                "private key printed: {output}"
+            );
+            assert!(
+                !output.contains(key_bytes),
+                "private key bytes printed: {output}"
+            );
+            assert!(
+                output.contains("<redacted>"),
+                "no sign the secret is set: {output}"
+            );
+        }
     }
 }
