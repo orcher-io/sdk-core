@@ -15,7 +15,7 @@ exclude = ["tests/fixtures/"]
 
 [dependencies]
 # Protocol definitions
-orcher-proto = "0.2"
+orcher-proto = "0.3"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
