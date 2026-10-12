@@ -80,7 +80,8 @@ Names are this protocol's own; field numbers to be assigned in protos#14.
 message WorkerHello {
   repeated uint32 protocol_versions = 1;   // every semantic version the SDK implements
   string sdk_name = 2;  string sdk_version = 3;  string language = 4;
-  StepIdScheme legacy_step_ids = 5;         // §8.3: the scheme this SDK's pre-v2 runs use
+  StepIdScheme legacy_step_ids = 5;         // deprecated by supported_step_ids
+  repeated StepIdScheme supported_step_ids = 7;  // §8.3: every scheme it can replay; routing checks this
   Capabilities capabilities = 6;            // §10
 }
 message HelloAccepted { uint32 protocol_version = 1; Capabilities granted = 2; }
@@ -95,7 +96,7 @@ message RunActivation {
 message Resolution {
   string step_id = 1;  google.protobuf.Timestamp at = 2;  bool replaying = 3;
   oneof what {
-    RunStarted    started = 10;   // input payloads, attempt, start time, random seed, parent, headers
+    RunStarted    started = 10;   // input, attempt, start time, scheme, lineage-derived seed, parent, headers
     StepSettled   step    = 11;   // Outcome of a task, closure/side effect or session step
     ChildSettled  child   = 12;   // Outcome of a child run
     TimerElapsed  timer   = 13;
@@ -191,14 +192,35 @@ Comparison is a structured key per command, field by field, not a hash of the se
 - **Intended incompatible changes go through workflow versioning, not a looser table.** Runs stay bound to the release that started them, so an incompatible change ships as a new release while open runs finish on the old code.
 - A `DeterminismViolation` names the field that differed, with expected and actual values, and says to ship incompatible changes as a new release.
 
-### 8.3 In-flight runs
-**Runs already in flight carry the ids their SDK made**, and those differ (the §2 table). Changing the scheme under a running workflow breaks its replay. So:
-- A run records the scheme it started under. New runs on v2 use the kernel scheme, written into `WorkflowExecutionStarted` (one additive engine-wire field, `step_id_scheme`).
-- A run with no recorded scheme started before v2; the kernel replays it with the legacy scheme the SDK declares in `WorkerHello.legacy_step_ids` (`RUST_V0`, `PY_V0`, `TS_V0`), reproducing today's conventions exactly, including py's 1-based counter and ts's `child_{n}`.
-- Legacy schemes are frozen, and retired once no run uses them.
-- **Tested against real persisted histories, not only synthetic ones**: a corpus of real workflow journals recorded by all three SDKs (contract, conformance and benchmark runs; 7,837 at the time of writing). Each legacy scheme must replay its SDK's recorded journals with zero violations before v2 ships.
+### 8.3 Step-id schemes and history identity
 
-Deterministic random follows the same rule: v2 runs get a seed in `RunStarted` and draw from one generator the kernel specifies (a fixed algorithm, so every language produces the same values from the same seed and nothing needs journaling); each SDK keeps its own `random` API over it. Legacy runs keep their SDK's generator. This also removes Rust's toolchain-dependent seed for new runs.
+**Runs already in flight carry the ids their SDK made**, and those differ (the §2 table). Changing the scheme under a running workflow breaks its replay, and some of those ids cannot be reproduced from the command stream at all: Rust names a task `{task_type}_{n}` from `execute_task` but `task_{n}` from `execute_task_with_options`, so the kernel, which sees only the command, cannot tell which one a run used.
+
+**Schemes.** A scheme is a named, frozen rule for step ids. `KERNEL_V1` is the kernel's: the kernel assigns every id from the command's kind and call sequence, and a child's default workflow id from the history lineage (below) and the sequence, so concurrent parents never share one. `RUST_V0`, `PY_V0` and `TS_V0` are the SDKs' rules from before the kernel. Schemes are append-only: a change is a new scheme, never an edit, so every history replays under the rules that wrote it.
+
+**Who supplies ids.**
+- Under `KERNEL_V1`, the kernel assigns them.
+- Under a legacy scheme, **the SDK supplies them**, from a small, frozen legacy-id module it keeps for as long as historical replay and reset are supported. The kernel does not reproduce legacy rules; it compares the ids the SDK supplies against history. The rest of each SDK's pre-kernel execution path is retired; the legacy-id module is not, because a reset or replay of an archived legacy history needs ids only that module can produce.
+- Determinism validation is the kernel's in both cases, with the same full, ordered, field-by-field comparison (§8.2). Legacy ids do not weaken it: the task type and every other compared field are checked, so a changed task cannot hide behind an id format.
+
+**Binding.** A run's scheme and its deterministic identity are bound **atomically at its first activation**, by the engine, from what the first worker to run it reports, and never change after:
+- At creation the engine cannot know which worker will run the run; binding then would hand a kernel-scheme run to an older worker mid-upgrade. This is the rule workflow versioning already follows (bound on first claim, never re-bound).
+- A run in flight before binding existed carries no marker. The first activation of it by a worker that reports schemes binds the legacy scheme that worker's SDK used, so from then on legacy runs are routed exactly too. A run never activated again stays unmarked and needs no routing.
+- Task retries, worker migration, engine restarts and claim handovers never change the binding.
+
+**History identity.** Two identities, kept distinct:
+- The **physical history**: one run's journal, identified by its run id.
+- The **history lineage**: the line of decisions the run's steps belong to. It is created with a fresh history and bound at first activation with the scheme; **reset copies it** (a reset run replays the decisions of the history it was reset from); restart-fresh and workflow-level retry start a fresh history and so a new lineage.
+
+Everything a replay must reproduce derives from the lineage, never from the run id: default child workflow ids, and the deterministic random seed (`RunStarted.random_seed`). Deriving them from the run id would change them on reset, breaking the copied steps; deriving them from the workflow id alone would let a retry collide with a child a previous attempt left open.
+
+**Routing.** The compatibility contract is **support for the run's recorded scheme**: the engine hands a run only to a worker that reports supporting its scheme (refuse, never fall through, as for versioning). Protocol version 2 is the initial proxy (a v2 worker supports `KERNEL_V1` plus its own legacy scheme), but workers report the list of schemes they support (`WorkerHello`), and that list is what routing checks. A worker never receives a run whose scheme it cannot replay.
+
+**Retirement.** The kernel keeps legacy comparison indefinitely; it costs nothing beyond comparing supplied ids. Each SDK's legacy-id module stays for as long as historical replay and reset of legacy histories are supported, which is a support-policy decision, not tied to whether legacy runs are still open.
+
+**Tested against real persisted histories, not only synthetic ones**: the replay corpus (recorded with `ORCHER_RECORD_ACTIVATIONS` from all three SDKs) checks that each legacy scheme's SDK-supplied ids compare clean against its own recorded histories, and that the `KERNEL_V1` rules are deterministic across languages.
+
+Deterministic random: `KERNEL_V1` runs get the lineage-derived seed in `RunStarted` and draw from one generator the kernel specifies (a fixed algorithm, so every language produces the same values from the same seed and nothing needs journaling); each SDK keeps its own `random` API over it. Legacy runs keep their SDK's generator, inside its frozen legacy module. This also removes Rust's toolchain-dependent seed for new runs.
 
 ## 9. Caching: three separate optimizations
 
@@ -233,7 +255,7 @@ Additive `orcher.v1` fields, each its own engine issue; none is needed for the f
 | step results as real journal entries in order (stop appending synthetic `StepCompleted` after the journal) | correct ordering and time without heuristics; incremental history | orcher#307 |
 | `history_after_entry_id` on the poll, `full_history` on the response | §9.2 | orcher#307 |
 | route a run to the worker holding its history (the engine already has affinity leases internally) | cache hits | orcher#307, #292 |
-| `step_id_scheme` on `WorkflowExecutionStarted` | §8.3 | new |
+| bind the step-id scheme and history lineage at first activation; route runs only to workers supporting their scheme | §8.3 | new |
 | `max_items` on polls; batch claim | credits | orcher#308 |
 | batched heartbeat with capacity report | §10 | orcher#309 |
 | next activation in the completion response | one round trip per hot step | orcher#310 |
@@ -282,7 +304,8 @@ Taken:
 - v1 is replay-based (§4); live instances deferred (§9.3).
 - Caching starts kernel-side and is invisible to the SDK (§9.2).
 - Task and actor work stay off this protocol in v1.
-- Legacy step-id schemes are frozen code paths, verified against real journals (§8.3).
+- Legacy runs: the SDK supplies step ids from a frozen legacy-id module, kept while historical replay and reset are supported; the kernel compares them (§8.3).
+- Scheme and history lineage are bound atomically at first activation, preserved across reset, and route runs only to workers supporting the recorded scheme (§8.3).
 - Engine-side resolution: kept possible, decided after measurement (§12).
 - Queries are answered in the same activation, after the handler runs (§7).
 
