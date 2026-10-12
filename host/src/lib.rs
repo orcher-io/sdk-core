@@ -12,20 +12,27 @@
 //!
 //! The design is `docs/worker-host.md` in the sdk-core repository. The host
 //! hands work to the language by pull: the language asks for the next piece
-//! of work when it has room to run one. That API arrives in later releases
-//! alongside each kind of work; this release covers configuration and the
-//! worker's registration lifecycle.
+//! of work when it has room to run one, and returns its outcome. Tasks are
+//! handed over this way ([`Host::next_task`]); workflow activations, sessions
+//! and actor operations follow.
 
 pub mod config;
+mod tasks;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use orcher_sdk_core::proto::host::v1::{HeartbeatAnswer, TaskAssignment, TaskOutcome};
+use orcher_sdk_core::proto::kernel::v1::Payload;
 use orcher_sdk_core::worker::drivers::registration::DEREGISTER_TIMEOUT;
-use orcher_sdk_core::worker::{NeededDrivers, ShutdownHandle};
+use orcher_sdk_core::worker::{NeededDrivers, ShutdownHandle, TaskDriver};
 use orcher_sdk_core::{Error, Result, WorkerRegistrationDriver};
 use tokio::task::JoinHandle;
 
 pub use config::HostConfig;
+
+/// How long a driver has to stop once asked, before it is aborted.
+pub const DRIVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the worker runs: the workflow, task and actor types it registered.
 #[derive(Debug, Clone, Default)]
@@ -59,17 +66,40 @@ impl Registrations {
     }
 }
 
-/// A running worker host.
-#[derive(Debug)]
+/// A running worker host. Cheap to clone: every clone is the same worker, so
+/// a language can pull work from as many places as it runs work in.
+#[derive(Clone)]
 pub struct Host {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     config: HostConfig,
     needed: NeededDrivers,
+    tasks: Option<tasks::Tasks>,
+    stops: Mutex<Stops>,
+}
+
+/// What stops the worker's drivers, taken once by [`Host::shutdown`].
+#[derive(Default)]
+struct Stops {
+    drivers: Vec<(&'static str, ShutdownHandle, JoinHandle<()>)>,
     registration: Option<(ShutdownHandle, JoinHandle<()>)>,
 }
 
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host")
+            .field("identity", &self.inner.config.identity)
+            .field("needed", &self.inner.needed)
+            .finish()
+    }
+}
+
 impl Host {
-    /// Starts a worker: registers it with the engine and keeps it registered
-    /// until [`shutdown`](Self::shutdown).
+    /// Starts a worker: starts the drivers its registrations need, registers
+    /// it with the engine, and keeps it registered until
+    /// [`shutdown`](Self::shutdown).
     ///
     /// # Errors
     ///
@@ -82,13 +112,33 @@ impl Host {
                 "the worker registered no workflow, task or actor to run".to_string(),
             ));
         }
-        let mut driver = WorkerRegistrationDriver::new(config.registration(&registrations)).await?;
-        let stop = driver.shutdown_handle();
+        let mut stops = Stops::default();
+
+        let tasks = if needed.tasks {
+            let (mut driver, work, results, _sessions) =
+                TaskDriver::new(config.task_driver()).await?;
+            let stop = driver.shutdown_handle();
+            let running = tokio::spawn(async move {
+                if let Err(error) = driver.run().await {
+                    tracing::warn!(%error, "The task driver ended with an error");
+                }
+            });
+            stops.drivers.push(("task", stop, running));
+            Some(tasks::Tasks::new(config.namespace.clone(), work, results))
+        } else {
+            None
+        };
+
+        let mut registration =
+            WorkerRegistrationDriver::new(config.registration(&registrations)).await?;
+        let stop = registration.shutdown_handle();
         let running = tokio::spawn(async move {
-            if let Err(error) = driver.run().await {
+            if let Err(error) = registration.run().await {
                 tracing::warn!(%error, "Worker registration ended with an error");
             }
         });
+        stops.registration = Some((stop, running));
+
         tracing::info!(
             identity = %config.identity,
             workflows = needed.workflows,
@@ -97,43 +147,98 @@ impl Host {
             "Worker host started"
         );
         Ok(Self {
-            config,
-            needed,
-            registration: Some((stop, running)),
+            inner: Arc::new(Inner {
+                config,
+                needed,
+                tasks,
+                stops: Mutex::new(stops),
+            }),
         })
     }
 
     /// The worker's configuration.
     pub fn config(&self) -> &HostConfig {
-        &self.config
+        &self.inner.config
     }
 
     /// The drivers the worker runs.
     pub fn needed_drivers(&self) -> NeededDrivers {
-        self.needed
+        self.inner.needed
     }
 
-    /// Stops the worker and deregisters it, within a bounded time: a server
-    /// that never answers deregistration does not hold up shutdown.
-    pub async fn shutdown(mut self) {
-        self.stop_registration().await;
+    /// The next task to run, once there is one. `None` once the worker has
+    /// stopped and every task it took has been handed over, and at once for
+    /// a worker that runs no tasks.
+    pub async fn next_task(&self) -> Option<TaskAssignment> {
+        self.inner.tasks.as_ref()?.next().await
     }
 
-    async fn stop_registration(&mut self) {
-        let Some((stop, running)) = self.registration.take() else {
-            return;
-        };
-        stop.shutdown();
-        // Deregistration is bounded by the driver; this bounds the wait for
-        // the task as well, so shutdown always ends.
-        if tokio::time::timeout(DEREGISTER_TIMEOUT + Duration::from_secs(1), running)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                identity = %self.config.identity,
-                "Worker registration did not stop in time"
-            );
+    /// Records a heartbeat for a running task, with progress details, and
+    /// says whether the task has been asked to cancel.
+    pub fn heartbeat(&self, token: &[u8], details: Option<Payload>) -> HeartbeatAnswer {
+        match &self.inner.tasks {
+            Some(tasks) => tasks.heartbeat(token, details),
+            None => HeartbeatAnswer::default(),
+        }
+    }
+
+    /// Waits until a running task is asked to cancel (`true`), or its outcome
+    /// is reported (`false`).
+    pub async fn task_cancelled(&self, token: &[u8]) -> bool {
+        match &self.inner.tasks {
+            Some(tasks) => tasks.cancelled(token).await,
+            None => false,
+        }
+    }
+
+    /// Reports a task's outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an outcome with neither a value nor a failure, or
+    /// once the worker has stopped.
+    pub async fn complete_task(&self, outcome: TaskOutcome) -> Result<()> {
+        match &self.inner.tasks {
+            Some(tasks) => tasks.complete(outcome).await,
+            None => Err(Error::Configuration("the worker runs no tasks".to_string())),
+        }
+    }
+
+    /// Stops the worker: stops its drivers (each within
+    /// [`DRIVER_STOP_TIMEOUT`], then aborted), then deregisters it, within a
+    /// bounded time. A second call does nothing.
+    pub async fn shutdown(&self) {
+        let stops = std::mem::take(
+            &mut *self
+                .inner
+                .stops
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for (name, stop, running) in stops.drivers {
+            stop.shutdown();
+            let abort = running.abort_handle();
+            if tokio::time::timeout(DRIVER_STOP_TIMEOUT, running)
+                .await
+                .is_err()
+            {
+                tracing::warn!(driver = name, "Driver did not stop in time; aborting it");
+                abort.abort();
+            }
+        }
+        if let Some((stop, running)) = stops.registration {
+            stop.shutdown();
+            // Deregistration is bounded by the driver; this bounds the wait
+            // for the task as well, so shutdown always ends.
+            if tokio::time::timeout(DEREGISTER_TIMEOUT + Duration::from_secs(1), running)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    identity = %self.inner.config.identity,
+                    "Worker registration did not stop in time"
+                );
+            }
         }
     }
 }
