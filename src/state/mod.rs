@@ -17,6 +17,6 @@ pub use machine::{
     ActiveTimer, PendingTask, TaskState, TaskStateMachine, WorkflowState, WorkflowStateMachine,
 };
 pub use replayer::{
-    CommandCoverage, DeterminismViolation, ReplayConfig, ReplayResult, Replayer, ViolationKind,
-    ViolationSeverity, NON_DETERMINISM_FAILURE_TYPE,
+    CommandCoverage, DeterminismViolation, Difference, ReplayConfig, ReplayResult, Replayer,
+    ViolationKind, ViolationSeverity, NON_DETERMINISM_FAILURE_TYPE,
 };

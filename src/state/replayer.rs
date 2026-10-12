@@ -129,7 +129,67 @@ pub struct DeterminismViolation {
 
     /// The value actually found, where one applies.
     pub actual: Option<String>,
+
+    /// What differed between the journal and the workflow code, for a
+    /// non-determinism violation that knows.
+    pub difference: Option<Difference>,
 }
+
+/// What differed between a journal and the workflow code replaying it.
+///
+/// Determinism compares what makes two calls the same durable operation and
+/// never their payloads, so these are the only ways a replay can differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Difference {
+    /// A task where the journal has a timer, or any other kind of step.
+    Kind,
+    /// Another step id at the same place.
+    StepId,
+    /// A task of another type.
+    TaskType,
+    /// A child workflow of another type.
+    WorkflowType,
+    /// A timer of another length.
+    Duration,
+    /// The journal's steps, reached in another order.
+    Order,
+    /// A step the journal recorded that the code no longer reaches.
+    Unreached,
+    /// A step issued where the journal records the workflow ending.
+    Ended,
+}
+
+impl fmt::Display for Difference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Kind => "kind of step",
+            Self::StepId => "step id",
+            Self::TaskType => "task type",
+            Self::WorkflowType => "child workflow type",
+            Self::Duration => "timer duration",
+            Self::Order => "order of steps",
+            Self::Unreached => "steps reached",
+            Self::Ended => "end of the workflow",
+        })
+    }
+}
+
+/// What determinism compares for each kind of step, besides its kind: the
+/// fields that make two calls the same durable operation. Payloads (inputs,
+/// results, headers), retry policies, queues and timeouts other than a
+/// timer's are never compared, so changing them does not break a running
+/// workflow; changing anything listed here does. Ship such a change as a new
+/// workflow release. This table changes only with the protocol version
+/// (`docs/kernel-protocol-v1.md` §8.2).
+const COMPARED: &[(StepKind, &[Difference])] = &[
+    (StepKind::Task, &[Difference::StepId, Difference::TaskType]),
+    (StepKind::Timer, &[Difference::StepId, Difference::Duration]),
+    (
+        StepKind::ChildWorkflow,
+        &[Difference::StepId, Difference::WorkflowType],
+    ),
+];
 
 impl DeterminismViolation {
     /// Creates a violation of the journal's own consistency, with no expected or actual value.
@@ -142,6 +202,7 @@ impl DeterminismViolation {
             description: description.into(),
             expected: None,
             actual: None,
+            difference: None,
         }
     }
 
@@ -182,6 +243,12 @@ impl DeterminismViolation {
                 actual,
             )
         }
+    }
+
+    /// Records what differed.
+    pub fn with_difference(mut self, difference: Difference) -> Self {
+        self.difference = Some(difference);
+        self
     }
 }
 
@@ -241,22 +308,32 @@ impl Step {
         })
     }
 
-    /// Whether both name the same step doing the same work. A work type or
-    /// duration the journal does not know is not held against the code.
-    fn matches(&self, issued: &Step) -> bool {
-        self.kind == issued.kind
-            && self.id == issued.id
-            && match (&self.work_type, &issued.work_type) {
-                (Some(recorded), Some(issued)) => recorded == issued,
-                _ => true,
+    /// The first of the compared fields ([`COMPARED`]) in which `issued`
+    /// differs from this recorded step. A value the journal or the code does
+    /// not carry is not held against the code.
+    fn first_difference(&self, issued: &Step) -> Option<Difference> {
+        if self.kind != issued.kind {
+            return Some(Difference::Kind);
+        }
+        let compared = COMPARED
+            .iter()
+            .find(|(kind, _)| *kind == self.kind)
+            .map(|(_, fields)| *fields)
+            .unwrap_or(&[]);
+        compared.iter().copied().find(|field| match field {
+            Difference::StepId => self.id != issued.id,
+            Difference::TaskType | Difference::WorkflowType => {
+                matches!((&self.work_type, &issued.work_type), (Some(r), Some(i)) if r != i)
             }
             // At the precision the engine records a timer in: whole
             // milliseconds, so a duration with a finer part is not held
             // against the code.
-            && match (self.duration, issued.duration) {
-                (Some(recorded), Some(issued)) => recorded.as_millis() == issued.as_millis(),
-                _ => true,
-            }
+            Difference::Duration => matches!(
+                (self.duration, issued.duration),
+                (Some(r), Some(i)) if r.as_millis() != i.as_millis()
+            ),
+            _ => false,
+        })
     }
 }
 
@@ -395,20 +472,23 @@ impl JournalSteps {
             .filter_map(|id| recorded_ids.get(id.as_str()).copied());
         for (position, (reached, recorded)) in reached_recorded.zip(&self.ordered).enumerate() {
             if reached.id != recorded.id {
-                return Some(DeterminismViolation::non_determinism(
-                    recorded.entry_id,
-                    &recorded.id,
-                    format!(
-                        "Non-deterministic workflow: step {} of the journal (entry {}) is \
+                return Some(
+                    DeterminismViolation::non_determinism(
+                        recorded.entry_id,
+                        &recorded.id,
+                        format!(
+                            "Non-deterministic workflow: step {} of the journal (entry {}) is \
                          {recorded}, but the workflow code reached {reached} there instead: \
                          the code no longer takes its steps in the order the journal \
                          recorded them",
-                        position + 1,
-                        recorded.entry_id,
-                    ),
-                    recorded.to_string(),
-                    reached.to_string(),
-                ));
+                            position + 1,
+                            recorded.entry_id,
+                        ),
+                        recorded.to_string(),
+                        reached.to_string(),
+                    )
+                    .with_difference(Difference::Order),
+                );
             }
         }
         None
@@ -481,22 +561,25 @@ impl JournalSteps {
         if left.len() > LISTED {
             listed.push_str(&format!(" and {} more", left.len() - LISTED));
         }
-        Some(DeterminismViolation::non_determinism(
-            first.entry_id,
-            &first.id,
-            format!(
-                "Non-deterministic workflow: step {} of the journal (entry {}) is {first}, \
+        Some(
+            DeterminismViolation::non_determinism(
+                first.entry_id,
+                &first.id,
+                format!(
+                    "Non-deterministic workflow: step {} of the journal (entry {}) is {first}, \
                  which the workflow code no longer reaches: replaying the journal, the code \
                  instead {did}. Recorded steps not reached: {listed}",
-                position + 1,
-                first.entry_id,
-            ),
-            first.to_string(),
-            match new_step {
-                Some(step) => step.to_string(),
-                None => format!("the code {did}"),
-            },
-        ))
+                    position + 1,
+                    first.entry_id,
+                ),
+                first.to_string(),
+                match new_step {
+                    Some(step) => step.to_string(),
+                    None => format!("the code {did}"),
+                },
+            )
+            .with_difference(Difference::Unreached),
+        )
     }
 
     /// Compare `commands` with the recorded steps; see [`CommandCoverage`].
@@ -518,18 +601,22 @@ impl JournalSteps {
         };
         for step in issued.iter().filter(|s| kinds.contains(&s.kind)) {
             if let Some(recorded) = self.by_id.get(&(step.kind, step.id.clone())) {
-                if !recorded.matches(step) {
-                    violations.push(DeterminismViolation::non_determinism(
-                        recorded.entry_id,
-                        &recorded.id,
-                        format!(
-                            "Non-deterministic workflow: step {:?} (journal entry {}) is \
-                             issued for other work than the journal recorded",
-                            recorded.id, recorded.entry_id
-                        ),
-                        recorded.to_string(),
-                        step.to_string(),
-                    ));
+                if let Some(difference) = recorded.first_difference(step) {
+                    violations.push(
+                        DeterminismViolation::non_determinism(
+                            recorded.entry_id,
+                            &recorded.id,
+                            format!(
+                                "Non-deterministic workflow: step {:?} (journal entry {}) is \
+                             issued for other work than the journal recorded: its {difference} \
+                             differs",
+                                recorded.id, recorded.entry_id
+                            ),
+                            recorded.to_string(),
+                            step.to_string(),
+                        )
+                        .with_difference(difference),
+                    );
                 }
             }
         }
@@ -546,35 +633,43 @@ impl JournalSteps {
             .collect();
         for (position, recorded) in self.ordered.iter().enumerate() {
             match ordered.get(position) {
-                Some(step) if recorded.matches(step) => {}
                 Some(step) => {
-                    violations.push(DeterminismViolation::non_determinism(
-                        recorded.entry_id,
-                        &recorded.id,
-                        format!(
-                            "Non-deterministic workflow: step {} of the journal (entry {}) is \
-                             not what the workflow code issued there",
-                            position + 1,
-                            recorded.entry_id
-                        ),
-                        recorded.to_string(),
-                        step.to_string(),
-                    ));
+                    let Some(difference) = recorded.first_difference(step) else {
+                        continue;
+                    };
+                    violations.push(
+                        DeterminismViolation::non_determinism(
+                            recorded.entry_id,
+                            &recorded.id,
+                            format!(
+                                "Non-deterministic workflow: step {} of the journal (entry {}) is \
+                             not what the workflow code issued there: its {difference} differs",
+                                position + 1,
+                                recorded.entry_id
+                            ),
+                            recorded.to_string(),
+                            step.to_string(),
+                        )
+                        .with_difference(difference),
+                    );
                     return violations;
                 }
                 None => {
-                    violations.push(DeterminismViolation::non_determinism(
-                        recorded.entry_id,
-                        &recorded.id,
-                        format!(
+                    violations.push(
+                        DeterminismViolation::non_determinism(
+                            recorded.entry_id,
+                            &recorded.id,
+                            format!(
                             "Non-deterministic workflow: step {} of the journal (entry {}) was \
                              never issued by the workflow code",
                             position + 1,
                             recorded.entry_id
                         ),
-                        recorded.to_string(),
-                        "nothing",
-                    ));
+                            recorded.to_string(),
+                            "nothing",
+                        )
+                        .with_difference(Difference::Unreached),
+                    );
                     return violations;
                 }
             }
@@ -584,17 +679,20 @@ impl JournalSteps {
         // workflow already completed there.
         if let Some(completed) = self.completed {
             if let Some(step) = ordered.get(self.ordered.len()) {
-                violations.push(DeterminismViolation::non_determinism(
-                    completed,
-                    &step.id,
-                    format!(
-                        "Non-deterministic workflow: the journal records the workflow \
+                violations.push(
+                    DeterminismViolation::non_determinism(
+                        completed,
+                        &step.id,
+                        format!(
+                            "Non-deterministic workflow: the journal records the workflow \
                          completing (entry {completed}), and the workflow code issued a step \
                          there instead"
-                    ),
-                    "the workflow to complete",
-                    step.to_string(),
-                ));
+                        ),
+                        "the workflow to complete",
+                        step.to_string(),
+                    )
+                    .with_difference(Difference::Ended),
+                );
             }
         }
         violations
@@ -1640,7 +1738,7 @@ mod tests {
         let result = replayed(history, vec![task("task_0", "Refund")]);
         assert_eq!(
             the_violation(&result).to_string(),
-            r#"Non-deterministic workflow: step 1 of the journal (entry 2) is not what the workflow code issued there: expected task "task_0" of type "Charge", actual task "task_0" of type "Refund""#
+            r#"Non-deterministic workflow: step 1 of the journal (entry 2) is not what the workflow code issued there: its task type differs: expected task "task_0" of type "Charge", actual task "task_0" of type "Refund""#
         );
     }
 
@@ -2263,5 +2361,81 @@ mod tests {
             &["timer_0"],
         );
         assert!(steps.check_activation(&result).is_empty());
+    }
+
+    /// Every violation says what differed, from the comparison table.
+    #[test]
+    fn each_violation_names_what_differed() {
+        let difference = |result: &ReplayResult| the_violation(result).difference;
+
+        // Another task type at a recorded step.
+        let history = journal(vec![scheduled("task_0", "Charge")]);
+        assert_eq!(
+            difference(&replayed(history, vec![task("task_0", "Refund")])),
+            Some(Difference::TaskType)
+        );
+
+        // A timer where the journal has a task.
+        let history = journal(vec![scheduled("step_0", "Charge")]);
+        assert_eq!(
+            difference(&replayed(history, vec![timer("timer_0")])),
+            Some(Difference::Kind)
+        );
+
+        // Another step id at the same place.
+        let history = journal(vec![scheduled("charge_0", "Charge")]);
+        assert_eq!(
+            difference(&replayed(history, vec![task("charge_1", "Charge")])),
+            Some(Difference::StepId)
+        );
+
+        // A recorded step the code never issued.
+        let history = journal(vec![scheduled("a", "A"), scheduled("b", "B")]);
+        assert_eq!(
+            difference(&replayed(history, vec![task("a", "A")])),
+            Some(Difference::Unreached)
+        );
+
+        // A step where the journal records the workflow completing.
+        let history = journal(vec![scheduled("a", "A"), workflow_completed()]);
+        assert_eq!(
+            difference(&replayed(history, vec![task("a", "A"), task("b", "B")])),
+            Some(Difference::Ended)
+        );
+    }
+
+    #[test]
+    fn an_activation_names_order_and_duration_differences() {
+        let reordered =
+            JournalSteps::from_journal(&three_quiet_rounds()).check_activation(&activation(
+                vec![],
+                &["applyStatus_0", "event_timeout_status_1", "applyStatus_1"],
+            ));
+        assert_eq!(reordered[0].difference, Some(Difference::Order));
+
+        let journal = journal(vec![Attributes::TimerStarted(
+            TimerStartedEventAttributes {
+                timer_id: "timer_0".into(),
+                start_to_fire_timeout: Some(prost_types::Duration {
+                    seconds: 900,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            },
+        )]);
+        let longer = JournalSteps::from_journal(&journal).check_activation(&activation(
+            vec![Command::StartTimer(StartTimerCommand {
+                sequence: 0,
+                timer_id: "timer_0".into(),
+                duration: Duration::from_secs(2700),
+            })],
+            &["timer_0"],
+        ));
+        assert_eq!(longer[0].difference, Some(Difference::Duration));
+        assert!(
+            longer[0].description.contains("timer duration differs"),
+            "{}",
+            longer[0].description
+        );
     }
 }
