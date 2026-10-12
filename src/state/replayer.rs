@@ -45,6 +45,7 @@ use crate::state::machine::WorkflowStateMachine;
 use crate::types::WorkflowExecution;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::time::Duration;
 
 /// The failure type of a workflow activation whose commands do not match its
 /// journal.
@@ -209,19 +210,25 @@ struct Step {
     id: String,
     /// The task type or child workflow type, where it is known.
     work_type: Option<String>,
+    /// A timer's duration, where it is known: a timer of another length at
+    /// the same step is a different decision.
+    duration: Option<Duration>,
     /// The journal entry that recorded it; 0 for one the code issued.
     entry_id: i64,
 }
 
 impl Step {
     fn from_command(command: &Command) -> Option<Self> {
-        let (kind, id, work_type) = match command {
-            Command::ScheduleTask(cmd) => (StepKind::Task, &cmd.task_id, Some(&cmd.task_type)),
-            Command::StartTimer(cmd) => (StepKind::Timer, &cmd.timer_id, None),
+        let (kind, id, work_type, duration) = match command {
+            Command::ScheduleTask(cmd) => {
+                (StepKind::Task, &cmd.task_id, Some(&cmd.task_type), None)
+            }
+            Command::StartTimer(cmd) => (StepKind::Timer, &cmd.timer_id, None, Some(cmd.duration)),
             Command::StartChildWorkflow(cmd) => (
                 StepKind::ChildWorkflow,
                 &cmd.workflow_id,
                 Some(&cmd.workflow_type),
+                None,
             ),
             _ => return None,
         };
@@ -229,17 +236,25 @@ impl Step {
             kind,
             id: id.clone(),
             work_type: work_type.cloned(),
+            duration,
             entry_id: 0,
         })
     }
 
-    /// Whether both name the same step doing the same work. A work type the
-    /// journal does not know is not held against the code.
+    /// Whether both name the same step doing the same work. A work type or
+    /// duration the journal does not know is not held against the code.
     fn matches(&self, issued: &Step) -> bool {
         self.kind == issued.kind
             && self.id == issued.id
             && match (&self.work_type, &issued.work_type) {
                 (Some(recorded), Some(issued)) => recorded == issued,
+                _ => true,
+            }
+            // At the precision the engine records a timer in: whole
+            // milliseconds, so a duration with a finer part is not held
+            // against the code.
+            && match (self.duration, issued.duration) {
+                (Some(recorded), Some(issued)) => recorded.as_millis() == issued.as_millis(),
                 _ => true,
             }
     }
@@ -255,6 +270,9 @@ impl fmt::Display for Step {
         write!(f, "{what} {:?}", self.id)?;
         if let Some(work_type) = &self.work_type {
             write!(f, " {typed} {work_type:?}")?;
+        }
+        if let Some(duration) = self.duration {
+            write!(f, " for {duration:?}")?;
         }
         Ok(())
     }
@@ -286,12 +304,19 @@ impl JournalSteps {
                     kind: StepKind::Task,
                     id: attrs.task_id.clone(),
                     work_type: Some(attrs.task_type.clone()).filter(|t| !t.is_empty()),
+                    duration: None,
                     entry_id: entry.entry_id,
                 },
                 Some(Attributes::TimerStarted(attrs)) => Step {
                     kind: StepKind::Timer,
                     id: attrs.timer_id.clone(),
                     work_type: None,
+                    duration: attrs.start_to_fire_timeout.as_ref().and_then(|d| {
+                        Some(
+                            Duration::from_secs(u64::try_from(d.seconds).ok()?)
+                                + Duration::from_nanos(u64::try_from(d.nanos).ok()?),
+                        )
+                    }),
                     entry_id: entry.entry_id,
                 },
                 // Not in `ordered`: what a worker reads of a child is its
@@ -303,6 +328,7 @@ impl JournalSteps {
                     id: attrs.workflow_id.clone(),
                     work_type: Some(attrs.workflow_type.clone())
                         .filter(|t| !t.is_empty() && t != "unknown"),
+                    duration: None,
                     entry_id: entry.entry_id,
                 },
                 _ => {
@@ -338,9 +364,54 @@ impl JournalSteps {
     pub(crate) fn check_activation(&self, result: &ExecutionResult) -> Vec<DeterminismViolation> {
         let mut violations = self.check(&result.commands, CommandCoverage::Activation);
         if violations.is_empty() {
+            violations.extend(self.out_of_order(result));
+        }
+        if violations.is_empty() {
             violations.extend(self.left_behind(result));
         }
         violations
+    }
+
+    /// A recorded step the code reached out of the order the journal recorded
+    /// it in.
+    ///
+    /// The steps the code reached that the journal recorded, in the order the
+    /// code reached them, must be the journal's own steps from its first, in
+    /// its order. Ids alone cannot show this: a timed wait numbers its timers
+    /// on its own and tasks number on theirs, so code that inserts a task
+    /// before a loop reaches every recorded id, one round out of step. Steps
+    /// the journal does not record are new work and are not compared here.
+    /// Stopping short (for a cancellation, say) reaches a prefix, which is in
+    /// order.
+    fn out_of_order(&self, result: &ExecutionResult) -> Option<DeterminismViolation> {
+        let reached = result.reached_steps.as_deref()?;
+        let recorded_ids: HashMap<&str, &Step> = self
+            .ordered
+            .iter()
+            .map(|step| (step.id.as_str(), step))
+            .collect();
+        let reached_recorded = reached
+            .iter()
+            .filter_map(|id| recorded_ids.get(id.as_str()).copied());
+        for (position, (reached, recorded)) in reached_recorded.zip(&self.ordered).enumerate() {
+            if reached.id != recorded.id {
+                return Some(DeterminismViolation::non_determinism(
+                    recorded.entry_id,
+                    &recorded.id,
+                    format!(
+                        "Non-deterministic workflow: step {} of the journal (entry {}) is \
+                         {recorded}, but the workflow code reached {reached} there instead: \
+                         the code no longer takes its steps in the order the journal \
+                         recorded them",
+                        position + 1,
+                        recorded.entry_id,
+                    ),
+                    recorded.to_string(),
+                    reached.to_string(),
+                ));
+            }
+        }
+        None
     }
 
     /// A recorded step the code did not reach, in an activation that issues
@@ -1485,7 +1556,10 @@ mod tests {
         let result = replayed(history, vec![timer("timer_0")]);
         let violation = the_violation(&result);
         assert_eq!(violation.step_id.as_deref(), Some("step_0"));
-        assert_eq!(violation.actual.as_deref(), Some(r#"timer "timer_0""#));
+        assert_eq!(
+            violation.actual.as_deref(),
+            Some(r#"timer "timer_0" for 1s"#)
+        );
     }
 
     #[test]
@@ -2109,5 +2183,85 @@ mod tests {
             ..Default::default()
         });
         assert!(replayer.config().strict_mode);
+    }
+
+    /// sdk-core#14, first case: a task inserted before a loop's first wait.
+    /// Every id still matches a recorded one (timed waits number on their own,
+    /// tasks on theirs), so only the order across kinds shows the change.
+    #[test]
+    fn a_step_inserted_before_a_loop_is_caught_by_its_order() {
+        let journal = three_quiet_rounds();
+        let steps = JournalSteps::from_journal(&journal);
+        // The new code issues applyStatus first, then the loop: one round
+        // ahead of what the journal recorded, every id a recorded one.
+        let result = activation(
+            vec![],
+            &[
+                "applyStatus_0",
+                "event_timeout_status_1",
+                "applyStatus_1",
+                "event_timeout_status_2",
+            ],
+        );
+        let violations = steps.check_activation(&result);
+        assert!(
+            !violations.is_empty(),
+            "a step inserted before the loop replayed as if nothing changed"
+        );
+    }
+
+    /// sdk-core#14, second case: a recorded timer's duration changed.
+    #[test]
+    fn a_timer_whose_duration_changed_is_caught() {
+        let journal = journal(vec![Attributes::TimerStarted(
+            TimerStartedEventAttributes {
+                timer_id: "timer_0".into(),
+                start_to_fire_timeout: Some(prost_types::Duration {
+                    seconds: 15 * 60,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            },
+        )]);
+        let steps = JournalSteps::from_journal(&journal);
+        let result = activation(
+            vec![Command::StartTimer(StartTimerCommand {
+                sequence: 0,
+                timer_id: "timer_0".into(),
+                duration: Duration::from_secs(45 * 60),
+            })],
+            &["timer_0"],
+        );
+        let violations = steps.check_activation(&result);
+        assert!(
+            !violations.is_empty(),
+            "a timer journaled for 15 minutes replayed as 45 without a violation"
+        );
+    }
+
+    /// The engine records a timer in whole milliseconds, so a duration with a
+    /// finer part replays as the same timer.
+    #[test]
+    fn a_timer_is_compared_at_the_precision_the_engine_records() {
+        let journal = journal(vec![Attributes::TimerStarted(
+            TimerStartedEventAttributes {
+                timer_id: "timer_0".into(),
+                start_to_fire_timeout: Some(prost_types::Duration {
+                    seconds: 1,
+                    nanos: 500_000_000,
+                }),
+                ..Default::default()
+            },
+        )]);
+        let steps = JournalSteps::from_journal(&journal);
+        let result = activation(
+            vec![Command::StartTimer(StartTimerCommand {
+                sequence: 0,
+                timer_id: "timer_0".into(),
+                duration: Duration::from_nanos(1_500_999_999),
+            })],
+            &["timer_0"],
+        );
+        assert!(steps.check_activation(&result).is_empty());
     }
 }
