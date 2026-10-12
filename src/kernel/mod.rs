@@ -11,8 +11,10 @@
 //!
 //! - [`activation`]: an activation's history, resolved.
 //! - [`step_ids`]: step ids under the kernel's own scheme, `KERNEL_V1`.
+//! - [`random`]: the deterministic random source for runs under that scheme.
 
 pub mod activation;
+pub mod random;
 pub mod step_ids;
 
 pub use activation::resolve;
