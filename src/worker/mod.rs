@@ -16,6 +16,7 @@ pub mod heartbeat;
 mod lifecycle;
 pub mod metrics;
 pub mod poll;
+pub mod record;
 
 // Driver types: the main API for language SDKs.
 pub use drivers::{
