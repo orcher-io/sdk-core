@@ -11,7 +11,7 @@ keywords = ["orchestration", "workflow", "distributed", "sdk"]
 categories = ["asynchronous", "network-programming"]
 # Recorded runs for the replay tests: test data for this repository, not
 # part of the published crate.
-exclude = ["tests/fixtures/"]
+exclude = ["tests/fixtures/", "host/"]
 
 [dependencies]
 # Protocol definitions
@@ -78,3 +78,9 @@ http = "1"
 [features]
 default = []
 test-utils = []
+
+# The worker host (orcher-sdk-host) is built and released with this crate:
+# one version, one tag, one changelog (see release-please-config.json).
+[workspace]
+members = ["host"]
+resolver = "2"
