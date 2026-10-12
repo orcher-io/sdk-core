@@ -129,6 +129,7 @@ pub use orcher_proto as proto;
 
 pub mod client;
 pub mod error;
+pub mod error_code;
 pub mod interceptor;
 pub mod kernel;
 pub mod payload;
@@ -171,6 +172,7 @@ pub use state::{
 
 // Error and Result types
 pub use error::{Error, Result, TaskFailure};
+pub use error_code::ErrorCode;
 
 // Payload types
 pub use payload::{Payload, Payloads};
