@@ -10,7 +10,9 @@
 //! `docs/kernel-protocol-v1.md`.
 //!
 //! - [`activation`]: an activation's history, resolved.
+//! - [`step_ids`]: step ids under the kernel's own scheme, `KERNEL_V1`.
 
 pub mod activation;
+pub mod step_ids;
 
 pub use activation::resolve;
