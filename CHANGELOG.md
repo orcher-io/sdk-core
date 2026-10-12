@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.12.0](https://github.com/orcher-io/sdk-core/compare/v0.11.0...v0.12.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* the proto types sdk-core uses and re-exports are now orcher-proto 0.4's. An SDK that also depends on orcher-proto directly must move to 0.4 in the same change. sdk-rust, sdk-py and sdk-ts all compile unchanged with orcher-sdk-core 0.12 and orcher-proto 0.4, with one orcher-proto in each build.
+
+### Features
+
+* add the worker host crate with its configuration and lifecycle ([#64](https://github.com/orcher-io/sdk-core/issues/64)) ([f5de4ff](https://github.com/orcher-io/sdk-core/commit/f5de4ff08d7fc5940ed593e8d7838f9bd866e7a8))
+* build on orcher-proto 0.4 ([#63](https://github.com/orcher-io/sdk-core/issues/63)) ([2887950](https://github.com/orcher-io/sdk-core/commit/2887950bb5e08a42ae0624a5d6568979e8f7902e))
+* define the kernel's step-id scheme for new runs ([#59](https://github.com/orcher-io/sdk-core/issues/59)) ([a6765a4](https://github.com/orcher-io/sdk-core/commit/a6765a462d6ea64ef44bb3f2a5e7aa8fc4c4cc08))
+* give every core error a machine-readable code ([#61](https://github.com/orcher-io/sdk-core/issues/61)) ([1e9256b](https://github.com/orcher-io/sdk-core/commit/1e9256b6294307b643c685873c90f8fdacded12b))
+* give runs one deterministic random source in the kernel ([#60](https://github.com/orcher-io/sdk-core/issues/60)) ([6efd63d](https://github.com/orcher-io/sdk-core/commit/6efd63dc653e90aeaf43286f57459b24467bdfcb))
+* resolve an activation's history in the kernel ([#54](https://github.com/orcher-io/sdk-core/issues/54)) ([3c9a34a](https://github.com/orcher-io/sdk-core/commit/3c9a34a299e8af0bd6c880dc57b03a2df7e5ef41))
+* say what differed in a determinism violation ([#58](https://github.com/orcher-io/sdk-core/issues/58)) ([70bda76](https://github.com/orcher-io/sdk-core/commit/70bda76fe11d1ed454beb43a05b56764005c4f8a))
+
+
+### Bug Fixes
+
+* catch reordered steps and changed timer durations on replay ([#57](https://github.com/orcher-io/sdk-core/issues/57)) ([69460ad](https://github.com/orcher-io/sdk-core/commit/69460ad2821c73d79c1a104c1b6a487aa69ffb66)), closes [#14](https://github.com/orcher-io/sdk-core/issues/14)
+
+
+### Documentation
+
+* bind step-id schemes and history lineage at first activation ([#55](https://github.com/orcher-io/sdk-core/issues/55)) ([3930b49](https://github.com/orcher-io/sdk-core/commit/3930b49acb3e49ab2d632d3dc1900e7326ed7cc3))
+* design the shared worker host ([#62](https://github.com/orcher-io/sdk-core/issues/62)) ([4109739](https://github.com/orcher-io/sdk-core/commit/4109739ffabf329f013c2875beb6cc192aa7ecaa))
+
 ## [0.11.0](https://github.com/orcher-io/sdk-core/compare/v0.10.1...v0.11.0) (2026-10-12)
 
 
