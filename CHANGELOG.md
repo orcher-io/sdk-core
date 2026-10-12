@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.11.0](https://github.com/orcher-io/sdk-core/compare/v0.10.1...v0.11.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* the proto types sdk-core uses and re-exports are now orcher-proto 0.3's. An SDK that also depends on orcher-proto directly must move to 0.3 in the same change, or its build holds two versions of the generated types that do not match. sdk-rust, sdk-py and sdk-ts all compile unchanged with orcher-sdk-core 0.11 and orcher-proto 0.3.
+
+### Features
+
+* build on orcher-proto 0.3 ([#53](https://github.com/orcher-io/sdk-core/issues/53)) ([c348eb6](https://github.com/orcher-io/sdk-core/commit/c348eb66e8988e6577500bf9af26c02eb1f9a160))
+* decide in core which work drivers a worker starts ([#49](https://github.com/orcher-io/sdk-core/issues/49)) ([5918217](https://github.com/orcher-io/sdk-core/commit/5918217e92bb6094c51a8283c50ae098156ef857))
+* record workflow activations to replay runs without an engine ([#52](https://github.com/orcher-io/sdk-core/issues/52)) ([8bd5011](https://github.com/orcher-io/sdk-core/commit/8bd50111f947101c1b0004b5db2c55c09340a086))
+* say how a workflow ended when it returns no result ([#47](https://github.com/orcher-io/sdk-core/issues/47)) ([7725a68](https://github.com/orcher-io/sdk-core/commit/7725a68259d5899d04afc1c86afdbb3cbeae4cd7)), closes [#16](https://github.com/orcher-io/sdk-core/issues/16)
+
+
+### Bug Fixes
+
+* report a proxy's error page as the engine being unavailable ([#48](https://github.com/orcher-io/sdk-core/issues/48)) ([41043ed](https://github.com/orcher-io/sdk-core/commit/41043edf8261ee01121c82342bbb20c324010e1c)), closes [#6](https://github.com/orcher-io/sdk-core/issues/6)
+
+
+### Documentation
+
+* design the v1 kernel protocol ([#51](https://github.com/orcher-io/sdk-core/issues/51)) ([7cf5aee](https://github.com/orcher-io/sdk-core/commit/7cf5aee43ef76ad62eaf149985ac0d56d458117b))
+
 ## [0.10.1](https://github.com/orcher-io/sdk-core/compare/v0.10.0...v0.10.1) (2026-10-11)
 
 
