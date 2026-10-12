@@ -130,6 +130,7 @@ pub use orcher_proto as proto;
 pub mod client;
 pub mod error;
 pub mod interceptor;
+pub mod kernel;
 pub mod payload;
 pub mod protocol;
 pub mod state;
