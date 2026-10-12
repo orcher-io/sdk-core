@@ -54,8 +54,9 @@ impl RunRandom {
     /// The source for a 32-byte seed (as `RunStarted.random_seed` carries it).
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let mut state = [0u64; 4];
-        for (word, bytes) in state.iter_mut().zip(seed.chunks_exact(8)) {
-            *word = u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
+        let (words, _) = seed.as_chunks::<8>();
+        for (word, bytes) in state.iter_mut().zip(words) {
+            *word = u64::from_le_bytes(*bytes);
         }
         if state == [0; 4] {
             state[0] = 1;
