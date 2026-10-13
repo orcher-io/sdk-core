@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.13.0](https://github.com/orcher-io/sdk-core/compare/v0.12.0...v0.13.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* the proto types sdk-core uses and re-exports are now orcher-proto 0.5's. An SDK that also depends on orcher-proto directly must move to 0.5 in the same change. sdk-rust, sdk-py and sdk-ts all compile unchanged with orcher-sdk-core 0.13 and orcher-proto 0.5, with one orcher-proto in each build.
+* the proto types sdk-core uses and re-exports are now orcher-proto 0.5's. An SDK that also depends on orcher-proto directly must move to 0.5 in the same change. sdk-rust, sdk-py and sdk-ts all compile unchanged with orcher-sdk-core 0.13 and orcher-proto 0.5, with one orcher-proto in each build.
+
+### Features
+
+* build on orcher-proto 0.5 ([#67](https://github.com/orcher-io/sdk-core/issues/67)) ([aecb919](https://github.com/orcher-io/sdk-core/commit/aecb919c95fbfcc372f3b2c32c5d769aa51526ed))
+* hand tasks to the language by pull ([#65](https://github.com/orcher-io/sdk-core/issues/65)) ([27cc6c8](https://github.com/orcher-io/sdk-core/commit/27cc6c8dc9cced11542307dccab160b62fcb6d65))
+* hand workflow activations to the language through the kernel protocol ([#68](https://github.com/orcher-io/sdk-core/issues/68)) ([ea774e6](https://github.com/orcher-io/sdk-core/commit/ea774e6841ad5c1a32c7fcb0d50276939a790dd1))
+* run worker sessions in the host ([#70](https://github.com/orcher-io/sdk-core/issues/70)) ([f077e95](https://github.com/orcher-io/sdk-core/commit/f077e95f795b9ba72be3e41af71ca446d92e8891))
+
+
+### Bug Fixes
+
+* stop a session queue's poller when its last session ends ([#69](https://github.com/orcher-io/sdk-core/issues/69)) ([b9d3d9f](https://github.com/orcher-io/sdk-core/commit/b9d3d9f6aa26ec8072097b930449b75a618ab316))
+
 ## [0.12.0](https://github.com/orcher-io/sdk-core/compare/v0.11.0...v0.12.0) (2026-10-12)
 
 
