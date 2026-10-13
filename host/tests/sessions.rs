@@ -13,7 +13,9 @@ use orcher_sdk_host::{Host, HostConfig, Registrations};
 async fn session_worker(engine: &Engine, max_sessions: usize) -> Host {
     let addr = engine.serve().await;
     let host = Host::start(
-        HostConfig::new(format!("http://{addr}"), "orders").with_max_sessions(max_sessions),
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300))
+            .with_max_sessions(max_sessions),
         Registrations::new([] as [&str; 0], ["charge"], [] as [&str; 0]),
     )
     .await
@@ -115,7 +117,8 @@ async fn a_session_is_opened_used_and_completed_by_the_host() {
         .push_back(create("create-1", "session_0", 30_000, 600_000));
     let addr = engine.serve().await;
     let host = Host::start(
-        HostConfig::new(format!("http://{addr}"), "orders"),
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300)),
         Registrations::new([] as [&str; 0], ["charge"], [] as [&str; 0]),
     )
     .await

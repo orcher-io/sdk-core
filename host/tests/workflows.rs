@@ -16,7 +16,8 @@ use orcher_sdk_host::{Host, HostConfig, Registrations};
 async fn workflow_worker(engine: &Engine) -> Host {
     let addr = engine.serve().await;
     Host::start(
-        HostConfig::new(format!("http://{addr}"), "orders"),
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300)),
         Registrations::new(["checkout"], [] as [&str; 0], [] as [&str; 0]),
     )
     .await

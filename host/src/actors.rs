@@ -395,6 +395,24 @@ impl Actors {
             .map_err(|_| Error::WorkerError("the actor driver has stopped".to_string()))
     }
 
+    /// How many operations the language holds.
+    pub(crate) fn held(&self) -> usize {
+        self.held_operations().len()
+    }
+
+    /// Lets go of the operations the language still holds, when the worker
+    /// stops: the engine cannot take them back, so they wait out their
+    /// timeouts.
+    pub(crate) fn abandon_held(&self) {
+        let held = std::mem::take(&mut *self.held_operations());
+        if !held.is_empty() {
+            tracing::warn!(
+                count = held.len(),
+                "Actor operations unanswered at shutdown; left to time out"
+            );
+        }
+    }
+
     fn held_operations(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
         self.held
             .lock()

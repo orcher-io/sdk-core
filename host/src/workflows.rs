@@ -89,6 +89,37 @@ impl Workflows {
             .map_err(|_| Error::WorkerError("the workflow driver has stopped".to_string()))
     }
 
+    /// How many activations the language holds.
+    pub(crate) fn held(&self) -> usize {
+        self.held_activations().len()
+    }
+
+    /// Hands every activation the language still holds back to the engine,
+    /// when the worker stops, for another worker to run at once.
+    pub(crate) async fn release_held(&self) {
+        let held = std::mem::take(&mut *self.held_activations());
+        if !held.is_empty() {
+            tracing::warn!(
+                count = held.len(),
+                "Workflow activations unanswered at shutdown; handing them back"
+            );
+        }
+        for held in held.into_values() {
+            let _ = self
+                .results
+                .send(WorkflowWorkResult {
+                    workflow_id: held.workflow_id,
+                    run_id: held.run_id,
+                    task_token: held.task_token,
+                    stream_entry_id: held.stream_entry_id,
+                    result: Err(Error::Protocol(
+                        "the worker stopped before the activation was answered".to_string(),
+                    )),
+                })
+                .await;
+        }
+    }
+
     fn held_activations(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, Held>> {
         self.held
             .lock()

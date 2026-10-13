@@ -12,7 +12,7 @@ use orcher_sdk_core::worker::drivers::actor::ActorDriverConfig;
 use orcher_sdk_core::worker::drivers::registration::WorkerRegistrationConfig;
 use orcher_sdk_core::worker::drivers::task::TaskDriverConfig;
 use orcher_sdk_core::worker::drivers::workflow::WorkflowDriverConfig;
-use orcher_sdk_core::worker::BUILT_IN_TASK_TYPES;
+use orcher_sdk_core::worker::{CompletionRetryConfig, BUILT_IN_TASK_TYPES};
 
 /// How long a workflow poll waits for work.
 pub const WORKFLOW_POLL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -31,6 +31,13 @@ pub const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_CONCURRENCY: u32 = 100;
 /// How many polls each driver keeps open.
 pub const POLLERS_PER_DRIVER: usize = 4;
+/// How long a stopping worker gives the language to finish the work it
+/// holds, unless configured. Well inside the 30 seconds a container
+/// orchestrator usually allows a process to stop.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// How long the drivers keep running past the shutdown grace, to send the
+/// last results and hand back the activations the language did not finish.
+pub const RELEASE_MARGIN: Duration = Duration::from_secs(5);
 /// How many sessions a worker hosts at once, unless configured.
 pub const DEFAULT_MAX_SESSIONS: usize = 10;
 
@@ -65,6 +72,11 @@ pub struct HostConfig {
     /// taken waits for one to come free, up to its creation timeout; it is
     /// not passed on to another worker.
     pub max_sessions: usize,
+    /// How long a stopping worker gives the language to finish the work it
+    /// holds. Workflow activations still held after it are handed back to
+    /// the engine; tasks and actor operations still running are left to
+    /// their timeouts, since the engine cannot take them back.
+    pub shutdown_grace: Duration,
     /// The SDK running the worker, reported to the engine, for example
     /// `orcher-sdk-ts`.
     pub sdk_name: String,
@@ -90,6 +102,7 @@ impl HostConfig {
             max_concurrent_tasks: DEFAULT_CONCURRENCY,
             max_concurrent_actor_operations: DEFAULT_CONCURRENCY,
             max_sessions: DEFAULT_MAX_SESSIONS,
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             sdk_name: String::new(),
             sdk_version: String::new(),
         }
@@ -148,6 +161,18 @@ impl HostConfig {
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
         self
+    }
+
+    /// Gives the language `grace` to finish its work when the worker stops.
+    pub fn with_shutdown_grace(mut self, grace: Duration) -> Self {
+        self.shutdown_grace = grace;
+        self
+    }
+
+    /// How the drivers report results: past the shutdown grace, they keep
+    /// sending for [`RELEASE_MARGIN`].
+    pub fn completion_retry(&self) -> CompletionRetryConfig {
+        CompletionRetryConfig::default().with_shutdown_grace(self.shutdown_grace + RELEASE_MARGIN)
     }
 
     /// Reports the SDK running the worker.
