@@ -43,8 +43,9 @@ use tokio::task::JoinHandle;
 pub use actors::{ActorHandler, StateScope, StateValue};
 pub use config::HostConfig;
 
-/// How long a driver has to stop once asked, before it is aborted.
-pub const DRIVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a driver has to stop past the shutdown grace and the release
+/// margin, before it is aborted.
+pub const DRIVER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What the worker runs: the workflow, task and actor types it registered.
 #[derive(Debug, Clone, Default)]
@@ -150,8 +151,9 @@ impl Host {
 
         let mut eager_tasks = None;
         let tasks = if needed.tasks {
-            let (mut driver, work, results, queue_changes) =
+            let (driver, work, results, queue_changes) =
                 TaskDriver::new(config.task_driver()).await?;
+            let mut driver = driver.with_completion_retry(config.completion_retry());
             // Tasks the engine hands back with a workflow's completion reach
             // this worker's task driver without a poll.
             eager_tasks = Some(driver.eager_task_injector());
@@ -176,6 +178,7 @@ impl Host {
 
         let workflows = if needed.workflows {
             let (driver, work, results) = WorkflowDriver::new(config.workflow_driver()).await?;
+            let driver = driver.with_completion_retry(config.completion_retry());
             let mut driver = match eager_tasks {
                 Some(injector) => driver.with_eager_task_injector(injector),
                 None => driver,
@@ -223,7 +226,7 @@ impl Host {
                 events,
             ));
             let stop = driver.shutdown_handle();
-            let mut driver = driver;
+            let mut driver = driver.with_completion_retry(config.completion_retry());
             let running = tokio::spawn(async move {
                 if let Err(error) = driver.run().await {
                     tracing::warn!(%error, "The actor driver ended with an error");
@@ -408,6 +411,17 @@ impl Host {
         self.actors()?.service.keys(scope, prefix).await
     }
 
+    /// Work the language holds and has not reported.
+    fn outstanding(&self) -> usize {
+        self.inner.tasks.as_ref().map_or(0, tasks::Tasks::running)
+            + self
+                .inner
+                .workflows
+                .as_ref()
+                .map_or(0, workflows::Workflows::held)
+            + self.inner.actors.as_ref().map_or(0, actors::Actors::held)
+    }
+
     fn actors(&self) -> Result<&actors::Actors> {
         self.inner
             .actors
@@ -415,9 +429,24 @@ impl Host {
             .ok_or_else(|| Error::Configuration("the worker runs no actors".to_string()))
     }
 
-    /// Stops the worker: stops its drivers (each within
-    /// [`DRIVER_STOP_TIMEOUT`], then aborted), then deregisters it, within a
-    /// bounded time. A second call does nothing.
+    /// Stops the worker, within a bounded time:
+    ///
+    /// 1. Every driver stops claiming work at once. Work a poll already
+    ///    brought back is still handed over, and pulls stay open for it.
+    /// 2. The language has the shutdown grace
+    ///    ([`HostConfig::shutdown_grace`]) to finish and report what it
+    ///    holds.
+    /// 3. Workflow activations still held are then handed back to the engine
+    ///    for another worker. Tasks and actor operations still running are
+    ///    asked to cancel and stop being heartbeated, so the engine retries
+    ///    them once they time out; it cannot take them back sooner.
+    /// 4. The drivers stop (aborted past [`RELEASE_MARGIN`] and
+    ///    [`DRIVER_STOP_TIMEOUT`]); pulls then return `None`.
+    /// 5. Sessions close and the worker deregisters.
+    ///
+    /// A second call returns at once.
+    ///
+    /// [`RELEASE_MARGIN`]: config::RELEASE_MARGIN
     pub async fn shutdown(&self) {
         let stops = std::mem::take(
             &mut *self
@@ -426,13 +455,39 @@ impl Host {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
-        for (name, stop, running) in stops.drivers {
+        if stops.drivers.is_empty() && stops.registration.is_none() {
+            return;
+        }
+        let asked = tokio::time::Instant::now();
+        for (_, stop, _) in &stops.drivers {
             stop.shutdown();
+        }
+
+        let grace_over = asked + self.inner.config.shutdown_grace;
+        while self.outstanding() > 0 && tokio::time::Instant::now() < grace_over {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let outstanding = self.outstanding();
+        if outstanding > 0 {
+            tracing::warn!(
+                outstanding,
+                "Shutdown grace over with work unfinished; handing back what can be"
+            );
+        }
+        if let Some(workflows) = &self.inner.workflows {
+            workflows.release_held().await;
+        }
+        if let Some(tasks) = &self.inner.tasks {
+            tasks.abandon_running();
+        }
+        if let Some(actors) = &self.inner.actors {
+            actors.abandon_held();
+        }
+
+        let stop_by = grace_over + config::RELEASE_MARGIN + DRIVER_STOP_TIMEOUT;
+        for (name, _, running) in stops.drivers {
             let abort = running.abort_handle();
-            if tokio::time::timeout(DRIVER_STOP_TIMEOUT, running)
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout_at(stop_by, running).await.is_err() {
                 tracing::warn!(driver = name, "Driver did not stop in time; aborting it");
                 abort.abort();
             }

@@ -23,6 +23,7 @@ async fn actor_worker(engine: &Engine) -> Host {
     let addr = engine.serve().await;
     Host::start(
         HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300))
             .with_namespace("shop")
             .with_api_key("key-1")
             .with_organization_id("org-1")
@@ -265,7 +266,8 @@ async fn an_actor_type_with_no_operation_is_refused() {
     let engine = Engine::default();
     let addr = engine.serve().await;
     let error = Host::start(
-        HostConfig::new(format!("http://{addr}"), "orders"),
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300)),
         Registrations::new([] as [&str; 0], [] as [&str; 0], ["Cart"]),
     )
     .await

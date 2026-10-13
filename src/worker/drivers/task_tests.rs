@@ -919,6 +919,75 @@ async fn an_actor_failure_is_reported_with_its_type_and_duration() {
     stops_within(running, GRACE + MARGIN).await;
 }
 
+/// Shut down, the actor driver stops polling but still reports the result of
+/// an operation it handed over, within the grace; with nothing outstanding it
+/// stops at once.
+#[tokio::test]
+async fn a_shut_down_actor_driver_reports_what_it_handed_over() {
+    let engine = Engine::default();
+    engine.script().operations = vec![actor_operation("op-1")];
+    let (driver, mut work_rx, result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            enable_heartbeat: false,
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let mut driver =
+        driver.with_completion_retry(quick().with_shutdown_grace(Duration::from_secs(3)));
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+    let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+        .await
+        .expect("an operation handed over")
+        .unwrap();
+
+    handle.shutdown();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !running.is_finished(),
+        "stopped with an operation outstanding"
+    );
+    result_tx
+        .send(ActorWorkResult {
+            operation_id: work.operation.operation_id,
+            execution_id: work.operation.execution_id,
+            result: Ok(b"{}".to_vec()),
+        })
+        .await
+        .unwrap();
+    let asked = Instant::now();
+    stops_within(running, Duration::from_secs(3)).await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "waited out the grace"
+    );
+    assert_eq!(engine.actor_calls("op-1"), 1, "the result was not reported");
+
+    // Idle, it stops at once.
+    let (driver, _work_rx, _result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            enable_heartbeat: false,
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let mut driver =
+        driver.with_completion_retry(quick().with_shutdown_grace(Duration::from_secs(3)));
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let asked = Instant::now();
+    handle.shutdown();
+    stops_within(running, Duration::from_secs(3)).await;
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "an idle driver waited out the grace"
+    );
+}
+
 /// Heartbeats name the registration the driver was started with until the
 /// handle replaces it, and the new one after.
 #[tokio::test]

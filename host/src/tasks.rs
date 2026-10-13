@@ -146,6 +146,28 @@ impl Tasks {
             .map_err(|_| Error::WorkerError("the task driver has stopped".to_string()))
     }
 
+    /// How many tasks the language holds.
+    pub(crate) fn running(&self) -> usize {
+        self.running_tasks().len()
+    }
+
+    /// Lets go of the tasks the language still holds, when the worker stops:
+    /// each is asked to cancel, and stops being heartbeated, so the engine
+    /// times it out and retries it.
+    pub(crate) fn abandon_running(&self) {
+        let running = std::mem::take(&mut *self.running_tasks());
+        if !running.is_empty() {
+            tracing::warn!(
+                count = running.len(),
+                "Tasks still running at shutdown; left to time out and be retried"
+            );
+        }
+        for task in running.into_values() {
+            task.heartbeat.cancellation_token().cancel();
+            task.reported.cancel();
+        }
+    }
+
     fn running_tasks(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, Running>> {
         self.running
             .lock()

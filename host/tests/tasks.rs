@@ -12,7 +12,9 @@ use orcher_sdk_host::{Host, HostConfig, Registrations};
 async fn task_worker(engine: &Engine) -> Host {
     let addr = engine.serve().await;
     Host::start(
-        HostConfig::new(format!("http://{addr}"), "orders").with_namespace("payments"),
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300))
+            .with_namespace("payments"),
         Registrations::new([] as [&str; 0], ["charge"], [] as [&str; 0]),
     )
     .await
@@ -205,7 +207,8 @@ async fn a_worker_without_tasks_hands_out_none() {
     let engine = Engine::default();
     let addr = engine.serve().await;
     let host = Host::start(
-        HostConfig::new(format!("http://{addr}"), "orders"),
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(std::time::Duration::from_millis(300)),
         Registrations::new(["checkout"], [] as [&str; 0], [] as [&str; 0]),
     )
     .await

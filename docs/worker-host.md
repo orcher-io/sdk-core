@@ -31,6 +31,8 @@ Bugs found in this layer (each a host responsibility the host fixes once):
 | actor driver never stopped (keeps polling, claimed operations stranded) | ✗ | ✗ | aborted |
 | actor RPCs without the worker's TLS / API key / organization | partly (own interceptor) | ✗ | ✗ (new connection per operation) |
 | shutdown does not drain in-flight work (results sent after the drivers stop are lost; work stays claimed until timeout) | | | ✗ |
+| drivers stopped one after another, each with its own wait, so a worker's shutdown took the sum | ✗ | ✗ | ✗ |
+| actor driver stops at once on shutdown, dropping results of operations already handed over (core) | ✗ | ✗ | ✗ |
 | an activation that fails conversion is dropped and stays claimed until timeout | ✗ | ✗ | |
 | session heartbeats never sent; sessions not closed on shutdown | | | ✗ |
 | a task's own error reported as "Internal SDK error" | | | ✗ |
@@ -81,7 +83,7 @@ host.get_actor_state(&scope, key) / set_actor_state(…, expected_version) / del
 host.report_pressure(Pressure { loop_delay_ms, queue_depth })   // the language's signal for the governor (#39)
 host.metrics() -> WorkerMetrics
 
-host.shutdown(Drain { grace }).await                            // §6
+host.shutdown().await                                           // §6; the grace is HostConfig::shutdown_grace
 ```
 
 - Sessions are the host's: the built-in create/complete session tasks are handled inside the host, never surfaced to the language; a task on a session queue reaches the language like any other task. A creation waits for a slot up to its creation timeout (less a margin, then fails with type `ResourceExhausted`); a session ends on its completion, its execution timeout, or the worker stopping; its queue is polled from its creation to its end. The wire stays the one the SDKs' workflow code already speaks (`SessionInfo` JSON with `state: "Open"`, which the Rust SDK decodes strictly and the others ignore). Two session options are accepted but not enforced, because nothing can enforce them yet: `heartbeat_interval` (the engine has no session liveness to report to) and `max_concurrent_tasks` (all of a worker's sessions share one queue).
@@ -95,11 +97,11 @@ A small protobuf package beside the kernel protocol, `orcher.host.v1` (in protos
 
 ## 6. Shutdown and drain, once
 
-1. Stop claiming: drivers stop polling; pending pulls stay open.
-2. Hand over what was already claimed; the language finishes it within the grace period.
-3. When the grace ends: release every claimed-but-unfinished workflow activation and actor operation to the engine; fail nothing silently.
-4. Close sessions; stop the actor driver; deregister the worker (bounded wait).
-5. `next_*` return `None`; the bindings end their loops.
+1. Stop claiming: every driver is told at once and stops polling; work a poll already brought back is still handed over, and pulls stay open for it.
+2. The language finishes and reports what it holds within the shutdown grace (`HostConfig::shutdown_grace`, default 10 s). It is configuration, not a `shutdown` argument, because the drivers are built with it: they keep sending results for the grace plus a release margin.
+3. When the grace ends, workflow activations still held are handed back to the engine (released, not failed) for another worker to run at once. Tasks and actor operations still running are asked to cancel and stop being heartbeated; the engine has no way to take them back early, so they wait out their timeouts and are retried. Failing them instead would spend a retry attempt, and fail a workflow whose policy allows one.
+4. The drivers stop (aborted if past the grace, the margin and a short stop timeout); `next_*` return `None`.
+5. Close sessions; deregister the worker (bounded wait).
 
 ## 7. Rollout
 
