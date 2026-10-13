@@ -361,9 +361,10 @@ impl ActorDriver {
     /// Run the driver until it stops.
     ///
     /// Returns once shut down, or once the language SDK has dropped its result
-    /// sender and no more operations can reach it. Unlike the workflow and task
-    /// drivers, it stops at once on shutdown rather than draining polls in
-    /// flight; results already handed back still get the shutdown grace.
+    /// sender and no more operations can reach it. On shutdown its pollers
+    /// stop at once, abandoning polls in flight, and it keeps taking the
+    /// results of the operations already handed over until they are all in or
+    /// the shutdown grace is over.
     pub async fn run(&mut self) -> Result<()> {
         tracing::info!(
             namespace = %self.config.namespace,
@@ -397,6 +398,10 @@ impl ActorDriver {
         // handing one over never waits. The task driver's run loop explains why.
         let mut room: Option<mpsc::OwnedPermit<ActorWork>> = None;
         let (mut operations_closed, mut results_closed, mut work_closed) = (false, false, false);
+        // The drain deadline, set once shutdown is asked for. The pollers
+        // stop at once (they share the signal); operations already handed
+        // over still have their results taken and reported until then.
+        let mut draining: Option<tokio::time::Instant> = None;
 
         loop {
             tokio::select! {
@@ -406,13 +411,30 @@ impl ActorDriver {
                 // neither, so its notice would name no queue. A notice naming
                 // no queue covers every queue of this identity, which would
                 // end the polls of the process's other drivers while they may
-                // still be draining. This driver stops at once anyway,
-                // abandoning its polls.
-                _ = self.shutdown.changed() => {
+                // still be draining. Its pollers stop at once anyway,
+                // abandoning their polls.
+                _ = self.shutdown.changed(), if draining.is_none() => {
                     if *self.shutdown.borrow_and_update() {
-                        tracing::info!("Actor driver shutdown requested");
-                        break;
+                        tracing::info!(
+                            outstanding = self.handed_at.len(),
+                            grace_ms = self.completion_retry.shutdown_grace.as_millis() as u64,
+                            "Actor driver shutdown requested; waiting for the results of the \
+                             operations handed over"
+                        );
+                        draining = Some(
+                            tokio::time::Instant::now() + self.completion_retry.shutdown_grace,
+                        );
                     }
+                }
+
+                _ = tokio::time::sleep_until(draining.unwrap_or_else(tokio::time::Instant::now)),
+                    if draining.is_some() =>
+                {
+                    tracing::warn!(
+                        outstanding = self.handed_at.len(),
+                        "Shutdown grace over; stopping the actor driver"
+                    );
+                    break;
                 }
 
                 permit = slots.acquire(), if slot.is_none() => {
@@ -488,6 +510,12 @@ impl ActorDriver {
                 tracing::info!("All actor driver channels closed, shutting down");
                 break;
             }
+
+            // Drained: every operation handed over has been answered.
+            if draining.is_some() && (self.handed_at.is_empty() || results_closed) {
+                tracing::info!("Actor driver drained");
+                break;
+            }
         }
 
         // Results already handed back are sent rather than dropped with the
@@ -502,9 +530,10 @@ impl ActorDriver {
                 None,
             );
         }
-        in_flight
-            .finish(tokio::time::Instant::now() + self.completion_retry.shutdown_grace)
-            .await;
+        // One grace covers the whole shutdown, draining included.
+        let stop_by = draining
+            .unwrap_or_else(|| tokio::time::Instant::now() + self.completion_retry.shutdown_grace);
+        in_flight.finish(stop_by).await;
 
         tracing::info!("Actor driver stopped");
         Ok(())
