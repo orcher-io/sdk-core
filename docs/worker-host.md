@@ -45,6 +45,9 @@ Bugs found in this layer (each a host responsibility the host fixes once):
 | a completed session's queue polled until the worker stops, one more poller per session (core) | ✗ | ✗ | ✗ |
 | a session's execution timeout never enforced | ✗ | ✗ | ✗ |
 | session creation fails at once when slots are full, instead of waiting up to its creation timeout | ✗ | ✗ | |
+| actor failures reported with no error code or duration (core) | ✗ | ✗ | ✗ |
+| re-registration's new registration id never reaches the heartbeats | (never re-registers) | (never re-registers) | ✗ |
+| actor operations' shared mode lost (`mode` compared as a string) | ✗ | | ignored |
 
 Sessions are split three ways: Rust runs them natively; Python and TypeScript keep session logic in the language and only add or remove queues through the bridge.
 
@@ -71,8 +74,9 @@ host.task_cancelled(&token).await -> bool                       // true: cancel;
 host.complete_task(&token, TaskOutcome).await?                  // value | TaskFailure (type, non-retryable)
 
 host.next_actor_operation().await -> Option<ActorOperation>
-host.complete_actor_operation(…).await?
-host.actor_state(…)                                             // get/set/delete/list, on the host's channel
+host.complete_actor_operation(ActorResult).await?               // value | Failure (type kept as the error code)
+host.get_actor_state(&scope, key) / set_actor_state(…, expected_version) / delete_actor_state / actor_state_keys
+                                                                // on the host's channel, with the worker's credentials
 
 host.report_pressure(Pressure { loop_delay_ms, queue_depth })   // the language's signal for the governor (#39)
 host.metrics() -> WorkerMetrics
@@ -81,6 +85,7 @@ host.shutdown(Drain { grace }).await                            // §6
 ```
 
 - Sessions are the host's: the built-in create/complete session tasks are handled inside the host, never surfaced to the language; a task on a session queue reaches the language like any other task. A creation waits for a slot up to its creation timeout (less a margin, then fails with type `ResourceExhausted`); a session ends on its completion, its execution timeout, or the worker stopping; its queue is polled from its creation to its end. The wire stays the one the SDKs' workflow code already speaks (`SessionInfo` JSON with `state: "Open"`, which the Rust SDK decodes strictly and the others ignore). Two session options are accepted but not enforced, because nothing can enforce them yet: `heartbeat_interval` (the engine has no session liveness to report to) and `max_concurrent_tasks` (all of a worker's sessions share one queue).
+- Actors are registered by the host from `Registrations::with_actor_handlers` (each operation exclusive or shared), before the actor driver polls; an actor type with no operation is refused at start. When the actor service asks for the handlers again, the host registers them again and the driver's heartbeats name the new registration. Every actor-service call (registration, polls, completions, heartbeats, state) carries the worker's TLS, API key and organization.
 - Errors cross with core's `ErrorCode` (#61), never as text the language parses.
 - `next_*` returning `None` is the only end-of-work signal; there is no 30-second empty wake-up (the bindings cancel a pending pull instead).
 
