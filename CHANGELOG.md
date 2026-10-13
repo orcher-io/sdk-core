@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.1](https://github.com/orcher-io/sdk-core/compare/v0.13.0...v0.13.1) (2026-10-13)
+
+
+### Features
+
+* drain the worker host on shutdown ([#73](https://github.com/orcher-io/sdk-core/issues/73)) ([bf5b10e](https://github.com/orcher-io/sdk-core/commit/bf5b10ee63b582c31febcad4c74f144c60980dc4))
+* run actors in the host ([#71](https://github.com/orcher-io/sdk-core/issues/71)) ([8cb086f](https://github.com/orcher-io/sdk-core/commit/8cb086f21ce2a75dbe8934987f3b4c3ccb14a762))
+
+
+### Bug Fixes
+
+* count steps sent again as reached in a kernel answer ([#78](https://github.com/orcher-io/sdk-core/issues/78)) ([45a827e](https://github.com/orcher-io/sdk-core/commit/45a827eb795bca0286c5dfa6de73fd6341f78808))
+
 ## [0.13.0](https://github.com/orcher-io/sdk-core/compare/v0.12.0...v0.13.0) (2026-10-13)
 
 
