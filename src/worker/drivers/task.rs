@@ -246,13 +246,90 @@ pub struct TaskWorkResult {
     pub result: Result<Vec<u8>>,
 }
 
-/// A request to add or remove a session queue on a running [`TaskDriver`].
+/// A session starting or ending on a running [`TaskDriver`]'s session queue.
+///
+/// Changes are counted: a queue is polled from its first `Add` until as many
+/// `Remove`s have arrived, so every session a worker hosts can share one
+/// queue.
 #[derive(Debug, Clone)]
 pub enum SessionQueueChange {
-    /// Start polling this session queue.
+    /// A session starts on this queue; the queue is polled.
     Add(String),
-    /// Stop polling this session queue. Its poller stops on its next iteration.
+    /// A session on this queue ends. When it was the last, the queue's
+    /// poller stops; a poll already out is left to finish, and a task it
+    /// brings is still handed over.
     Remove(String),
+}
+
+/// The session queues a task driver polls.
+///
+/// Every session a worker hosts shares one queue (it is named for the worker,
+/// not the session), so a queue is polled from its first session's start
+/// until its last session's end: one poller per queue, stopped when its last
+/// session is removed, not at the driver's shutdown.
+#[derive(Default)]
+struct SessionQueues(parking_lot::Mutex<SessionQueuesInner>);
+
+#[derive(Default)]
+struct SessionQueuesInner {
+    /// Each queue with sessions: how many, and what stops its poller.
+    open: HashMap<String, (usize, tokio::sync::watch::Sender<bool>)>,
+    /// Each queue with a poller running, and how many. A poller stopped
+    /// because its sessions ended may still have a poll out; until it ends,
+    /// its queue is named when the driver tells the engine it is shutting
+    /// down, so the engine ends that poll too.
+    polled: HashMap<String, usize>,
+}
+
+impl SessionQueues {
+    /// Counts a session on `queue`. Returns the stop for a new poller when
+    /// the queue had no session; `None` when it is already polled.
+    fn add(&self, queue: &str) -> Option<tokio::sync::watch::Sender<bool>> {
+        let mut inner = self.0.lock();
+        if let Some((sessions, _)) = inner.open.get_mut(queue) {
+            *sessions += 1;
+            return None;
+        }
+        let (stop, _) = tokio::sync::watch::channel(false);
+        inner.open.insert(queue.to_string(), (1, stop.clone()));
+        *inner.polled.entry(queue.to_string()).or_default() += 1;
+        Some(stop)
+    }
+
+    /// Counts a session off `queue`, stopping its poller when it was the
+    /// last. Returns whether the poller was stopped.
+    fn remove(&self, queue: &str) -> bool {
+        let mut inner = self.0.lock();
+        let Some((sessions, _)) = inner.open.get_mut(queue) else {
+            return false;
+        };
+        *sessions -= 1;
+        if *sessions > 0 {
+            return false;
+        }
+        if let Some((_, stop)) = inner.open.remove(queue) {
+            let _ = stop.send(true);
+        }
+        true
+    }
+
+    /// A poller on `queue` has ended, or never started.
+    fn poller_ended(&self, queue: &str) {
+        let mut inner = self.0.lock();
+        if let Some(pollers) = inner.polled.get_mut(queue) {
+            *pollers -= 1;
+            if *pollers == 0 {
+                inner.polled.remove(queue);
+            }
+        }
+    }
+
+    /// The queues with a poller running.
+    fn polled(&self) -> Vec<String> {
+        let mut queues: Vec<String> = self.0.lock().polled.keys().cloned().collect();
+        queues.sort();
+        queues
+    }
 }
 
 /// A task driver: polls for tasks and delegates running them to the language SDK.
@@ -285,10 +362,9 @@ pub struct TaskDriver {
 
     /// Receives session queue add and remove requests.
     session_queue_rx: mpsc::UnboundedReceiver<SessionQueueChange>,
-    /// Every session queue polled so far. They are named, along with the
-    /// driver's own queue, when it tells the engine it is shutting down. A
-    /// removed queue is kept, because its poller runs until the shutdown.
-    session_queues: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// The session queues polled, with the sessions using each and what
+    /// stops its poller.
+    session_queues: Arc<SessionQueues>,
     /// Shared worker counters, when the language SDK provided them. The
     /// heartbeat reports what these say this worker is running.
     metrics: Option<Arc<SharedWorkerMetrics>>,
@@ -450,16 +526,26 @@ impl TaskDriver {
         let task_sender = self.task_sender.clone().ok_or_else(|| {
             Error::worker_error("Task driver is shutting down; no new session queue is polled")
         })?;
-        self.session_queues.lock().push(session_queue.clone());
-        let poller = session_poller(
-            &self.config,
-            self.shutdown_sender.clone(),
-            task_sender,
-            &session_queue,
-        )
-        .await?;
-        tokio::spawn(run_session_poller(poller, session_queue));
-        Ok(())
+        let Some(stop) = self.session_queues.add(&session_queue) else {
+            return Ok(());
+        };
+        let stopped = follow_shutdown(&self.shutdown_sender, &stop);
+        match session_poller(&self.config, stop, task_sender, &session_queue).await {
+            Ok(poller) => {
+                tokio::spawn(run_session_poller(
+                    poller,
+                    session_queue,
+                    Arc::clone(&self.session_queues),
+                    stopped,
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                self.session_queues.remove(&session_queue);
+                self.session_queues.poller_ended(&session_queue);
+                Err(e)
+            }
+        }
     }
 
     /// Start polling a session queue without waiting for the poller to
@@ -473,17 +559,24 @@ impl TaskDriver {
             );
             return;
         };
-        self.session_queues.lock().push(session_queue.clone());
+        let Some(stop) = self.session_queues.add(&session_queue) else {
+            return;
+        };
+        let stopped = follow_shutdown(&self.shutdown_sender, &stop);
         let config = Arc::clone(&self.config);
-        let shutdown_sender = self.shutdown_sender.clone();
+        let queues = Arc::clone(&self.session_queues);
         tokio::spawn(async move {
-            match session_poller(&config, shutdown_sender, task_sender, &session_queue).await {
-                Ok(poller) => run_session_poller(poller, session_queue).await,
-                Err(e) => tracing::error!(
-                    session_queue = %session_queue,
-                    error = %e,
-                    "Failed to add session queue poller"
-                ),
+            match session_poller(&config, stop, task_sender, &session_queue).await {
+                Ok(poller) => run_session_poller(poller, session_queue, queues, stopped).await,
+                Err(e) => {
+                    tracing::error!(
+                        session_queue = %session_queue,
+                        error = %e,
+                        "Failed to add session queue poller"
+                    );
+                    queues.remove(&session_queue);
+                    queues.poller_ended(&session_queue);
+                }
             }
         });
     }
@@ -600,7 +693,7 @@ impl TaskDriver {
                         // From here on only the pollers hold the task channel
                         // open, so it closes once the last one has stopped.
                         self.task_sender = None;
-                        let mut queues = self.session_queues.lock().clone();
+                        let mut queues = self.session_queues.polled();
                         queues.push(self.config.task_queue.clone());
                         announce_shutdown(&mut in_flight, &completer, queues);
                     }
@@ -660,14 +753,15 @@ impl TaskDriver {
                     match change {
                         Some(SessionQueueChange::Add(queue)) => self.start_session_poller(queue),
                         Some(SessionQueueChange::Remove(queue)) => {
-                            // A removed queue's poller is not stopped here. It
-                            // stops on a later poll iteration, when it sees the
-                            // shutdown signal or the server returns no work for
-                            // the queue.
-                            tracing::info!(
-                                session_queue = %queue,
-                                "Session queue removal noted (poller will wind down)"
-                            );
+                            // A poll already out is left to finish, as at
+                            // shutdown: the engine may have started the task
+                            // it carries, which is still handed over.
+                            if self.session_queues.remove(&queue) {
+                                tracing::info!(
+                                    session_queue = %queue,
+                                    "Last session on the queue ended; its poller stops"
+                                );
+                            }
                         }
                         None => sessions_closed = true,
                     }
@@ -917,7 +1011,34 @@ async fn session_poller(
     .await
 }
 
-async fn run_session_poller(mut poller: TaskExecutionPoller, session_queue: String) {
+/// Stops a session poller when the driver shuts down. The poller's own stop
+/// is separate, so its queue's last session ending stops it alone. Returns
+/// what the poller holds while it runs: once it is dropped, this stops
+/// following.
+fn follow_shutdown(
+    driver: &tokio::sync::watch::Sender<bool>,
+    stop: &tokio::sync::watch::Sender<bool>,
+) -> tokio::sync::watch::Receiver<bool> {
+    let mut driver = driver.subscribe();
+    let stop = stop.clone();
+    let running = stop.subscribe();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = driver.wait_for(|stopped| *stopped) => {
+                let _ = stop.send(true);
+            }
+            _ = stop.closed() => {}
+        }
+    });
+    running
+}
+
+async fn run_session_poller(
+    mut poller: TaskExecutionPoller,
+    session_queue: String,
+    queues: Arc<SessionQueues>,
+    running: tokio::sync::watch::Receiver<bool>,
+) {
     tracing::info!(
         session_queue = %session_queue,
         "Started session queue poller"
@@ -929,6 +1050,10 @@ async fn run_session_poller(mut poller: TaskExecutionPoller, session_queue: Stri
             "Session queue poller error"
         );
     }
+    queues.poller_ended(&session_queue);
+    drop(poller);
+    drop(running);
+    tracing::info!(session_queue = %session_queue, "Session queue poller stopped");
 }
 
 #[cfg(test)]

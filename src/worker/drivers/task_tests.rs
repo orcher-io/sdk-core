@@ -63,6 +63,8 @@ struct Script {
     shutdowns: Vec<ShutdownWorkerRequest>,
     /// The instance id each task poll carried.
     poll_instance_ids: Vec<String>,
+    /// The queue each task poll named.
+    poll_queues: Vec<String>,
     /// Answer ShutdownWorker UNIMPLEMENTED and keep polls open, as an engine
     /// before 0.5.0 does.
     old_engine: bool,
@@ -144,6 +146,7 @@ impl ExecutionService for Engine {
             script.polls_started += 1;
             let request = request.into_inner();
             script.poll_instance_ids.push(request.worker_instance_id);
+            script.poll_queues.push(request.task_queue);
             script.poll_capabilities.push(request.task_capabilities);
             script.poll_gate.clone()
         };
@@ -447,8 +450,9 @@ struct TaskParts {
     driver: TaskDriver,
     work_rx: mpsc::Receiver<TaskWork>,
     result_tx: mpsc::Sender<TaskWorkResult>,
-    // Held so the driver does not see the binding go away.
-    _sessions: mpsc::UnboundedSender<SessionQueueChange>,
+    /// Adds and removes session queues. Held so the driver does not see the
+    /// binding go away.
+    sessions: mpsc::UnboundedSender<SessionQueueChange>,
 }
 
 /// A task driver for `engine` with one poller, so the order of polls is the
@@ -471,7 +475,7 @@ async fn task_driver_at(addr: SocketAddr, config: TaskDriverConfig) -> TaskParts
         driver: driver.with_completion_retry(quick()),
         work_rx,
         result_tx,
-        _sessions: sessions,
+        sessions,
     }
 }
 
@@ -1070,6 +1074,98 @@ async fn a_task_driver_tells_the_engine_it_is_shutting_down_and_stops_at_once() 
         "a poll did not name the process: {:?}",
         script.poll_instance_ids
     );
+}
+
+/// Polls the engine has had on `queue`.
+fn polls_on(engine: &Engine, queue: &str) -> usize {
+    engine
+        .script()
+        .poll_queues
+        .iter()
+        .filter(|polled| *polled == queue)
+        .count()
+}
+
+/// Whether `queue` is still being polled: its poller has not ended, and the
+/// engine keeps seeing polls on it.
+async fn still_polled(engine: &Engine, driver_queues: &SessionQueues, queue: &str) -> bool {
+    let before = polls_on(engine, queue);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    driver_queues.polled().iter().any(|polled| polled == queue) || polls_on(engine, queue) > before
+}
+
+const SESSION_QUEUE: &str = "q-1__session__w";
+
+/// A session queue is polled from its first session's start to its last
+/// session's end. All of a worker's sessions share one queue, so one session
+/// ending must not stop the polling another still needs, and the last one
+/// ending stops its poller rather than leaving it to poll until the worker
+/// shuts down.
+#[tokio::test]
+async fn a_session_queue_is_polled_until_its_last_session_ends() {
+    let engine = Engine::default();
+    let parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            task_queue: "q-1".into(),
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let queues = Arc::clone(&parts.driver.session_queues);
+    let sessions = parts.sessions.clone();
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    sessions
+        .send(SessionQueueChange::Add(SESSION_QUEUE.into()))
+        .unwrap();
+    sessions
+        .send(SessionQueueChange::Add(SESSION_QUEUE.into()))
+        .unwrap();
+    wait_for(|| polls_on(&engine, SESSION_QUEUE) > 0).await;
+    assert_eq!(queues.polled(), [SESSION_QUEUE], "one poller for the queue");
+
+    sessions
+        .send(SessionQueueChange::Remove(SESSION_QUEUE.into()))
+        .unwrap();
+    assert!(
+        still_polled(&engine, &queues, SESSION_QUEUE).await,
+        "one session ending stopped the polling the other needs"
+    );
+
+    sessions
+        .send(SessionQueueChange::Remove(SESSION_QUEUE.into()))
+        .unwrap();
+    wait_for(|| queues.polled().is_empty()).await;
+    assert!(queues.polled().is_empty(), "the poller did not stop");
+    assert!(
+        !still_polled(&engine, &queues, SESSION_QUEUE).await,
+        "the queue was still polled after its last session ended"
+    );
+
+    // A new session on the worker polls the queue again.
+    sessions
+        .send(SessionQueueChange::Add(SESSION_QUEUE.into()))
+        .unwrap();
+    assert!(still_polled(&engine, &queues, SESSION_QUEUE).await);
+
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+    assert!(queues.polled().is_empty(), "shutdown left a session poller");
+}
+
+/// Removing a queue no session is on does nothing.
+#[tokio::test]
+async fn removing_a_queue_without_sessions_does_nothing() {
+    let queues = SessionQueues::default();
+    assert!(!queues.remove(SESSION_QUEUE));
+    assert!(queues.add(SESSION_QUEUE).is_some());
+    assert!(queues.add(SESSION_QUEUE).is_none());
+    assert!(!queues.remove(SESSION_QUEUE));
+    assert!(queues.remove(SESSION_QUEUE));
+    assert!(!queues.remove(SESSION_QUEUE));
 }
 
 /// Against an engine before 0.5.0, which answers the shutdown UNIMPLEMENTED
