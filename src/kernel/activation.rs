@@ -90,6 +90,24 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
         }),
         resolutions: std::iter::once(started)
             .chain(resolutions.into_iter().map(|(_, _, resolution)| resolution))
+            // Updates waiting to be applied in this activation. The engine
+            // journals an update only once the worker has answered it, so
+            // these are never also among the journaled ones above; they come
+            // last, with no recorded time.
+            .chain(task.updates.iter().map(|update| Resolution {
+                step_id: String::new(),
+                at: None,
+                replaying: false,
+                what: Some(resolution::What::Update(UpdateArrived {
+                    update_id: update.update_id.clone(),
+                    name: update.update_type.clone(),
+                    args: if update.args.is_empty() {
+                        vec![]
+                    } else {
+                        vec![json_payload(update.args.clone())]
+                    },
+                })),
+            }))
             .collect(),
         queries: task
             .queries
@@ -456,5 +474,28 @@ mod tests {
         );
         assert_eq!(activation.resolutions[1].step_id, "timer_1");
         assert_eq!(activation.queries[0].name, "status");
+    }
+
+    /// An update waiting to be applied reaches the language after the
+    /// journaled outcomes; the engine journals it only once answered.
+    #[test]
+    fn a_pending_update_is_delivered_last() {
+        let mut task = task(vec![started(1_000)]);
+        task.updates = vec![crate::proto::orcher::v1::UpdateRequest {
+            update_id: "u1".into(),
+            update_type: "rename".into(),
+            args: br#"["new name"]"#.to_vec(),
+        }];
+        let activation = resolve(&task, "default");
+        let last = activation.resolutions.last().unwrap();
+        let Some(resolution::What::Update(update)) = &last.what else {
+            panic!("the update was not delivered: {:?}", activation.resolutions);
+        };
+        assert_eq!(
+            (update.update_id.as_str(), update.name.as_str()),
+            ("u1", "rename")
+        );
+        assert_eq!(update.args[0].data, br#"["new name"]"#);
+        assert!(last.at.is_none() && !last.replaying);
     }
 }
