@@ -6,9 +6,11 @@
 //! issue order, satisfied ones marked. [`execution_result`] turns that into the
 //! [`ExecutionResult`] the driver checks for determinism and sends on:
 //!
-//! - **Satisfied calls** become the steps the code reached, which the
-//!   determinism check compares, in order, with history. They send nothing.
-//! - **New calls** become commands for the engine.
+//! - **Every call to a step** (a task, a timer, a child), satisfied or not,
+//!   is a step the code reached, which the determinism check compares, in
+//!   order, with history.
+//! - **Satisfied calls** send nothing; **new calls** become commands for the
+//!   engine.
 //! - **Query and update answers** pass through.
 //! - **A workflow failure** fails the run; **a protocol error** (the SDK could
 //!   not process the activation) is [`Error::Protocol`], which hands the
@@ -69,9 +71,12 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
                 let mut reached = Vec::new();
                 let mut issued = Vec::new();
                 for command in commands.commands {
-                    if command.satisfied {
-                        reached.extend(reached_step(&command));
-                    } else {
+                    // Every step the code called for is reached, answered
+                    // from history or not: a step still open in history is
+                    // sent again, and the determinism check compares the
+                    // order of all of them with the journal's.
+                    reached.extend(reached_step(&command));
+                    if !command.satisfied {
                         issued.push(engine_command(command)?);
                     }
                 }
@@ -137,7 +142,7 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
     Ok(result)
 }
 
-/// The step a satisfied call reached, as the determinism check names it: a
+/// The step a call reached, as the determinism check names it: a
 /// task's, a timer's or a child's id. Recorded values and waits are not
 /// steps the check compares.
 fn reached_step(command: &KernelCommand) -> Option<String> {
@@ -372,11 +377,11 @@ mod tests {
         })
     }
 
-    /// Calls answered from history are the steps the code reached, in order;
-    /// they send nothing. New calls become commands, with the ids the SDK
-    /// supplied.
+    /// Every call to a step is a step the code reached, in order, answered
+    /// from history or not. Answered calls send nothing; new calls become
+    /// commands, with the ids the SDK supplied.
     #[test]
-    fn satisfied_calls_are_reached_steps_and_new_ones_commands() {
+    fn every_step_call_is_reached_and_new_ones_are_commands() {
         let result = execution_result(
             "run-1",
             answered(vec![
@@ -427,7 +432,8 @@ mod tests {
                 &[
                     "charge_0".to_string(),
                     "timer_1".into(),
-                    "order-7-child-2".into()
+                    "order-7-child-2".into(),
+                    "ship_4".into()
                 ][..]
             )
         );
@@ -637,5 +643,73 @@ mod tests {
             let error = execution_result("run-1", answer).unwrap_err();
             assert!(matches!(error, Error::Protocol(_)), "{error:?}");
         }
+    }
+
+    /// Two tasks issued together; the second has finished, the first is
+    /// still running. Re-running, the code calls the first (not yet
+    /// answered, so sent again in full) and then the second (answered from
+    /// history). That is the order the journal recorded them in, and the
+    /// determinism check must see both steps reached in it.
+    #[test]
+    fn steps_issued_again_count_as_reached_in_issue_order() {
+        use crate::proto::orcher::v1::journal_entry::Attributes;
+        use crate::proto::orcher::v1::{
+            EntryType, JournalEntry, TaskCompletedEventAttributes, TaskScheduledEventAttributes,
+            WorkflowExecutionStartedEventAttributes,
+        };
+        let entry = |entry_id: i64, entry_type: EntryType, attributes: Attributes| JournalEntry {
+            entry_id,
+            entry_type: entry_type as i32,
+            attributes: Some(attributes),
+            ..Default::default()
+        };
+        let scheduled = |task_id: &str, task_type: &str| {
+            Attributes::TaskScheduled(TaskScheduledEventAttributes {
+                task_id: task_id.into(),
+                task_type: task_type.into(),
+                ..Default::default()
+            })
+        };
+        let journal = vec![
+            entry(
+                1,
+                EntryType::WorkflowExecutionStarted,
+                Attributes::WorkflowExecutionStarted(WorkflowExecutionStartedEventAttributes {
+                    workflow_type: "checkout".into(),
+                    ..Default::default()
+                }),
+            ),
+            entry(2, EntryType::TaskScheduled, scheduled("charge_0", "charge")),
+            entry(3, EntryType::TaskScheduled, scheduled("ship_1", "ship")),
+            entry(
+                4,
+                EntryType::TaskCompleted,
+                Attributes::TaskCompleted(TaskCompletedEventAttributes {
+                    scheduled_event_id: 3,
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let task = |task_type: &str| {
+            command::What::RunTask(RunTask {
+                task_type: task_type.into(),
+                ..Default::default()
+            })
+        };
+        let result = execution_result(
+            "run-1",
+            answered(vec![
+                call(0, false, "charge_0", task("charge")),
+                call(1, true, "ship_1", task("ship")),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.reached_steps.as_deref(),
+            Some(&["charge_0".to_string(), "ship_1".to_string()][..])
+        );
+        let violations = crate::Replayer::check_activation(&journal, &result);
+        assert!(violations.is_empty(), "{violations:?}");
     }
 }
