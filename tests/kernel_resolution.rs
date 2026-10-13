@@ -209,6 +209,8 @@ fn check(task: &WorkflowExecutionTask) -> Result<(), String> {
             RequestJob::ChildWorkflowTimedOut(c) => {
                 child(&mut children, &c.workflow_id, End::TimedOut, &times)?
             }
+            // Compared below with the journal's child starts.
+            RequestJob::ChildWorkflowStarted(_) => {}
             other => return Err(format!("a job the kernel does not resolve yet: {other:?}")),
         }
     }

@@ -16,9 +16,9 @@
 //! started with. Assigning ids is the kernel's next step.
 
 use crate::proto::kernel::v1::{
-    outcome, resolution, CancelAsked, ChildSettled, ChildStarted, End, EventArrived, Failure, FailureCode,
-    Outcome, Payload, QueryAsked, Resolution, RunActivation, RunRef, RunStarted, StepSettled,
-    TimerElapsed, UpdateArrived,
+    outcome, resolution, CancelAsked, ChildSettled, ChildStarted, End, EventArrived, Failure,
+    FailureCode, Outcome, Payload, QueryAsked, Resolution, RunActivation, RunRef, RunStarted,
+    StepSettled, TimerElapsed, UpdateArrived,
 };
 use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::proto::prost_types::Timestamp;
@@ -389,7 +389,10 @@ mod tests {
             panic!("{:?}", child.what);
         };
         assert_eq!(
-            (started.child_workflow_id.as_str(), started.child_run_id.as_str()),
+            (
+                started.child_workflow_id.as_str(),
+                started.child_run_id.as_str()
+            ),
             ("child_1", "run-9")
         );
     }
