@@ -890,6 +890,23 @@ impl WorkflowDriver {
         let execution_result = match result.result {
             Ok(execution_result) => execution_result,
             Err(e @ Error::DeterminismViolation { .. }) => return non_deterministic(e.to_string()),
+            // The language could not process the activation: it is not the
+            // run's failure, so the activation is handed back at once, for
+            // this or another worker to take again.
+            Err(Error::Protocol(reason)) => {
+                tracing::error!(
+                    workflow_id = %workflow_id,
+                    run_id = %run_id,
+                    %reason,
+                    "The language SDK could not process the activation; handing it back"
+                );
+                return Report::Release(Leftover {
+                    workflow_id: workflow_id.clone(),
+                    run_id: run_id.clone(),
+                    token: token.clone(),
+                    retried: false,
+                });
+            }
             Err(e) => {
                 self.forget_non_deterministic(&run_id);
                 return fail(e.to_string());
@@ -1399,6 +1416,41 @@ impl WorkflowDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A language that could not process an activation hands it back: it is
+    /// released at once, not reported as the run's failure.
+    #[tokio::test]
+    async fn a_protocol_error_releases_the_activation() {
+        // A bare HTTP/2 server to connect to; the test sends it nothing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(mut connection) = h2::server::handshake(socket).await {
+                        while connection.accept().await.is_some() {}
+                    }
+                });
+            }
+        });
+        let (driver, _work, _results) = WorkflowDriver::new(WorkflowDriverConfig {
+            server_url: format!("http://{addr}"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let report = driver.report_for(WorkflowWorkResult {
+            workflow_id: "order-7".into(),
+            run_id: "run-1".into(),
+            task_token: b"act-1".to_vec(),
+            stream_entry_id: None,
+            result: Err(Error::Protocol("unknown resolution".into())),
+        });
+        assert!(
+            matches!(&report, Report::Release(leftover) if leftover.run_id == "run-1"),
+            "{report:?}"
+        );
+    }
 
     #[test]
     fn test_workflow_driver_config_default() {

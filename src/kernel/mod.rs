@@ -10,11 +10,15 @@
 //! `docs/kernel-protocol-v1.md`.
 //!
 //! - [`activation`]: an activation's history, resolved.
+//! - [`completion`]: the language's answer to an activation, back to commands
+//!   for the engine.
 //! - [`step_ids`]: step ids under the kernel's own scheme, `KERNEL_V1`.
 //! - [`random`]: the deterministic random source for runs under that scheme.
 
 pub mod activation;
+pub mod completion;
 pub mod random;
 pub mod step_ids;
 
 pub use activation::resolve;
+pub use completion::execution_result;

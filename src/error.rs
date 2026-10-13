@@ -189,6 +189,12 @@ pub enum Error {
     #[error("Internal SDK error: {0}")]
     Internal(String),
 
+    /// The language SDK could not process an activation, or answered it with
+    /// something the kernel cannot carry. Not the workflow's failure: the
+    /// activation is handed back to the engine for another worker.
+    #[error("Kernel protocol error: {0}")]
+    Protocol(String),
+
     /// Another error with added context.
     #[error("{context}: {source}")]
     #[non_exhaustive]
