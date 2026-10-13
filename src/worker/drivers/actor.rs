@@ -1,9 +1,10 @@
 //! The actor driver: polls for actor operations, hands them to the language
 //! SDK and reports their results, and sends the actor worker's heartbeat.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::error::Result;
@@ -17,6 +18,25 @@ use crate::worker::poll::completion::{
     note_connection_failure, Caller, Completer, CompletionRetryConfig,
 };
 use crate::worker::poll::polling::{ActorOperationPoller, ActorPollerConfig};
+
+use super::ShutdownHandle;
+
+/// Sets the registration a running [`ActorDriver`]'s heartbeats name, when
+/// the actor service has registered the worker's handlers again.
+#[derive(Clone, Debug)]
+pub struct RegistrationHandle(Arc<parking_lot::Mutex<Option<String>>>);
+
+impl RegistrationHandle {
+    /// From now on, heartbeats name `registration_id`.
+    pub fn set(&self, registration_id: impl Into<String>) {
+        *self.0.lock() = Some(registration_id.into());
+    }
+
+    /// The registration heartbeats name.
+    pub fn get(&self) -> Option<String> {
+        self.0.lock().clone()
+    }
+}
 
 /// Events emitted by the ActorDriver to notify the language SDK.
 #[derive(Debug, Clone)]
@@ -199,6 +219,13 @@ pub struct ActorDriver {
 
     /// How hard to try to deliver each completion and failure report.
     completion_retry: CompletionRetryConfig,
+
+    /// The registration heartbeats name; replaced on re-registration.
+    registration: RegistrationHandle,
+
+    /// When each operation handed to the language SDK was handed over, by
+    /// operation id, so its report says how long it ran.
+    handed_at: HashMap<String, Instant>,
 }
 
 impl ActorDriver {
@@ -272,6 +299,9 @@ impl ActorDriver {
             });
         }
 
+        let registration = RegistrationHandle(Arc::new(parking_lot::Mutex::new(
+            config.registration_id.clone(),
+        )));
         let driver = Self {
             config,
             channel_manager: Arc::new(channel_manager),
@@ -285,9 +315,26 @@ impl ActorDriver {
             operations_failed: Arc::new(AtomicU64::new(0)),
             event_sender,
             completion_retry: CompletionRetryConfig::default(),
+            registration,
+            handed_at: HashMap::new(),
         };
 
         Ok((driver, work_receiver, result_sender, event_receiver))
+    }
+
+    /// Return a handle that stops this driver's [`run`](Self::run) from
+    /// elsewhere. Take it before handing the driver to the task that runs
+    /// it: `run` borrows the driver for as long as it runs.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle(self.shutdown_sender.clone())
+    }
+
+    /// Return a handle that changes the registration this driver's
+    /// heartbeats name, for when the worker's handlers are registered again
+    /// after [`ActorDriverEvent::ReRegistrationRequired`]. Without it the
+    /// heartbeats keep naming the registration the actor service dropped.
+    pub fn registration_handle(&self) -> RegistrationHandle {
+        self.registration.clone()
     }
 
     /// Set how hard to retry reporting the outcome of each operation.
@@ -395,7 +442,9 @@ impl ActorDriver {
                     match (operation, room.take()) {
                         (Some(operation), Some(room)) => {
                             let op_id = operation.operation_id.clone();
+                            self.handed_at.insert(op_id.clone(), Instant::now());
                             if room.send(ActorWork { operation }).is_closed() {
+                                self.handed_at.remove(&op_id);
                                 tracing::error!(
                                     operation_id = %op_id,
                                     "Failed to send actor work to language SDK"
@@ -463,16 +512,32 @@ impl ActorDriver {
 
     /// Count an actor operation's result from the language SDK, and build
     /// the report to send for it.
-    fn handle_actor_result(&self, result: ActorWorkResult) -> CompleteActorOperationRequest {
+    /// The report of an operation's result. A failure the language SDK
+    /// built as a [`TaskFailure`](crate::TaskFailure) is reported with its
+    /// type as the error code; any other error with core's own code.
+    fn handle_actor_result(&mut self, result: ActorWorkResult) -> CompleteActorOperationRequest {
         self.operations_in_progress.fetch_sub(1, Ordering::Relaxed);
-        let (output, status, error_message) = match result.result {
+        let duration_ms = self
+            .handed_at
+            .remove(&result.operation_id)
+            .map_or(0, |handed| handed.elapsed().as_millis() as u64);
+        let (output, status, error_message, error_code) = match result.result {
             Ok(output) => {
                 self.operations_completed.fetch_add(1, Ordering::Relaxed);
-                (output, ExecutionStatus::Success, String::new())
+                (
+                    output,
+                    ExecutionStatus::Success,
+                    String::new(),
+                    String::new(),
+                )
             }
             Err(e) => {
                 self.operations_failed.fetch_add(1, Ordering::Relaxed);
-                (vec![], ExecutionStatus::Error, e.to_string())
+                let error_code = match e.task_failure() {
+                    Some(failure) => failure.error_type.clone().unwrap_or_default(),
+                    None => e.code().as_str().to_string(),
+                };
+                (vec![], ExecutionStatus::Error, e.to_string(), error_code)
             }
         };
         CompleteActorOperationRequest {
@@ -482,8 +547,8 @@ impl ActorDriver {
             result: output,
             status: status as i32,
             error_message,
-            error_code: String::new(),
-            duration_ms: 0,
+            error_code,
+            duration_ms,
             ..Default::default()
         }
     }
@@ -509,7 +574,7 @@ impl ActorDriver {
 
         let request = HeartbeatRequest {
             service_id: self.config.service_id.clone(),
-            registration_id: self.config.registration_id.clone().unwrap_or_default(),
+            registration_id: self.registration.get().unwrap_or_default(),
             status: WorkerStatus::Healthy as i32,
             metrics: Some(WorkerMetrics {
                 operations_in_progress: in_progress as u32,
