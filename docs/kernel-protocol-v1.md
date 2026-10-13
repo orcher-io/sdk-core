@@ -103,6 +103,7 @@ message Resolution {
     EventArrived  event   = 14;   // event_id, name, payload
     UpdateArrived update  = 15;   // update_id, name, args; delivered at the same wait in every SDK
     CancelAsked   cancel  = 16;   // reason, requested_at; already placed at its delivery wait (§5)
+    ChildStarted  child_started = 17; // child workflow id and run id, before it settles: an unnamed child keeps the id history holds
   }
 }
 message Outcome {                          // one decoding for every SDK: no sentinel strings

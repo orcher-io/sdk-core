@@ -16,9 +16,9 @@
 //! started with. Assigning ids is the kernel's next step.
 
 use crate::proto::kernel::v1::{
-    outcome, resolution, CancelAsked, ChildSettled, End, EventArrived, Failure, FailureCode,
-    Outcome, Payload, QueryAsked, Resolution, RunActivation, RunRef, RunStarted, StepSettled,
-    TimerElapsed, UpdateArrived,
+    outcome, resolution, CancelAsked, ChildSettled, ChildStarted, End, EventArrived, Failure,
+    FailureCode, Outcome, Payload, QueryAsked, Resolution, RunActivation, RunRef, RunStarted,
+    StepSettled, TimerElapsed, UpdateArrived,
 };
 use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::proto::prost_types::Timestamp;
@@ -183,6 +183,15 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
                 requested_at: entry.timestamp,
             }))
         }
+        // Started, not yet settled: what history holds for a child the run
+        // started, by the workflow id it was started under.
+        Attributes::ChildWorkflowExecutionStarted(child) => step(
+            &child.workflow_id,
+            resolution::What::ChildStarted(ChildStarted {
+                child_workflow_id: child.workflow_id.clone(),
+                child_run_id: child.execution_id.clone(),
+            }),
+        ),
         Attributes::ChildWorkflowExecutionCompleted(child) => child_settled(
             &child.workflow_id,
             &child.execution_id,
@@ -348,6 +357,44 @@ mod tests {
             EntryType::WorkflowExecutionStarted,
             Attributes::WorkflowExecutionStarted(WorkflowExecutionStartedEventAttributes::default()),
         )
+    }
+
+    /// A child the run started is resolved as started, under the id history
+    /// holds for it, before it settles: code that started it without naming
+    /// it keeps that id while it still runs.
+    #[test]
+    fn a_child_still_running_is_resolved_as_started() {
+        use crate::proto::orcher::v1::ChildWorkflowExecutionStartedEventAttributes;
+        let journal = vec![
+            started(1_000),
+            entry(
+                2,
+                2_000,
+                EntryType::ChildWorkflowExecutionStarted,
+                Attributes::ChildWorkflowExecutionStarted(
+                    ChildWorkflowExecutionStartedEventAttributes {
+                        workflow_id: "child_1".into(),
+                        execution_id: "run-9".into(),
+                        workflow_type: "ship".into(),
+                        ..Default::default()
+                    },
+                ),
+            ),
+        ];
+        let activation = resolve(&task(journal), "default");
+        let child = &activation.resolutions[1];
+        assert_eq!(child.step_id, "child_1");
+        assert_eq!(child.at, at(2_000));
+        let Some(resolution::What::ChildStarted(started)) = &child.what else {
+            panic!("{:?}", child.what);
+        };
+        assert_eq!(
+            (
+                started.child_workflow_id.as_str(),
+                started.child_run_id.as_str()
+            ),
+            ("child_1", "run-9")
+        );
     }
 
     /// The engine appends step results after the rest of the journal. A cancel

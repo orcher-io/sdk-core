@@ -209,9 +209,36 @@ fn check(task: &WorkflowExecutionTask) -> Result<(), String> {
             RequestJob::ChildWorkflowTimedOut(c) => {
                 child(&mut children, &c.workflow_id, End::TimedOut, &times)?
             }
+            // Compared below with the journal's child starts.
+            RequestJob::ChildWorkflowStarted(_) => {}
             other => return Err(format!("a job the kernel does not resolve yet: {other:?}")),
         }
     }
+    // Every child the journal records as started, in journal order, is
+    // resolved as started, under the id it was started with.
+    let started_in_journal: Vec<&str> = task
+        .journal
+        .iter()
+        .filter_map(|entry| match entry.attributes.as_ref()? {
+            Attributes::ChildWorkflowExecutionStarted(child) => Some(child.workflow_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let started_resolved: Vec<&str> = resolutions
+        .iter()
+        .filter_map(|r| match r.what.as_ref()? {
+            resolution::What::ChildStarted(child) => {
+                (r.step_id == child.child_workflow_id).then_some(child.child_workflow_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    if started_resolved != started_in_journal {
+        return Err(format!(
+            "children started: resolved {started_resolved:?}, journal {started_in_journal:?}"
+        ));
+    }
+
     for (kind, left) in [
         ("step", steps),
         ("timer", timers),
