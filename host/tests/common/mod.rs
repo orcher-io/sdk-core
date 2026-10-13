@@ -4,11 +4,12 @@
 // Protocol messages are built to keep building when fields are added.
 #![allow(clippy::needless_update, dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use orcher_sdk_core::proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
 use orcher_sdk_core::proto::orcher::v1::execution_service_server::{
     ExecutionService, ExecutionServiceServer,
 };
@@ -39,6 +40,19 @@ pub struct Script {
     pub failed: Vec<FailTaskExecutionRequest>,
     pub heartbeats: Vec<RecordTaskHeartbeatRequest>,
     pub registrations: Vec<RegisterWorkerRequest>,
+    /// Actor operations handed out by the next actor poll.
+    pub actor_operations: Vec<ActorOperation>,
+    pub actor_completions: Vec<CompleteActorOperationRequest>,
+    pub handler_registrations: Vec<RegisterHandlersRequest>,
+    /// Ask the next actor heartbeat for the handlers again.
+    pub re_register: bool,
+    /// The registration each actor heartbeat named.
+    pub actor_heartbeats: Vec<String>,
+    /// Actor state, by actor, key and state key: value and version.
+    pub actor_state: HashMap<(String, String, String), (Vec<u8>, u64)>,
+    /// The credentials each actor service call carried: the method, its
+    /// authorization header and organization.
+    pub actor_credentials: Vec<(&'static str, String, String)>,
     pub deregistrations: Vec<DeregisterWorkerRequest>,
 }
 
@@ -60,6 +74,7 @@ impl Engine {
         tokio::spawn(async move {
             Server::builder()
                 .add_service(WorkerServiceServer::new(engine.clone()))
+                .add_service(ActorServiceServer::new(engine.clone()))
                 .add_service(ExecutionServiceServer::new(engine))
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
@@ -306,5 +321,194 @@ pub fn activation(token: &str) -> PollWorkflowExecutionResponse {
             ),
         ],
         ..Default::default()
+    }
+}
+
+impl Engine {
+    fn credentials<T>(&self, method: &'static str, request: &Request<T>) {
+        let header = |name: &str| {
+            request
+                .metadata()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let carried = (method, header("authorization"), header("x-organization-id"));
+        self.script().actor_credentials.push(carried);
+    }
+}
+
+fn state_key(actor: &str, key: &str, state_key: &str) -> (String, String, String) {
+    (actor.to_string(), key.to_string(), state_key.to_string())
+}
+
+#[tonic::async_trait]
+impl ActorService for Engine {
+    async fn poll_actor_operation(
+        &self,
+        request: Request<PollActorOperationRequest>,
+    ) -> Result<Response<PollActorOperationResponse>, Status> {
+        self.credentials("poll", &request);
+        let operations = std::mem::take(&mut self.script().actor_operations);
+        if operations.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(Response::new(PollActorOperationResponse {
+            operations,
+            ..Default::default()
+        }))
+    }
+
+    async fn complete_actor_operation(
+        &self,
+        request: Request<CompleteActorOperationRequest>,
+    ) -> Result<Response<CompleteActorOperationResponse>, Status> {
+        self.credentials("complete", &request);
+        self.script().actor_completions.push(request.into_inner());
+        Ok(Response::new(CompleteActorOperationResponse {
+            success: true,
+            ..Default::default()
+        }))
+    }
+
+    async fn get_state(
+        &self,
+        request: Request<GetStateRequest>,
+    ) -> Result<Response<GetStateResponse>, Status> {
+        self.credentials("get_state", &request);
+        let request = request.into_inner();
+        let stored = self
+            .script()
+            .actor_state
+            .get(&state_key(
+                &request.actor_name,
+                &request.key,
+                &request.state_key,
+            ))
+            .cloned();
+        Ok(Response::new(match stored {
+            Some((value, version)) => GetStateResponse {
+                value,
+                exists: true,
+                version: version.to_string(),
+                ..Default::default()
+            },
+            None => GetStateResponse::default(),
+        }))
+    }
+
+    async fn set_state(
+        &self,
+        request: Request<SetStateRequest>,
+    ) -> Result<Response<SetStateResponse>, Status> {
+        self.credentials("set_state", &request);
+        let request = request.into_inner();
+        let mut script = self.script();
+        let slot = state_key(&request.actor_name, &request.key, &request.state_key);
+        let current = script
+            .actor_state
+            .get(&slot)
+            .map_or(0, |(_, version)| *version);
+        if !request.expected_version.is_empty() && request.expected_version != current.to_string() {
+            return Ok(Response::new(SetStateResponse {
+                success: false,
+                error_message: format!("version is {current}"),
+                ..Default::default()
+            }));
+        }
+        script
+            .actor_state
+            .insert(slot, (request.value, current + 1));
+        Ok(Response::new(SetStateResponse {
+            success: true,
+            version: (current + 1).to_string(),
+            ..Default::default()
+        }))
+    }
+
+    async fn delete_state(
+        &self,
+        request: Request<DeleteStateRequest>,
+    ) -> Result<Response<DeleteStateResponse>, Status> {
+        self.credentials("delete_state", &request);
+        let request = request.into_inner();
+        let existed = self
+            .script()
+            .actor_state
+            .remove(&state_key(
+                &request.actor_name,
+                &request.key,
+                &request.state_key,
+            ))
+            .is_some();
+        Ok(Response::new(DeleteStateResponse {
+            success: true,
+            existed,
+            ..Default::default()
+        }))
+    }
+
+    async fn list_state_keys(
+        &self,
+        request: Request<ListStateKeysRequest>,
+    ) -> Result<Response<ListStateKeysResponse>, Status> {
+        self.credentials("list_state_keys", &request);
+        let request = request.into_inner();
+        let mut keys: Vec<String> = self
+            .script()
+            .actor_state
+            .keys()
+            .filter(|(actor, key, state_key)| {
+                *actor == request.actor_name
+                    && *key == request.key
+                    && state_key.starts_with(&request.prefix)
+            })
+            .map(|(_, _, state_key)| state_key.clone())
+            .collect();
+        keys.sort();
+        Ok(Response::new(ListStateKeysResponse {
+            keys,
+            ..Default::default()
+        }))
+    }
+
+    async fn invoke_operation(
+        &self,
+        _: Request<InvokeOperationRequest>,
+    ) -> Result<Response<InvokeOperationResponse>, Status> {
+        Err(Status::unimplemented("not a worker call"))
+    }
+
+    async fn register_handlers(
+        &self,
+        request: Request<RegisterHandlersRequest>,
+    ) -> Result<Response<RegisterHandlersResponse>, Status> {
+        self.credentials("register_handlers", &request);
+        let mut script = self.script();
+        script.handler_registrations.push(request.into_inner());
+        let registration_id = format!("reg-{}", script.handler_registrations.len());
+        Ok(Response::new(RegisterHandlersResponse {
+            success: true,
+            registration_id,
+            ..Default::default()
+        }))
+    }
+
+    async fn heartbeat(
+        &self,
+        request: Request<HeartbeatRequest>,
+    ) -> Result<Response<HeartbeatResponse>, Status> {
+        self.credentials("heartbeat", &request);
+        let mut script = self.script();
+        script
+            .actor_heartbeats
+            .push(request.into_inner().registration_id);
+        let re_register = std::mem::take(&mut script.re_register);
+        Ok(Response::new(HeartbeatResponse {
+            success: true,
+            re_register,
+            ..Default::default()
+        }))
     }
 }

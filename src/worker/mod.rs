@@ -21,8 +21,9 @@ pub mod record;
 // Driver types: the main API for language SDKs.
 pub use drivers::{
     ActorDriver, ActorDriverConfig, ActorDriverEvent, ActorWork, ActorWorkResult,
-    EagerTaskInjector, SessionQueueChange, ShutdownHandle, TaskDriver, TaskDriverConfig, TaskWork,
-    TaskWorkResult, WorkflowDriver, WorkflowDriverConfig, WorkflowWork, WorkflowWorkResult,
+    EagerTaskInjector, RegistrationHandle, SessionQueueChange, ShutdownHandle, TaskDriver,
+    TaskDriverConfig, TaskWork, TaskWorkResult, WorkflowDriver, WorkflowDriverConfig, WorkflowWork,
+    WorkflowWorkResult,
 };
 
 // Which of the work drivers a worker starts, and the built-in task types that

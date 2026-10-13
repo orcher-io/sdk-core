@@ -16,8 +16,11 @@
 //! handed over this way ([`Host::next_task`]), and workflow activations as the
 //! kernel protocol's messages ([`Host::next_activation`]). Sessions are run
 //! by the host itself: the built-in session tasks never reach the language.
-//! Actor operations follow.
+//! Actor operations are handed over by pull too
+//! ([`Host::next_actor_operation`]), and the actors' state is read and written
+//! through the host, on its connection, with the worker's credentials.
 
+mod actors;
 pub mod config;
 mod sessions;
 mod tasks;
@@ -26,13 +29,18 @@ mod workflows;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use orcher_sdk_core::proto::host::v1::{HeartbeatAnswer, TaskAssignment, TaskOutcome};
+use orcher_sdk_core::proto::host::v1::{
+    ActorOperation, ActorResult, HeartbeatAnswer, TaskAssignment, TaskOutcome,
+};
 use orcher_sdk_core::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
 use orcher_sdk_core::worker::drivers::registration::DEREGISTER_TIMEOUT;
-use orcher_sdk_core::worker::{NeededDrivers, ShutdownHandle, TaskDriver, WorkflowDriver};
+use orcher_sdk_core::worker::{
+    ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkflowDriver,
+};
 use orcher_sdk_core::{Error, Result, WorkerRegistrationDriver};
 use tokio::task::JoinHandle;
 
+pub use actors::{ActorHandler, StateScope, StateValue};
 pub use config::HostConfig;
 
 /// How long a driver has to stop once asked, before it is aborted.
@@ -48,6 +56,9 @@ pub struct Registrations {
     pub task_types: Vec<String>,
     /// Registered actor types.
     pub actor_types: Vec<String>,
+    /// The operations the worker runs for its actor types; every actor type
+    /// needs at least one.
+    pub actor_handlers: Vec<ActorHandler>,
 }
 
 impl Registrations {
@@ -61,7 +72,20 @@ impl Registrations {
             workflow_types: workflow_types.into_iter().map(Into::into).collect(),
             task_types: task_types.into_iter().map(Into::into).collect(),
             actor_types: actor_types.into_iter().map(Into::into).collect(),
+            actor_handlers: Vec::new(),
         }
+    }
+
+    /// The worker runs these actor operations; their actor types are added
+    /// to the registered ones.
+    pub fn with_actor_handlers(mut self, handlers: impl IntoIterator<Item = ActorHandler>) -> Self {
+        for handler in handlers {
+            if !self.actor_types.contains(&handler.actor_name) {
+                self.actor_types.push(handler.actor_name.clone());
+            }
+            self.actor_handlers.push(handler);
+        }
+        self
     }
 
     /// The drivers these registrations need.
@@ -82,6 +106,7 @@ struct Inner {
     needed: NeededDrivers,
     tasks: Option<tasks::Tasks>,
     workflows: Option<workflows::Workflows>,
+    actors: Option<actors::Actors>,
     stops: Mutex<Stops>,
 }
 
@@ -90,6 +115,8 @@ struct Inner {
 struct Stops {
     drivers: Vec<(&'static str, ShutdownHandle, JoinHandle<()>)>,
     registration: Option<(ShutdownHandle, JoinHandle<()>)>,
+    /// Registers the actor handlers again when the actor service asks.
+    re_registration: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -109,7 +136,9 @@ impl Host {
     /// # Errors
     ///
     /// Returns [`Error::Configuration`] for a worker that registered nothing
-    /// it could run: it would poll for nothing.
+    /// it could run (it would poll for nothing), or an actor type with no
+    /// operation; and the actor service's refusal of the worker's actor
+    /// handlers.
     pub async fn start(config: HostConfig, registrations: Registrations) -> Result<Self> {
         let needed = registrations.needed_drivers();
         if needed.is_empty() {
@@ -167,6 +196,45 @@ impl Host {
             None
         };
 
+        let actors = if needed.actors {
+            if let Some(bare) = registrations.actor_types.iter().find(|actor| {
+                !registrations
+                    .actor_handlers
+                    .iter()
+                    .any(|handler| &handler.actor_name == *actor)
+            }) {
+                return Err(Error::Configuration(format!(
+                    "actor type {bare} was registered with no operation"
+                )));
+            }
+            let service = actors::ActorService::connect(&config).await?;
+            let metadata = actors::registration_metadata(&config);
+            let registration_id = service
+                .register(&config.identity, &registrations.actor_handlers, &metadata)
+                .await?;
+            let (driver, work, results, events) =
+                ActorDriver::new(config.actor_driver(Some(registration_id))).await?;
+            stops.re_registration = Some(actors::follow_re_registration(
+                service.clone(),
+                config.identity.clone(),
+                registrations.actor_handlers.clone(),
+                metadata,
+                driver.registration_handle(),
+                events,
+            ));
+            let stop = driver.shutdown_handle();
+            let mut driver = driver;
+            let running = tokio::spawn(async move {
+                if let Err(error) = driver.run().await {
+                    tracing::warn!(%error, "The actor driver ended with an error");
+                }
+            });
+            stops.drivers.push(("actor", stop, running));
+            Some(actors::Actors::new(work, results, service))
+        } else {
+            None
+        };
+
         let mut registration =
             WorkerRegistrationDriver::new(config.registration(&registrations)).await?;
         let stop = registration.shutdown_handle();
@@ -190,6 +258,7 @@ impl Host {
                 needed,
                 tasks,
                 workflows,
+                actors,
                 stops: Mutex::new(stops),
             }),
         })
@@ -270,6 +339,82 @@ impl Host {
         }
     }
 
+    /// The next actor operation to run, once there is one. `None` once the
+    /// worker has stopped, and at once for a worker that runs no actors.
+    pub async fn next_actor_operation(&self) -> Option<ActorOperation> {
+        self.inner.actors.as_ref()?.next().await
+    }
+
+    /// Reports an actor operation's result: its value, or its failure with
+    /// the type the language gave it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] for a result of an operation the host does
+    /// not hold, an error for a result with neither a value nor a failure,
+    /// and an error once the worker has stopped.
+    pub async fn complete_actor_operation(&self, result: ActorResult) -> Result<()> {
+        self.actors()?.complete(result).await
+    }
+
+    /// Reads one key of an actor's state; `None` when it is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the actor service's error.
+    pub async fn get_actor_state(
+        &self,
+        scope: &StateScope,
+        state_key: &str,
+    ) -> Result<Option<StateValue>> {
+        self.actors()?.service.get(scope, state_key).await
+    }
+
+    /// Writes one key of an actor's state; returns its new version. With
+    /// `expected_version`, the write is refused unless the stored version
+    /// is that one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the actor service's error or refusal.
+    pub async fn set_actor_state(
+        &self,
+        scope: &StateScope,
+        state_key: &str,
+        value: Vec<u8>,
+        expected_version: Option<&str>,
+    ) -> Result<String> {
+        self.actors()?
+            .service
+            .set(scope, state_key, value, expected_version)
+            .await
+    }
+
+    /// Deletes one key of an actor's state; returns whether it was set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the actor service's error.
+    pub async fn delete_actor_state(&self, scope: &StateScope, state_key: &str) -> Result<bool> {
+        self.actors()?.service.delete(scope, state_key).await
+    }
+
+    /// The keys of an actor's state that start with `prefix`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the actor service's error.
+    pub async fn actor_state_keys(&self, scope: &StateScope, prefix: &str) -> Result<Vec<String>> {
+        self.actors()?.service.keys(scope, prefix).await
+    }
+
+    fn actors(&self) -> Result<&actors::Actors> {
+        self.inner
+            .actors
+            .as_ref()
+            .ok_or_else(|| Error::Configuration("the worker runs no actors".to_string()))
+    }
+
     /// Stops the worker: stops its drivers (each within
     /// [`DRIVER_STOP_TIMEOUT`], then aborted), then deregisters it, within a
     /// bounded time. A second call does nothing.
@@ -294,6 +439,9 @@ impl Host {
         }
         if let Some(tasks) = &self.inner.tasks {
             tasks.sessions().close_all();
+        }
+        if let Some(re_registration) = stops.re_registration {
+            re_registration.abort();
         }
         if let Some((stop, running)) = stops.registration {
             stop.shutdown();

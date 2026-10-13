@@ -58,6 +58,10 @@ struct Script {
     actor_answers: HashMap<String, VecDeque<std::result::Result<bool, Code>>>,
     /// Operation ids of the actor completions that arrived, in order.
     actor_calls: Vec<String>,
+    /// The actor completions that arrived, in order.
+    actor_completions: Vec<CompleteActorOperationRequest>,
+    /// The registration each actor heartbeat named, in order.
+    actor_heartbeat_registrations: Vec<String>,
     /// ShutdownWorker calls that arrived. From the first, open polls are
     /// answered at once with nothing, as the engine does.
     shutdowns: Vec<ShutdownWorkerRequest>,
@@ -307,10 +311,12 @@ impl ActorService for Engine {
         &self,
         request: Request<CompleteActorOperationRequest>,
     ) -> std::result::Result<Response<CompleteActorOperationResponse>, Status> {
-        let operation_id = request.into_inner().operation_id;
+        let request = request.into_inner();
+        let operation_id = request.operation_id.clone();
         let answer = {
             let mut script = self.script();
             script.actor_calls.push(operation_id.clone());
+            script.actor_completions.push(request);
             script
                 .actor_answers
                 .get_mut(&operation_id)
@@ -368,8 +374,11 @@ impl ActorService for Engine {
     }
     async fn heartbeat(
         &self,
-        _: Request<HeartbeatRequest>,
+        request: Request<HeartbeatRequest>,
     ) -> std::result::Result<Response<HeartbeatResponse>, Status> {
+        self.script()
+            .actor_heartbeat_registrations
+            .push(request.into_inner().registration_id);
         Ok(Response::new(HeartbeatResponse::default()))
     }
 }
@@ -804,6 +813,140 @@ async fn an_actor_completion_is_retried_on_unavailable_and_success_false_is_fina
     drop(result_tx);
     drop(work_rx);
     stops_within(running, MARGIN).await;
+}
+
+fn actor_operation(id: &str) -> ActorOperation {
+    ActorOperation {
+        operation_id: id.into(),
+        execution_id: format!("{id}-exec"),
+        actor_name: "Cart".into(),
+        key: "k".into(),
+        operation: "add".into(),
+        ..Default::default()
+    }
+}
+
+async fn actor_driver(
+    engine: &Engine,
+    config: ActorDriverConfig,
+) -> (
+    ActorDriver,
+    mpsc::Receiver<crate::worker::ActorWork>,
+    mpsc::Sender<ActorWorkResult>,
+) {
+    let addr = serve(engine.clone()).await;
+    let (driver, work_rx, result_tx, _events) = ActorDriver::new(ActorDriverConfig {
+        server_url: format!("http://{addr}"),
+        poller_count: 1,
+        poll_timeout: Duration::from_secs(1),
+        ..config
+    })
+    .await
+    .unwrap();
+    (driver.with_completion_retry(quick()), work_rx, result_tx)
+}
+
+/// A failed operation is reported with the type the language SDK gave it,
+/// or core's own code for an error of core's; every report says how long the
+/// operation ran.
+#[tokio::test]
+async fn an_actor_failure_is_reported_with_its_type_and_duration() {
+    let engine = Engine::default();
+    engine.script().operations = vec![
+        actor_operation("op-typed"),
+        actor_operation("op-core"),
+        actor_operation("op-ok"),
+    ];
+    let (mut driver, mut work_rx, result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            enable_heartbeat: false,
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    for _ in 0..3 {
+        let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+            .await
+            .expect("an operation handed over")
+            .unwrap();
+        let operation = work.operation;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let result = match operation.operation_id.as_str() {
+            "op-typed" => Err(crate::TaskFailure::new("out of stock")
+                .with_type("OutOfStock")
+                .into()),
+            "op-core" => Err(Error::Timeout {
+                operation: "the store".into(),
+            }),
+            _ => Ok(b"{}".to_vec()),
+        };
+        result_tx
+            .send(ActorWorkResult {
+                operation_id: operation.operation_id,
+                execution_id: operation.execution_id,
+                result,
+            })
+            .await
+            .unwrap();
+    }
+    wait_for(|| engine.script().actor_completions.len() >= 3).await;
+    let completions: HashMap<String, CompleteActorOperationRequest> = engine
+        .script()
+        .actor_completions
+        .iter()
+        .map(|done| (done.operation_id.clone(), done.clone()))
+        .collect();
+    let typed = &completions["op-typed"];
+    assert_eq!(typed.error_code, "OutOfStock");
+    assert_eq!(typed.error_message, "out of stock");
+    assert_eq!(completions["op-core"].error_code, "TIMEOUT");
+    assert_eq!(completions["op-ok"].error_code, "");
+    for done in completions.values() {
+        assert!(
+            done.duration_ms >= 50,
+            "{}: {}ms",
+            done.operation_id,
+            done.duration_ms
+        );
+    }
+
+    // The handle stops the driver while it runs.
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// Heartbeats name the registration the driver was started with until the
+/// handle replaces it, and the new one after.
+#[tokio::test]
+async fn actor_heartbeats_name_the_current_registration() {
+    let engine = Engine::default();
+    let (mut driver, _work_rx, _result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            heartbeat_interval: Duration::from_millis(50),
+            registration_id: Some("reg-1".into()),
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let registration = driver.registration_handle();
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    wait_for(|| !engine.script().actor_heartbeat_registrations.is_empty()).await;
+    registration.set("reg-2");
+    let seen = engine.script().actor_heartbeat_registrations.len();
+    wait_for(|| engine.script().actor_heartbeat_registrations.len() > seen + 1).await;
+
+    let names = engine.script().actor_heartbeat_registrations.clone();
+    assert_eq!(names[0], "reg-1");
+    assert_eq!(names.last().unwrap(), "reg-2", "{names:?}");
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
 }
 
 /// A language SDK that lets go of both its channels without a shutdown has
