@@ -13,19 +13,21 @@
 //! The design is `docs/worker-host.md` in the sdk-core repository. The host
 //! hands work to the language by pull: the language asks for the next piece
 //! of work when it has room to run one, and returns its outcome. Tasks are
-//! handed over this way ([`Host::next_task`]); workflow activations, sessions
-//! and actor operations follow.
+//! handed over this way ([`Host::next_task`]), and workflow activations as the
+//! kernel protocol's messages ([`Host::next_activation`]); sessions and actor
+//! operations follow.
 
 pub mod config;
 mod tasks;
+mod workflows;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use orcher_sdk_core::proto::host::v1::{HeartbeatAnswer, TaskAssignment, TaskOutcome};
-use orcher_sdk_core::proto::kernel::v1::Payload;
+use orcher_sdk_core::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
 use orcher_sdk_core::worker::drivers::registration::DEREGISTER_TIMEOUT;
-use orcher_sdk_core::worker::{NeededDrivers, ShutdownHandle, TaskDriver};
+use orcher_sdk_core::worker::{NeededDrivers, ShutdownHandle, TaskDriver, WorkflowDriver};
 use orcher_sdk_core::{Error, Result, WorkerRegistrationDriver};
 use tokio::task::JoinHandle;
 
@@ -77,6 +79,7 @@ struct Inner {
     config: HostConfig,
     needed: NeededDrivers,
     tasks: Option<tasks::Tasks>,
+    workflows: Option<workflows::Workflows>,
     stops: Mutex<Stops>,
 }
 
@@ -114,9 +117,13 @@ impl Host {
         }
         let mut stops = Stops::default();
 
+        let mut eager_tasks = None;
         let tasks = if needed.tasks {
             let (mut driver, work, results, _sessions) =
                 TaskDriver::new(config.task_driver()).await?;
+            // Tasks the engine hands back with a workflow's completion reach
+            // this worker's task driver without a poll.
+            eager_tasks = Some(driver.eager_task_injector());
             let stop = driver.shutdown_handle();
             let running = tokio::spawn(async move {
                 if let Err(error) = driver.run().await {
@@ -125,6 +132,28 @@ impl Host {
             });
             stops.drivers.push(("task", stop, running));
             Some(tasks::Tasks::new(config.namespace.clone(), work, results))
+        } else {
+            None
+        };
+
+        let workflows = if needed.workflows {
+            let (driver, work, results) = WorkflowDriver::new(config.workflow_driver()).await?;
+            let mut driver = match eager_tasks {
+                Some(injector) => driver.with_eager_task_injector(injector),
+                None => driver,
+            };
+            let stop = driver.shutdown_handle();
+            let running = tokio::spawn(async move {
+                if let Err(error) = driver.run().await {
+                    tracing::warn!(%error, "The workflow driver ended with an error");
+                }
+            });
+            stops.drivers.push(("workflow", stop, running));
+            Some(workflows::Workflows::new(
+                config.namespace.clone(),
+                work,
+                results,
+            ))
         } else {
             None
         };
@@ -151,6 +180,7 @@ impl Host {
                 config,
                 needed,
                 tasks,
+                workflows,
                 stops: Mutex::new(stops),
             }),
         })
@@ -164,6 +194,33 @@ impl Host {
     /// The drivers the worker runs.
     pub fn needed_drivers(&self) -> NeededDrivers {
         self.inner.needed
+    }
+
+    /// The next workflow activation to run, once there is one: the run's
+    /// history resolved into the outcomes its code observes. `None` once the
+    /// worker has stopped and every activation it took has been handed over,
+    /// and at once for a worker that runs no workflows.
+    pub async fn next_activation(&self) -> Option<RunActivation> {
+        self.inner.workflows.as_ref()?.next().await
+    }
+
+    /// Sends the answer to an activation: every durable call the code made,
+    /// or a workflow failure, or a protocol error. An answer the kernel
+    /// cannot carry hands the activation back to the engine rather than
+    /// failing the run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Protocol`] for an answer to an activation the host
+    /// does not hold (already answered, or the worker stopped), and an error
+    /// once the worker has stopped.
+    pub async fn complete_activation(&self, answer: RunActivationResult) -> Result<()> {
+        match &self.inner.workflows {
+            Some(workflows) => workflows.complete(answer).await,
+            None => Err(Error::Configuration(
+                "the worker runs no workflows".to_string(),
+            )),
+        }
     }
 
     /// The next task to run, once there is one. `None` once the worker has

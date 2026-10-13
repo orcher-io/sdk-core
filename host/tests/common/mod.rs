@@ -24,6 +24,11 @@ use tonic::{Request, Response, Status};
 pub struct Script {
     /// Tasks to hand out, one per poll.
     pub tasks: VecDeque<PollTaskExecutionResponse>,
+    /// Workflow activations to hand out, one per poll.
+    pub activations: VecDeque<PollWorkflowExecutionResponse>,
+    pub workflow_completions: Vec<CompleteWorkflowExecutionRequest>,
+    pub workflow_failures: Vec<FailWorkflowExecutionRequest>,
+    pub releases: Vec<ReleaseWorkflowExecutionRequest>,
     /// Whether heartbeats are answered with a cancellation request.
     pub cancel_requested: bool,
     pub completed: Vec<CompleteTaskExecutionRequest>,
@@ -121,8 +126,14 @@ impl ExecutionService for Engine {
         &self,
         _: Request<PollWorkflowExecutionRequest>,
     ) -> Result<Response<PollWorkflowExecutionResponse>, Status> {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        Ok(Response::new(PollWorkflowExecutionResponse::default()))
+        let next = self.script().activations.pop_front();
+        match next {
+            Some(activation) => Ok(Response::new(activation)),
+            None => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(Response::new(PollWorkflowExecutionResponse::default()))
+            }
+        }
     }
 
     async fn poll_task_execution(
@@ -141,16 +152,20 @@ impl ExecutionService for Engine {
 
     async fn complete_workflow_execution(
         &self,
-        _: Request<CompleteWorkflowExecutionRequest>,
+        request: Request<CompleteWorkflowExecutionRequest>,
     ) -> Result<Response<CompleteWorkflowExecutionResponse>, Status> {
-        Err(Status::unimplemented("fake engine"))
+        self.script()
+            .workflow_completions
+            .push(request.into_inner());
+        Ok(Response::new(CompleteWorkflowExecutionResponse::default()))
     }
 
     async fn fail_workflow_execution(
         &self,
-        _: Request<FailWorkflowExecutionRequest>,
+        request: Request<FailWorkflowExecutionRequest>,
     ) -> Result<Response<FailWorkflowExecutionResponse>, Status> {
-        Err(Status::unimplemented("fake engine"))
+        self.script().workflow_failures.push(request.into_inner());
+        Ok(Response::new(FailWorkflowExecutionResponse::default()))
     }
 
     async fn complete_task_execution(
@@ -204,8 +219,9 @@ impl ExecutionService for Engine {
 
     async fn release_workflow_execution(
         &self,
-        _: Request<ReleaseWorkflowExecutionRequest>,
+        request: Request<ReleaseWorkflowExecutionRequest>,
     ) -> Result<Response<ReleaseWorkflowExecutionResponse>, Status> {
+        self.script().releases.push(request.into_inner());
         Ok(Response::new(ReleaseWorkflowExecutionResponse::default()))
     }
 
@@ -214,5 +230,68 @@ impl ExecutionService for Engine {
         _: Request<ShutdownWorkerRequest>,
     ) -> Result<Response<ShutdownWorkerResponse>, Status> {
         Ok(Response::new(ShutdownWorkerResponse::default()))
+    }
+}
+
+/// A journal entry recorded at `ms` milliseconds.
+fn entry(
+    id: i64,
+    ms: i64,
+    entry_type: EntryType,
+    attributes: journal_entry::Attributes,
+) -> JournalEntry {
+    JournalEntry {
+        entry_id: id,
+        timestamp: Some(orcher_sdk_core::proto::prost_types::Timestamp {
+            seconds: ms / 1000,
+            nanos: ((ms % 1000) * 1_000_000) as i32,
+        }),
+        entry_type: entry_type as i32,
+        version: 1,
+        attributes: Some(attributes),
+        ..Default::default()
+    }
+}
+
+/// An activation of run `run-1` whose history records task `charge_0`
+/// scheduled and completed with `"ok"`.
+pub fn activation(token: &str) -> PollWorkflowExecutionResponse {
+    PollWorkflowExecutionResponse {
+        workflow_id: "order-7".into(),
+        execution_id: "run-1".into(),
+        workflow_type: "checkout".into(),
+        task_queue: "orders".into(),
+        input: br#"{"n":1}"#.to_vec(),
+        stream_entry_id: token.into(),
+        journal: vec![
+            entry(
+                1,
+                1_000,
+                EntryType::WorkflowExecutionStarted,
+                journal_entry::Attributes::WorkflowExecutionStarted(Default::default()),
+            ),
+            entry(
+                2,
+                1_100,
+                EntryType::TaskScheduled,
+                journal_entry::Attributes::TaskScheduled(TaskScheduledEventAttributes {
+                    task_id: "charge_0".into(),
+                    task_type: "charge".into(),
+                    ..Default::default()
+                }),
+            ),
+            entry(
+                3,
+                1_200,
+                EntryType::StepCompleted,
+                journal_entry::Attributes::StepCompleted(StepCompletedEventAttributes {
+                    step_name: "charge_0".into(),
+                    result: br#""ok""#.to_vec(),
+                    execution_attempt: 1,
+                    ..Default::default()
+                }),
+            ),
+        ],
+        ..Default::default()
     }
 }

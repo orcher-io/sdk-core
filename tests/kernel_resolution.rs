@@ -117,9 +117,16 @@ fn check(task: &WorkflowExecutionTask) -> Result<(), String> {
 
     for job in &jobs {
         match job {
-            RequestJob::StartWorkflow(_)
-            | RequestJob::ProcessQuery(_)
-            | RequestJob::UpdateState(_) => {}
+            RequestJob::StartWorkflow(_) | RequestJob::ProcessQuery(_) => {}
+            RequestJob::UpdateState(update) => {
+                let pending = activation.resolutions.iter().any(|r| {
+                    matches!(&r.what, Some(resolution::What::Update(u)) if u.update_id == update.update_id)
+                        && r.at.is_none()
+                });
+                if !pending {
+                    return Err(format!("update {} is not delivered", update.update_id));
+                }
+            }
             RequestJob::CompleteStep(step) => {
                 let r = take(&mut steps, "step")?;
                 same(&r.step_id, &step.step_name, "step id")?;

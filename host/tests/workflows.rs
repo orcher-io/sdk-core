@@ -1,0 +1,219 @@
+//! Workflow activations handed to the language as the kernel protocol's
+//! messages, against a fake engine.
+
+mod common;
+
+use std::time::Duration;
+
+use common::{activation, Engine};
+use orcher_sdk_core::proto::kernel::v1::{
+    command, resolution, run_activation_result, Command, Commands, Failure, ProtocolError,
+    RunActivationResult, RunTask,
+};
+use orcher_sdk_core::proto::orcher::v1::command::Attributes;
+use orcher_sdk_host::{Host, HostConfig, Registrations};
+
+async fn workflow_worker(engine: &Engine) -> Host {
+    let addr = engine.serve().await;
+    Host::start(
+        HostConfig::new(format!("http://{addr}"), "orders"),
+        Registrations::new(["checkout"], [] as [&str; 0], [] as [&str; 0]),
+    )
+    .await
+    .unwrap()
+}
+
+async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    for _ in 0..300 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what} did not happen in time");
+}
+
+fn call(seq: u64, satisfied: bool, step_id: &str, task_type: &str) -> Command {
+    Command {
+        seq,
+        satisfied,
+        step_id: step_id.into(),
+        what: Some(command::What::RunTask(RunTask {
+            task_type: task_type.into(),
+            ..Default::default()
+        })),
+    }
+}
+
+/// The language receives the history resolved: the run starting with its
+/// input, then the recorded task's outcome, with no journal.
+#[tokio::test]
+async fn an_activation_reaches_the_language_resolved() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+
+    let run = host.next_activation().await.expect("an activation");
+    assert_eq!(run.activation_id, b"act-1");
+    assert_eq!(run.run.as_ref().unwrap().workflow_type, "checkout");
+    let kinds: Vec<&str> = run
+        .resolutions
+        .iter()
+        .map(|r| match r.what.as_ref().unwrap() {
+            resolution::What::Started(_) => "started",
+            resolution::What::Step(_) => "step",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["started", "step"]);
+    assert_eq!(run.resolutions[1].step_id, "charge_0");
+    host.shutdown().await;
+}
+
+/// The answer reaches the engine as commands: the satisfied call checked
+/// against history and sent as nothing, the new call as a task with the id
+/// the SDK supplied.
+#[tokio::test]
+async fn an_answer_reaches_the_engine_as_commands() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+    let run = host.next_activation().await.unwrap();
+
+    host.complete_activation(RunActivationResult {
+        activation_id: run.activation_id,
+        outcome: Some(run_activation_result::Outcome::Commands(Commands {
+            commands: vec![
+                call(0, true, "charge_0", "charge"),
+                call(1, false, "ship_1", "ship"),
+            ],
+        })),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    eventually("the completion", || {
+        !engine.script().workflow_completions.is_empty()
+    })
+    .await;
+    let completion = engine.script().workflow_completions[0].clone();
+    assert_eq!(completion.commands.len(), 1, "{:?}", completion.commands);
+    let Some(Attributes::ScheduleTask(task)) = &completion.commands[0].attributes else {
+        panic!("{:?}", completion.commands[0]);
+    };
+    assert_eq!(
+        (task.task_id.as_str(), task.task_type.as_str()),
+        ("ship_1", "ship")
+    );
+    host.shutdown().await;
+}
+
+/// Code that no longer issues the recorded step is held, not applied: the
+/// kernel's determinism check sees the satisfied calls the language sent.
+#[tokio::test]
+async fn an_answer_that_disagrees_with_history_is_not_applied() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+    let run = host.next_activation().await.unwrap();
+
+    // The journal recorded a `charge` task at charge_0; the code now issues a
+    // `refund` there.
+    host.complete_activation(RunActivationResult {
+        activation_id: run.activation_id,
+        outcome: Some(run_activation_result::Outcome::Commands(Commands {
+            commands: vec![call(0, false, "charge_0", "refund")],
+        })),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    eventually("the activation handed back", || {
+        !engine.script().releases.is_empty()
+    })
+    .await;
+    assert!(engine.script().workflow_completions.is_empty());
+    assert!(engine.script().workflow_failures.is_empty());
+    host.shutdown().await;
+}
+
+/// A protocol error hands the activation back at once; it does not fail the
+/// run.
+#[tokio::test]
+async fn a_protocol_error_hands_the_activation_back() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+    let run = host.next_activation().await.unwrap();
+
+    host.complete_activation(RunActivationResult {
+        activation_id: run.activation_id,
+        outcome: Some(run_activation_result::Outcome::ProtocolError(
+            ProtocolError {
+                message: "unknown resolution".into(),
+                ..Default::default()
+            },
+        )),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    eventually("the release", || !engine.script().releases.is_empty()).await;
+    assert!(engine.script().workflow_failures.is_empty());
+    assert!(engine.script().workflow_completions.is_empty());
+    host.shutdown().await;
+}
+
+/// A workflow failure fails the run.
+#[tokio::test]
+async fn a_workflow_failure_fails_the_run() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+    let run = host.next_activation().await.unwrap();
+
+    host.complete_activation(RunActivationResult {
+        activation_id: run.activation_id,
+        outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+            message: "out of stock".into(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    eventually("the failure", || {
+        !engine.script().workflow_failures.is_empty()
+    })
+    .await;
+    let failure = engine.script().workflow_failures[0]
+        .failure
+        .clone()
+        .unwrap();
+    assert!(
+        failure.message.contains("out of stock"),
+        "{}",
+        failure.message
+    );
+    host.shutdown().await;
+}
+
+/// An answer to an activation the host does not hold is refused.
+#[tokio::test]
+async fn an_answer_to_no_held_activation_is_refused() {
+    let engine = Engine::default();
+    let host = workflow_worker(&engine).await;
+    let error = host
+        .complete_activation(RunActivationResult {
+            activation_id: b"never-handed-out".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no activation"), "{error}");
+    host.shutdown().await;
+}

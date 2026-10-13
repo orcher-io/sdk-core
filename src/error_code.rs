@@ -123,6 +123,7 @@ impl Error {
                 ErrorCode::Internal
             }
             Error::ResourceExhausted { .. } => ErrorCode::ResourceExhausted,
+            Error::Protocol(_) => ErrorCode::Internal,
             // The context is for people; the code is the wrapped error's.
             Error::WithContext { source, .. } => source.code(),
             Error::GrpcStatus(status) => match status.code() {
