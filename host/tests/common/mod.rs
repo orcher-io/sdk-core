@@ -22,8 +22,12 @@ use tonic::{Request, Response, Status};
 
 #[derive(Default)]
 pub struct Script {
-    /// Tasks to hand out, one per poll.
+    /// Tasks to hand out, one per poll of the worker's own queue.
     pub tasks: VecDeque<PollTaskExecutionResponse>,
+    /// Tasks to hand out, one per poll of a session queue.
+    pub session_tasks: VecDeque<PollTaskExecutionResponse>,
+    /// The queue each task poll named.
+    pub polled_queues: Vec<String>,
     /// Workflow activations to hand out, one per poll.
     pub activations: VecDeque<PollWorkflowExecutionResponse>,
     pub workflow_completions: Vec<CompleteWorkflowExecutionRequest>,
@@ -138,9 +142,18 @@ impl ExecutionService for Engine {
 
     async fn poll_task_execution(
         &self,
-        _: Request<PollTaskExecutionRequest>,
+        request: Request<PollTaskExecutionRequest>,
     ) -> Result<Response<PollTaskExecutionResponse>, Status> {
-        let next = self.script().tasks.pop_front();
+        let queue = request.into_inner().task_queue;
+        let next = {
+            let mut script = self.script();
+            script.polled_queues.push(queue.clone());
+            if queue.contains("__session__") {
+                script.session_tasks.pop_front()
+            } else {
+                script.tasks.pop_front()
+            }
+        };
         match next {
             Some(task) => Ok(Response::new(task)),
             None => {

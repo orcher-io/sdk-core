@@ -31,6 +31,8 @@ pub const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_CONCURRENCY: u32 = 100;
 /// How many polls each driver keeps open.
 pub const POLLERS_PER_DRIVER: usize = 4;
+/// How many sessions a worker hosts at once, unless configured.
+pub const DEFAULT_MAX_SESSIONS: usize = 10;
 
 /// One worker's configuration.
 #[derive(Debug, Clone)]
@@ -59,6 +61,10 @@ pub struct HostConfig {
     pub max_concurrent_tasks: u32,
     /// Actor operations run at once.
     pub max_concurrent_actor_operations: u32,
+    /// Sessions hosted at once. A session creation that finds every slot
+    /// taken waits for one to come free, up to its creation timeout; it is
+    /// not passed on to another worker.
+    pub max_sessions: usize,
     /// The SDK running the worker, reported to the engine, for example
     /// `orcher-sdk-ts`.
     pub sdk_name: String,
@@ -83,6 +89,7 @@ impl HostConfig {
             max_concurrent_workflows: DEFAULT_CONCURRENCY,
             max_concurrent_tasks: DEFAULT_CONCURRENCY,
             max_concurrent_actor_operations: DEFAULT_CONCURRENCY,
+            max_sessions: DEFAULT_MAX_SESSIONS,
             sdk_name: String::new(),
             sdk_version: String::new(),
         }
@@ -134,6 +141,12 @@ impl HostConfig {
         self.max_concurrent_workflows = workflows;
         self.max_concurrent_tasks = tasks;
         self.max_concurrent_actor_operations = actor_operations;
+        self
+    }
+
+    /// Hosts at most `max_sessions` sessions at once.
+    pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = max_sessions;
         self
     }
 

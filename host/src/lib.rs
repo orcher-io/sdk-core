@@ -14,10 +14,12 @@
 //! hands work to the language by pull: the language asks for the next piece
 //! of work when it has room to run one, and returns its outcome. Tasks are
 //! handed over this way ([`Host::next_task`]), and workflow activations as the
-//! kernel protocol's messages ([`Host::next_activation`]); sessions and actor
-//! operations follow.
+//! kernel protocol's messages ([`Host::next_activation`]). Sessions are run
+//! by the host itself: the built-in session tasks never reach the language.
+//! Actor operations follow.
 
 pub mod config;
+mod sessions;
 mod tasks;
 mod workflows;
 
@@ -119,7 +121,7 @@ impl Host {
 
         let mut eager_tasks = None;
         let tasks = if needed.tasks {
-            let (mut driver, work, results, _sessions) =
+            let (mut driver, work, results, queue_changes) =
                 TaskDriver::new(config.task_driver()).await?;
             // Tasks the engine hands back with a workflow's completion reach
             // this worker's task driver without a poll.
@@ -131,7 +133,14 @@ impl Host {
                 }
             });
             stops.drivers.push(("task", stop, running));
-            Some(tasks::Tasks::new(config.namespace.clone(), work, results))
+            let sessions =
+                sessions::Sessions::new(config.max_sessions, queue_changes, results.clone());
+            Some(tasks::Tasks::new(
+                config.namespace.clone(),
+                work,
+                results,
+                sessions,
+            ))
         } else {
             None
         };
@@ -282,6 +291,9 @@ impl Host {
                 tracing::warn!(driver = name, "Driver did not stop in time; aborting it");
                 abort.abort();
             }
+        }
+        if let Some(tasks) = &self.inner.tasks {
+            tasks.sessions().close_all();
         }
         if let Some((stop, running)) = stops.registration {
             stop.shutdown();

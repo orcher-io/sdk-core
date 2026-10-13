@@ -42,6 +42,9 @@ Bugs found in this layer (each a host responsibility the host fixes once):
 | worker/actor errors untagged; language matches message text | | ✗ | |
 | actor re-registration on `ReRegistrationRequired` | ✓ | logged only | ✓ (metadata differs) |
 | dead config (poll intervals, actor concurrency, force-shutdown timeout) | | ✗ | ✗ |
+| a completed session's queue polled until the worker stops, one more poller per session (core) | ✗ | ✗ | ✗ |
+| a session's execution timeout never enforced | ✗ | ✗ | ✗ |
+| session creation fails at once when slots are full, instead of waiting up to its creation timeout | ✗ | ✗ | |
 
 Sessions are split three ways: Rust runs them natively; Python and TypeScript keep session logic in the language and only add or remove queues through the bridge.
 
@@ -77,7 +80,7 @@ host.metrics() -> WorkerMetrics
 host.shutdown(Drain { grace }).await                            // §6
 ```
 
-- Sessions are the host's: the built-in create/complete session tasks are handled inside the host, never surfaced to the language; a task on a session queue reaches the language like any other task.
+- Sessions are the host's: the built-in create/complete session tasks are handled inside the host, never surfaced to the language; a task on a session queue reaches the language like any other task. A creation waits for a slot up to its creation timeout (less a margin, then fails with type `ResourceExhausted`); a session ends on its completion, its execution timeout, or the worker stopping; its queue is polled from its creation to its end. The wire stays the one the SDKs' workflow code already speaks (`SessionInfo` JSON with `state: "Open"`, which the Rust SDK decodes strictly and the others ignore). Two session options are accepted but not enforced, because nothing can enforce them yet: `heartbeat_interval` (the engine has no session liveness to report to) and `max_concurrent_tasks` (all of a worker's sessions share one queue).
 - Errors cross with core's `ErrorCode` (#61), never as text the language parses.
 - `next_*` returning `None` is the only end-of-work signal; there is no 30-second empty wake-up (the bindings cancel a pending pull instead).
 

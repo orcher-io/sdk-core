@@ -4,10 +4,11 @@
 //! the task's heartbeats while it runs, and hands back its outcome. The host
 //! keeps a registry of the tasks the language holds, so a heartbeat or a
 //! cancellation wait finds its task, and a task the language reported stops
-//! being heartbeated for.
+//! being heartbeated for. The built-in session tasks are run by the host
+//! ([`crate::sessions`]) and never handed over.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use orcher_sdk_core::proto::host::v1::{
     task_outcome, HeartbeatAnswer, TaskAssignment, TaskOutcome,
@@ -18,6 +19,8 @@ use orcher_sdk_core::worker::poll::polling::TaskExecutionTask;
 use orcher_sdk_core::worker::{CancellationToken, TaskHeartbeat, TaskWork, TaskWorkResult};
 use orcher_sdk_core::{Error, Result, TaskFailure};
 use tokio::sync::mpsc;
+
+use crate::sessions::Sessions;
 
 /// A task the language holds.
 struct Running {
@@ -34,6 +37,7 @@ pub(crate) struct Tasks {
     work: tokio::sync::Mutex<mpsc::Receiver<TaskWork>>,
     results: mpsc::Sender<TaskWorkResult>,
     running: Mutex<HashMap<Vec<u8>, Running>>,
+    sessions: Arc<Sessions>,
 }
 
 impl Tasks {
@@ -41,19 +45,32 @@ impl Tasks {
         namespace: String,
         work: mpsc::Receiver<TaskWork>,
         results: mpsc::Sender<TaskWorkResult>,
+        sessions: Sessions,
     ) -> Self {
         Self {
             namespace,
             work: tokio::sync::Mutex::new(work),
             results,
             running: Mutex::new(HashMap::new()),
+            sessions: Arc::new(sessions),
         }
+    }
+
+    /// The worker's sessions.
+    pub(crate) fn sessions(&self) -> &Sessions {
+        &self.sessions
     }
 
     /// The next task to run, once there is one; `None` once the driver has
     /// stopped and handed over everything it took.
     pub(crate) async fn next(&self) -> Option<TaskAssignment> {
-        let work = self.work.lock().await.recv().await?;
+        let work = loop {
+            let work = self.work.lock().await.recv().await?;
+            if !Sessions::handles(&work.task.task_type) {
+                break work;
+            }
+            self.sessions.run(work);
+        };
         let assignment = self.assignment(&work.task);
         self.running_tasks().insert(
             work.task.task_token.clone(),
