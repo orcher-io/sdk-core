@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.14.0](https://github.com/orcher-io/sdk-core/compare/v0.13.1...v0.14.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* builds on orcher-proto 0.6, whose Resolution gains the ChildStarted variant; an SDK depending on orcher-proto directly must move to 0.6 in the same change.
+
+### Features
+
+* resolve a child the run started before it settles ([#81](https://github.com/orcher-io/sdk-core/issues/81)) ([89807c4](https://github.com/orcher-io/sdk-core/commit/89807c433eb25f1996d21e7a2317a9d5580c843c))
+
 ## [0.13.1](https://github.com/orcher-io/sdk-core/compare/v0.13.0...v0.13.1) (2026-10-13)
 
 
