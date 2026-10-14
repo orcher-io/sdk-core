@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.15.0](https://github.com/orcher-io/sdk-core/compare/v0.14.1...v0.15.0) (2026-10-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* builds on orcher-proto 0.7 (RestartFresh gains execution_timeout); an SDK depending on orcher-proto directly must move to 0.7 in the same change. DEFAULT_RETRY_ATTEMPTS is removed: attempts have no default, 0 is unlimited.
+
+### Bug Fixes
+
+* carry a kernel answer to the engine without losing what the SDK said ([#85](https://github.com/orcher-io/sdk-core/issues/85)) ([7283ed5](https://github.com/orcher-io/sdk-core/commit/7283ed56c82227e2f1e2254e887a0a01a4a4f764))
+
 ## [0.14.1](https://github.com/orcher-io/sdk-core/compare/v0.14.0...v0.14.1) (2026-10-14)
 
 
