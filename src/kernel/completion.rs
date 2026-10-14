@@ -29,8 +29,8 @@ use crate::error::{Error, Result};
 use crate::payload::Payload;
 use crate::proto::kernel::v1::{
     command, query_answer, run_activation_result, update_answer, Command as KernelCommand,
-    OrphanPolicy as KernelOrphanPolicy, Outcome, Payload as KernelPayload, RetryPolicy,
-    RunActivationResult,
+    FailureCode, OrphanPolicy as KernelOrphanPolicy, Outcome, Payload as KernelPayload,
+    RetryPolicy, RunActivationResult,
 };
 use crate::proto::prost_types;
 use crate::protocol::result::{
@@ -44,13 +44,14 @@ use crate::protocol::result::{
 /// How long a task attempt may run when the command does not say.
 pub const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The retry policy fields' defaults, the same for every SDK.
-pub const DEFAULT_RETRY_ATTEMPTS: u32 = 3;
-/// See [`DEFAULT_RETRY_ATTEMPTS`].
+/// The default delay before a task's first retry, for a retry policy that
+/// leaves it unset; the same for every SDK. A policy's attempts have no
+/// default: 0 is unlimited, as the engine reads it.
 pub const DEFAULT_RETRY_FIRST_DELAY: Duration = Duration::from_secs(1);
-/// See [`DEFAULT_RETRY_ATTEMPTS`].
+/// The default longest delay between retries; see [`DEFAULT_RETRY_FIRST_DELAY`].
 pub const DEFAULT_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
-/// See [`DEFAULT_RETRY_ATTEMPTS`].
+/// The default factor a retry delay grows by; also taken by a factor of zero
+/// or less, which is no factor at all. See [`DEFAULT_RETRY_FIRST_DELAY`].
 pub const DEFAULT_RETRY_MULTIPLIER: f64 = 2.0;
 
 /// The step type a recorded value is journaled under (`StepType::Closure`).
@@ -85,7 +86,13 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
                 result
             }
             Some(run_activation_result::Outcome::WorkflowFailed(failure)) => {
-                let error = ExecutionError::workflow_error(failure.message, !failure.non_retryable);
+                // Code that no longer replays its history is reported as such,
+                // so the engine holds the run instead of failing it as code.
+                let error = if failure.code == FailureCode::NonDeterminism as i32 {
+                    ExecutionError::non_determinism(failure.message, None)
+                } else {
+                    ExecutionError::workflow_error(failure.message, !failure.non_retryable)
+                };
                 ExecutionResult::failed(run_id.to_string(), error)
             }
             Some(run_activation_result::Outcome::ProtocolError(error)) => {
@@ -266,7 +273,7 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
             workflow_type: restart.workflow_type,
             input: restart.input.into_iter().map(payload).collect(),
             task_queue: Some(restart.task_queue).filter(|queue| !queue.is_empty()),
-            timeout: None,
+            timeout: restart.execution_timeout.map(duration),
         }),
         Some(command::What::UpsertLabels(_)) => {
             return Err(Error::Protocol(
@@ -303,11 +310,9 @@ fn recorded(outcome: Option<Outcome>) -> (Vec<u8>, Option<StepFailure>, i32) {
 /// A retry policy, with the kernel's defaults for the fields left unset.
 fn retry_policy(policy: RetryPolicy) -> TaskRetryPolicy {
     TaskRetryPolicy {
-        max_attempts: if policy.max_attempts == 0 {
-            DEFAULT_RETRY_ATTEMPTS
-        } else {
-            policy.max_attempts
-        },
+        // 0 is unlimited, as the engine reads it: the SDK sent the policy, so
+        // it is passed on as given. A policy left out takes the defaults.
+        max_attempts: policy.max_attempts,
         initial_interval: policy
             .first_delay
             .map(duration)
@@ -451,10 +456,11 @@ mod tests {
         assert!(task.retry_policy.is_none());
     }
 
-    /// A retry policy's unset fields take the kernel's defaults, the same
-    /// for every SDK.
+    /// A retry policy's unset delays take the kernel's defaults, the same
+    /// for every SDK; its attempts are passed on as given, where 0 is
+    /// unlimited, as the engine reads it.
     #[test]
-    fn unset_retry_fields_take_the_kernels_defaults() {
+    fn unset_retry_delays_take_the_kernels_defaults_and_attempts_pass_through() {
         let result = execution_result(
             "run-1",
             answered(vec![call(
@@ -478,7 +484,7 @@ mod tests {
             panic!();
         };
         let policy = task.retry_policy.as_ref().unwrap();
-        assert_eq!(policy.max_attempts, DEFAULT_RETRY_ATTEMPTS);
+        assert_eq!(policy.max_attempts, 0, "unlimited, not a default");
         assert_eq!(policy.initial_interval, DEFAULT_RETRY_FIRST_DELAY);
         assert_eq!(policy.max_interval, Duration::from_secs(10));
         assert_eq!(policy.backoff_coefficient, DEFAULT_RETRY_MULTIPLIER);
@@ -614,6 +620,53 @@ mod tests {
         let error = result.error.unwrap();
         assert_eq!(error.message, "out of stock");
         assert!(!error.retryable);
+    }
+
+    /// Code that no longer replays its history is reported as
+    /// non-determinism, so the engine holds the run rather than failing it
+    /// as an error in the workflow's code.
+    #[test]
+    fn a_non_determinism_failure_is_reported_as_such() {
+        let result = execution_result(
+            "run-1",
+            RunActivationResult {
+                outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+                    message: "step charge_0 is now a timer".into(),
+                    code: FailureCode::NonDeterminism as i32,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = result.error.unwrap();
+        assert_eq!(
+            error.error_type,
+            crate::protocol::result::ExecutionErrorType::NonDeterminism
+        );
+        assert_eq!(error.message, "step charge_0 is now a timer");
+    }
+
+    /// A restart keeps the execution timeout the workflow asked for.
+    #[test]
+    fn a_restart_keeps_its_execution_timeout() {
+        let result = execution_result(
+            "run-1",
+            answered(vec![call(
+                0,
+                false,
+                "",
+                command::What::RestartFresh(crate::proto::kernel::v1::RestartFresh {
+                    execution_timeout: seconds(3600),
+                    ..Default::default()
+                }),
+            )]),
+        )
+        .unwrap();
+        let Command::RestartFresh(restart) = &result.commands[0] else {
+            panic!("{:?}", result.commands);
+        };
+        assert_eq!(restart.timeout, Some(Duration::from_secs(3600)));
     }
 
     /// What the kernel cannot carry hands the activation back, never fails

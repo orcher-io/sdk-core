@@ -236,13 +236,15 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
                 false,
             ),
         ),
+        // The message is the reason given for the termination, empty when
+        // none was: each SDK words the failure its own way around it.
         Attributes::ChildWorkflowExecutionTerminated(child) => child_settled(
             &child.workflow_id,
             &child.execution_id,
             ended(
                 End::Terminated,
                 FailureCode::Terminated,
-                "Child workflow was terminated".to_string(),
+                child.reason.clone(),
                 String::new(),
                 false,
             ),
@@ -395,6 +397,38 @@ mod tests {
             ),
             ("child_1", "run-9")
         );
+    }
+
+    /// A terminated child carries the reason it was terminated for, which
+    /// each SDK words its own failure around.
+    #[test]
+    fn a_terminated_child_carries_its_reason() {
+        use crate::proto::orcher::v1::ChildWorkflowExecutionTerminatedEventAttributes;
+        let journal = vec![
+            started(1_000),
+            entry(
+                2,
+                2_000,
+                EntryType::ChildWorkflowExecutionTerminated,
+                Attributes::ChildWorkflowExecutionTerminated(
+                    ChildWorkflowExecutionTerminatedEventAttributes {
+                        workflow_id: "child_1".into(),
+                        reason: "operator stopped it".into(),
+                        ..Default::default()
+                    },
+                ),
+            ),
+        ];
+        let activation = resolve(&task(journal), "default");
+        let Some(resolution::What::Child(child)) = &activation.resolutions[1].what else {
+            panic!("{:?}", activation.resolutions[1]);
+        };
+        let outcome = child.outcome.as_ref().unwrap();
+        assert_eq!(outcome.end, End::Terminated as i32);
+        let Some(outcome::Result::Failure(failure)) = &outcome.result else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(failure.message, "operator stopped it");
     }
 
     /// The engine appends step results after the rest of the journal. A cancel
