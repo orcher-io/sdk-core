@@ -25,11 +25,11 @@ pub const WORKFLOW_CACHE_CAPACITY: usize = 1000;
 /// How often a running task is heartbeated for, when it does not heartbeat
 /// itself.
 pub const TASK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-/// How often the worker tells the engine it is alive.
+/// How often the worker tells the engine it is alive, unless configured.
 pub const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// How many of each kind of work run at once, unless configured.
 pub const DEFAULT_CONCURRENCY: u32 = 100;
-/// How many polls each driver keeps open.
+/// How many polls each driver keeps open, unless configured.
 pub const POLLERS_PER_DRIVER: usize = 4;
 /// How long a stopping worker gives the language to finish the work it
 /// holds, unless configured. Well inside the 30 seconds a container
@@ -68,6 +68,15 @@ pub struct HostConfig {
     pub max_concurrent_tasks: u32,
     /// Actor operations run at once.
     pub max_concurrent_actor_operations: u32,
+    /// Polls the workflow driver keeps open (at least one).
+    pub workflow_pollers: usize,
+    /// Polls the task driver keeps open (at least one).
+    pub task_pollers: usize,
+    /// Polls the actor driver keeps open (at least one).
+    pub actor_pollers: usize,
+    /// How often the worker, and its actor service registration, tell the
+    /// engine they are alive.
+    pub heartbeat_interval: Duration,
     /// Sessions hosted at once. A session creation that finds every slot
     /// taken waits for one to come free, up to its creation timeout; it is
     /// not passed on to another worker.
@@ -101,6 +110,10 @@ impl HostConfig {
             max_concurrent_workflows: DEFAULT_CONCURRENCY,
             max_concurrent_tasks: DEFAULT_CONCURRENCY,
             max_concurrent_actor_operations: DEFAULT_CONCURRENCY,
+            workflow_pollers: POLLERS_PER_DRIVER,
+            task_pollers: POLLERS_PER_DRIVER,
+            actor_pollers: POLLERS_PER_DRIVER,
+            heartbeat_interval: WORKER_HEARTBEAT_INTERVAL,
             max_sessions: DEFAULT_MAX_SESSIONS,
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             sdk_name: String::new(),
@@ -157,6 +170,20 @@ impl HostConfig {
         self
     }
 
+    /// Keeps this many polls open per driver; zero counts as one.
+    pub fn with_pollers(mut self, workflows: usize, tasks: usize, actors: usize) -> Self {
+        self.workflow_pollers = workflows.max(1);
+        self.task_pollers = tasks.max(1);
+        self.actor_pollers = actors.max(1);
+        self
+    }
+
+    /// Tells the engine the worker is alive this often.
+    pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
     /// Hosts at most `max_sessions` sessions at once.
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
@@ -193,7 +220,7 @@ impl HostConfig {
         config.poll_timeout = WORKFLOW_POLL_TIMEOUT;
         config.cache_capacity = WORKFLOW_CACHE_CAPACITY;
         config.strict_determinism = false;
-        config.poller_count = POLLERS_PER_DRIVER;
+        config.poller_count = self.workflow_pollers.max(1);
         config.organization_id = self.organization_id.clone();
         config.api_key = self.api_key.clone();
         config.tls_config = self.tls.clone();
@@ -213,7 +240,7 @@ impl HostConfig {
         config.poll_timeout = TASK_POLL_TIMEOUT;
         config.enable_heartbeat = true;
         config.heartbeat_interval = TASK_HEARTBEAT_INTERVAL;
-        config.poller_count = POLLERS_PER_DRIVER;
+        config.poller_count = self.task_pollers.max(1);
         config.organization_id = self.organization_id.clone();
         config.api_key = self.api_key.clone();
         config.tls_config = self.tls.clone();
@@ -232,11 +259,11 @@ impl HostConfig {
         config.max_concurrent_executions = self.max_concurrent_actor_operations as usize;
         config.identity = self.identity.clone();
         config.poll_timeout = ACTOR_POLL_TIMEOUT;
-        config.poller_count = POLLERS_PER_DRIVER;
+        config.poller_count = self.actor_pollers.max(1);
         config.organization_id = self.organization_id.clone();
         config.api_key = self.api_key.clone();
         config.enable_heartbeat = true;
-        config.heartbeat_interval = WORKER_HEARTBEAT_INTERVAL;
+        config.heartbeat_interval = self.heartbeat_interval;
         config.registration_id = registration_id;
         config.tls_config = self.tls.clone();
         config
@@ -279,7 +306,7 @@ impl HostConfig {
         config.task_types = task_types;
         config.max_concurrent_workflows = self.max_concurrent_workflows;
         config.max_concurrent_tasks = self.max_concurrent_tasks;
-        config.heartbeat_interval = WORKER_HEARTBEAT_INTERVAL;
+        config.heartbeat_interval = self.heartbeat_interval;
         config.metadata = metadata;
         config.version_id = self.version_id.clone();
         config.tls_config = self.tls.clone();

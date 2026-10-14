@@ -94,8 +94,32 @@ async fn fake_engine() -> (SocketAddr, Arc<Mutex<Recorded>>) {
     (addr, recorded)
 }
 
+/// The poll counts and the heartbeat interval a worker sets reach the
+/// drivers that use them; zero polls counts as one.
+#[test]
+fn poll_counts_and_heartbeat_interval_reach_the_drivers() {
+    let config = HostConfig::new("http://engine:50051", "orders")
+        .with_pollers(2, 6, 0)
+        .with_heartbeat_interval(std::time::Duration::from_secs(3));
+    assert_eq!(config.workflow_driver().poller_count, 2);
+    assert_eq!(config.task_driver().poller_count, 6);
+    let actor = config.actor_driver(None);
+    assert_eq!(actor.poller_count, 1);
+    assert_eq!(actor.heartbeat_interval, std::time::Duration::from_secs(3));
+    let registration = config.registration(&Registrations::new(
+        ["checkout"],
+        [] as [&str; 0],
+        [] as [&str; 0],
+    ));
+    assert_eq!(
+        registration.heartbeat_interval,
+        std::time::Duration::from_secs(3)
+    );
+}
+
 /// Every driver is built from the one config: the same identity, the same
 /// connection settings, and the defaults that used to be retyped per SDK.
+
 #[test]
 fn every_driver_is_built_from_one_config() {
     let config = HostConfig::new("https://engine:443", "orders")
