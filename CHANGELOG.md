@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/orcher-io/sdk-core/compare/v0.14.0...v0.14.1) (2026-10-14)
+
+
+### Features
+
+* let a worker set its poll counts and heartbeat interval through the host ([#83](https://github.com/orcher-io/sdk-core/issues/83)) ([ba0ad50](https://github.com/orcher-io/sdk-core/commit/ba0ad5018aabe9059cbec533a76c00609518e0a5))
+
 ## [0.14.0](https://github.com/orcher-io/sdk-core/compare/v0.13.1...v0.14.0) (2026-10-13)
 
 
