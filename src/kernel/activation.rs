@@ -125,6 +125,20 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
     }
 }
 
+/// The failure type the engine gives a task step that ended cancelled: by its
+/// worker, or by its workflow's cancellation before it started.
+const CANCELLED_STEP: &str = "Cancelled";
+
+/// How a failed step ended: cancelled, for the engine's cancelled steps, so
+/// each language raises its cancellation error; failed for everything else.
+fn step_ending(failure_type: &str) -> (End, FailureCode) {
+    if failure_type == CANCELLED_STEP {
+        (End::Cancelled, FailureCode::Cancelled)
+    } else {
+        (End::Failed, FailureCode::Application)
+    }
+}
+
 /// The outcome a journal entry records, if it records one the run observes,
 /// with the step it belongs to as the run recorded it (empty for outcomes of
 /// no step: an event, an update, a cancel request).
@@ -137,17 +151,20 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
             &step_completed.step_name,
             resolution::What::Step(StepSettled {
                 outcome: Some(match &step_completed.failure {
-                    Some(failure) => Outcome {
-                        result: Some(outcome::Result::Failure(Failure {
-                            message: failure.message.clone(),
-                            error_type: failure.failure_type.clone(),
-                            non_retryable: failure.non_retryable,
-                            code: FailureCode::Application as i32,
-                            details: Vec::new(),
-                        })),
-                        end: End::Failed as i32,
-                        attempts: attempts(step_completed.execution_attempt),
-                    },
+                    Some(failure) => {
+                        let (end, code) = step_ending(&failure.failure_type);
+                        Outcome {
+                            result: Some(outcome::Result::Failure(Failure {
+                                message: failure.message.clone(),
+                                error_type: failure.failure_type.clone(),
+                                non_retryable: failure.non_retryable,
+                                code: code as i32,
+                                details: Vec::new(),
+                            })),
+                            end: end as i32,
+                            attempts: attempts(step_completed.execution_attempt),
+                        }
+                    }
                     None => Outcome {
                         result: Some(outcome::Result::Value(json_payload(
                             step_completed.result.clone(),
@@ -511,6 +528,45 @@ mod tests {
         };
         assert_eq!(failure.message, "card declined");
         assert_eq!(failure.error_type, "Declined");
+        assert_eq!(failure.code, FailureCode::Application as i32);
+        assert!(failure.non_retryable);
+    }
+
+    /// A step the engine ended cancelled settles cancelled, with the
+    /// cancellation code, so each language raises its cancellation error.
+    #[test]
+    fn a_cancelled_step_settles_cancelled() {
+        let journal = vec![
+            started(1_000),
+            entry(
+                2,
+                2_000,
+                EntryType::StepCompleted,
+                Attributes::StepCompleted(StepCompletedEventAttributes {
+                    step_name: "charge_0".into(),
+                    failure: Some(WireFailure {
+                        message: "Task cancelled by its worker".into(),
+                        failure_type: "Cancelled".into(),
+                        non_retryable: true,
+                        ..Default::default()
+                    }),
+                    execution_attempt: 1,
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let activation = resolve(&task(journal), "default");
+        let Some(resolution::What::Step(step)) = &activation.resolutions[1].what else {
+            panic!("not a step: {:?}", activation.resolutions[1]);
+        };
+        let outcome = step.outcome.as_ref().unwrap();
+        assert_eq!(outcome.end, End::Cancelled as i32);
+        let Some(outcome::Result::Failure(failure)) = &outcome.result else {
+            panic!("not a failure: {outcome:?}");
+        };
+        assert_eq!(failure.code, FailureCode::Cancelled as i32);
+        assert_eq!(failure.error_type, "Cancelled");
+        assert_eq!(failure.message, "Task cancelled by its worker");
         assert!(failure.non_retryable);
     }
 
