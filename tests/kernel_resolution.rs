@@ -94,6 +94,15 @@ fn check(task: &WorkflowExecutionTask) -> Result<(), String> {
         return Err(format!("input differs: {input} vs {}", task.input));
     }
 
+    // Each carries its place in that order, so SDKs compare them exactly.
+    if resolutions
+        .windows(2)
+        .any(|pair| pair[0].sequence >= pair[1].sequence)
+        || resolutions.first().is_some_and(|r| r.sequence == 0)
+    {
+        return Err("resolutions are not numbered in order".into());
+    }
+
     // Observed in recorded order.
     let ats: Vec<Option<i64>> = resolutions.iter().map(|r| ms(&r.at)).collect();
     if ats

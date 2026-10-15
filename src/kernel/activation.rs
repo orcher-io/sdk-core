@@ -6,7 +6,10 @@
 //!
 //! - **Order.** Outcomes are ordered by when the engine recorded them, then by
 //!   journal position. Position alone is wrong: the engine appends step results
-//!   after the rest of the journal.
+//!   after the rest of the journal. Each resolution carries its place in that
+//!   order as its `sequence`, so an SDK tells which of two outcomes came first
+//!   (a wait's result or a cancel request) by comparing integers, never times,
+//!   which tie within a millisecond.
 //! - **Time.** Each outcome carries its recorded time; a run's deterministic
 //!   clock moves to the time of the last outcome it has consumed.
 //! - **One decoding.** A failed step or child is a [`Failure`] in an
@@ -113,6 +116,13 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
                 })),
                 ..Default::default()
             }))
+            .zip(1..)
+            // Each outcome's place in the order the run observes them, from 1:
+            // the one exact before/after between two outcomes, for every SDK.
+            .map(|(resolution, sequence)| Resolution {
+                sequence,
+                ..resolution
+            })
             .collect(),
         queries: task
             .queries
@@ -513,6 +523,131 @@ mod tests {
         assert_eq!(kinds, ["started", "step", "cancel"]);
         assert_eq!(activation.resolutions[1].step_id, "charge_0");
         assert_eq!(activation.resolutions[1].at, at(2_000));
+    }
+
+    /// A journal of a run whose task `charge_0` failed and that was asked to
+    /// cancel: the failure is entry `step_id` recorded at `step_us` and the
+    /// request entry `cancel_id` recorded at `cancel_us` (microseconds).
+    fn failure_and_cancel(
+        step_id: i64,
+        step_us: i64,
+        cancel_id: i64,
+        cancel_us: i64,
+    ) -> Vec<JournalEntry> {
+        let at_us = |us: i64| {
+            Some(Timestamp {
+                seconds: us / 1_000_000,
+                nanos: ((us % 1_000_000) * 1_000) as i32,
+            })
+        };
+        let mut journal = vec![
+            started(1_000),
+            JournalEntry {
+                entry_id: step_id,
+                timestamp: at_us(step_us),
+                entry_type: EntryType::StepCompleted as i32,
+                attributes: Some(Attributes::StepCompleted(StepCompletedEventAttributes {
+                    step_name: "charge_0".into(),
+                    failure: Some(WireFailure {
+                        message: "Task cancelled".into(),
+                        failure_type: "Cancelled".into(),
+                        non_retryable: true,
+                        ..Default::default()
+                    }),
+                    execution_attempt: 1,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            JournalEntry {
+                entry_id: cancel_id,
+                timestamp: at_us(cancel_us),
+                entry_type: EntryType::WorkflowExecutionCancelRequested as i32,
+                attributes: Some(Attributes::WorkflowExecutionCancelRequested(
+                    WorkflowExecutionCancelRequestedEventAttributes {
+                        cause: "user".into(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        ];
+        journal.sort_by_key(|entry| entry.entry_id);
+        journal
+    }
+
+    /// The sequences of the step and of the cancel request, as resolved.
+    fn step_and_cancel_sequences(journal: Vec<JournalEntry>) -> (u64, u64) {
+        let activation = resolve(&task(journal), "default");
+        let find = |want: fn(&resolution::What) -> bool| {
+            activation
+                .resolutions
+                .iter()
+                .find(|r| r.what.as_ref().is_some_and(want))
+                .map(|r| r.sequence)
+                .unwrap()
+        };
+        (
+            find(|w| matches!(w, resolution::What::Step(_))),
+            find(|w| matches!(w, resolution::What::Cancel(_))),
+        )
+    }
+
+    /// Every resolution carries its place in the order the run observes it:
+    /// from 1 for the start, one more for each, pending updates last.
+    #[test]
+    fn each_resolution_carries_its_place_in_the_order() {
+        let mut task = task(failure_and_cancel(3, 2_000_000, 2, 3_000_000));
+        task.updates = vec![crate::proto::orcher::v1::UpdateRequest {
+            update_id: "u1".into(),
+            update_type: "rename".into(),
+            ..Default::default()
+        }];
+        let activation = resolve(&task, "default");
+        let sequences: Vec<u64> = activation.resolutions.iter().map(|r| r.sequence).collect();
+        assert_eq!(sequences, [1, 2, 3, 4]);
+        assert!(matches!(
+            activation.resolutions[0].what,
+            Some(resolution::What::Started(_))
+        ));
+        assert!(matches!(
+            activation.resolutions[3].what,
+            Some(resolution::What::Update(_))
+        ));
+    }
+
+    /// A task failure and a cancel request recorded in the same millisecond
+    /// are ordered by when they were recorded within it, whichever way round
+    /// the journal holds them: the sequences say which came first, where
+    /// their times in milliseconds tie.
+    #[test]
+    fn a_failure_and_a_cancel_in_one_millisecond_are_ordered_exactly() {
+        // The request first, the failure 300 microseconds later.
+        let (step, cancel) =
+            step_and_cancel_sequences(failure_and_cancel(3, 2_000_400, 2, 2_000_100));
+        assert!(cancel < step, "cancel {cancel}, step {step}");
+        let (step, cancel) =
+            step_and_cancel_sequences(failure_and_cancel(2, 2_000_400, 3, 2_000_100));
+        assert!(cancel < step, "cancel {cancel}, step {step}");
+        // The failure first.
+        let (step, cancel) =
+            step_and_cancel_sequences(failure_and_cancel(3, 2_000_100, 2, 2_000_400));
+        assert!(step < cancel, "cancel {cancel}, step {step}");
+        let (step, cancel) =
+            step_and_cancel_sequences(failure_and_cancel(2, 2_000_100, 3, 2_000_400));
+        assert!(step < cancel, "cancel {cancel}, step {step}");
+    }
+
+    /// A task failure and a cancel request with identical times are ordered
+    /// by journal position, in either order, and never share a sequence.
+    #[test]
+    fn a_failure_and_a_cancel_at_one_instant_follow_the_journal() {
+        let (step, cancel) =
+            step_and_cancel_sequences(failure_and_cancel(3, 2_000_000, 2, 2_000_000));
+        assert!(cancel < step, "cancel {cancel}, step {step}");
+        let (step, cancel) =
+            step_and_cancel_sequences(failure_and_cancel(2, 2_000_000, 3, 2_000_000));
+        assert!(step < cancel, "cancel {cancel}, step {step}");
     }
 
     /// A failed step is a Failure in its Outcome, never a marker in a result.
