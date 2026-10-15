@@ -26,6 +26,15 @@ cp .cargo/config.example.toml .cargo/config.toml
 `.cargo/config.toml` is git-ignored, and the override is not recorded in
 `Cargo.lock`, so it only affects your machine.
 
+Build `orcher-proto` messages with `..Default::default()`, even when every
+field is set, so a field added to the protocol does not break this crate.
+CI checks it by building the workspace against a copy of `orcher-proto` with
+one more field in every message:
+
+```bash
+python3 scripts/check-proto-literals.py
+```
+
 ## Pre-commit hooks
 
 The repository uses [pre-commit](https://pre-commit.com) for fast local

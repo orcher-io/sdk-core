@@ -93,6 +93,7 @@ impl Tasks {
         task.heartbeat.record(details.map(|payload| payload.data));
         HeartbeatAnswer {
             cancel_requested: task.heartbeat.is_cancelled(),
+            ..Default::default()
         }
     }
 
@@ -192,6 +193,7 @@ impl Tasks {
                 vec![Payload {
                     data: task.input.clone(),
                     metadata: [("encoding".to_string(), b"json".to_vec())].into(),
+                    ..Default::default()
                 }]
             },
             attempt: u32::try_from(task.attempt).unwrap_or(0),

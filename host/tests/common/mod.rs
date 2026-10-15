@@ -1,8 +1,7 @@
 //! A gRPC server standing in for the engine: it registers workers, hands out
 //! scripted tasks, and records what the worker reports.
 
-// Protocol messages are built to keep building when fields are added.
-#![allow(clippy::needless_update, dead_code)]
+#![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;

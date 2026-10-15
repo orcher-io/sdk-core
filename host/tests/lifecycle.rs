@@ -1,9 +1,6 @@
 //! The host's configuration and its registration lifecycle, against a real
 //! gRPC server standing in for the engine.
 
-// Protocol messages are built to keep building when fields are added.
-#![allow(clippy::needless_update)]
-
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

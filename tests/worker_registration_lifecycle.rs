@@ -7,9 +7,6 @@
 //! expires. These tests run the driver against a real gRPC server and read
 //! what arrived.
 
-// Protocol messages are built to keep building when fields are added.
-#![allow(clippy::needless_update)]
-
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

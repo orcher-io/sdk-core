@@ -49,6 +49,7 @@ async fn work_finished_within_the_grace_is_reported() {
             data: b"{}".to_vec(),
             ..Default::default()
         })),
+        ..Default::default()
     })
     .await
     .unwrap();

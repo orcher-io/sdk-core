@@ -50,6 +50,7 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
                 // saw is not known from a full history; diagnostic only.
                 replaying: false,
                 what: Some(what),
+                ..Default::default()
             },
         ));
     }
@@ -77,6 +78,7 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
             started_at,
             ..Default::default()
         })),
+        ..Default::default()
     };
 
     RunActivation {
@@ -87,6 +89,7 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
             workflow_type: task.workflow_type.clone(),
             task_queue: task.task_queue.clone(),
             namespace: namespace.to_string(),
+            ..Default::default()
         }),
         resolutions: std::iter::once(started)
             .chain(resolutions.into_iter().map(|(_, _, resolution)| resolution))
@@ -106,7 +109,9 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
                     } else {
                         vec![json_payload(update.args.clone())]
                     },
+                    ..Default::default()
                 })),
+                ..Default::default()
             }))
             .collect(),
         queries: task
@@ -120,8 +125,10 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
                 } else {
                     vec![json_payload(query.query_args.clone())]
                 },
+                ..Default::default()
             })
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -160,9 +167,11 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
                                 non_retryable: failure.non_retryable,
                                 code: code as i32,
                                 details: Vec::new(),
+                                ..Default::default()
                             })),
                             end: end as i32,
                             attempts: attempts(step_completed.execution_attempt),
+                            ..Default::default()
                         }
                     }
                     None => Outcome {
@@ -171,17 +180,21 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
                         ))),
                         end: End::Completed as i32,
                         attempts: attempts(step_completed.execution_attempt),
+                        ..Default::default()
                     },
                 }),
+                ..Default::default()
             }),
         ),
-        Attributes::TimerFired(fired) => {
-            step(&fired.timer_id, resolution::What::Timer(TimerElapsed {}))
-        }
+        Attributes::TimerFired(fired) => step(
+            &fired.timer_id,
+            resolution::What::Timer(TimerElapsed::default()),
+        ),
         Attributes::EventReceived(event) => no_step(resolution::What::Event(EventArrived {
             event_id: entry.entry_id.to_string(),
             name: event.event_name.clone(),
             payload: Some(json_payload(event.payload.clone())),
+            ..Default::default()
         })),
         Attributes::UpdateAccepted(update) => no_step(resolution::What::Update(UpdateArrived {
             update_id: update.update_id.clone(),
@@ -193,11 +206,13 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
             } else {
                 vec![json_payload(update.args.clone())]
             },
+            ..Default::default()
         })),
         Attributes::WorkflowExecutionCancelRequested(cancel) => {
             no_step(resolution::What::Cancel(CancelAsked {
                 reason: cancel.cause.clone(),
                 requested_at: entry.timestamp,
+                ..Default::default()
             }))
         }
         // Started, not yet settled: what history holds for a child the run
@@ -207,6 +222,7 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
             resolution::What::ChildStarted(ChildStarted {
                 child_workflow_id: child.workflow_id.clone(),
                 child_run_id: child.execution_id.clone(),
+                ..Default::default()
             }),
         ),
         Attributes::ChildWorkflowExecutionCompleted(child) => child_settled(
@@ -216,6 +232,7 @@ fn resolution_for(entry: &JournalEntry) -> Option<(String, resolution::What)> {
                 result: Some(outcome::Result::Value(json_payload(child.result.clone()))),
                 end: End::Completed as i32,
                 attempts: 0,
+                ..Default::default()
             },
         ),
         Attributes::ChildWorkflowExecutionFailed(child) => {
@@ -289,6 +306,7 @@ fn child_settled(workflow_id: &str, run_id: &str, outcome: Outcome) -> (String, 
             child_workflow_id: workflow_id.to_string(),
             child_run_id: run_id.to_string(),
             outcome: Some(outcome),
+            ..Default::default()
         }),
     )
 }
@@ -307,9 +325,11 @@ fn ended(
             non_retryable,
             code: code as i32,
             details: Vec::new(),
+            ..Default::default()
         })),
         end: end as i32,
         attempts: 0,
+        ..Default::default()
     }
 }
 
@@ -322,6 +342,7 @@ fn json_payload(data: Vec<u8>) -> Payload {
     Payload {
         data,
         metadata: [("encoding".to_string(), b"json".to_vec())].into(),
+        ..Default::default()
     }
 }
 
@@ -588,6 +609,7 @@ mod tests {
             query_id: "q1".into(),
             query_type: "status".into(),
             query_args: vec![],
+            ..Default::default()
         }];
         let activation = resolve(&task, "payments");
 
@@ -622,6 +644,7 @@ mod tests {
             update_id: "u1".into(),
             update_type: "rename".into(),
             args: br#"["new name"]"#.to_vec(),
+            ..Default::default()
         }];
         let activation = resolve(&task, "default");
         let last = activation.resolutions.last().unwrap();
