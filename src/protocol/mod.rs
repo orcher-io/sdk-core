@@ -50,6 +50,7 @@ pub use result::{
     RecordStepResultCommand, RequestCancellationCommand, RestartFreshCommand, RestartFreshRequest,
     ScheduleTaskCommand, SendEventCommand, StartChildWorkflowCommand, StartTimerCommand,
     StepFailure, TaskRetryPolicy, UpdateResponse, UpdateResult, WaitForEventCommand,
+    WorkflowRetryPolicy,
 };
 
 #[cfg(test)]

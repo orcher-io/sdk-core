@@ -38,7 +38,7 @@ use crate::protocol::result::{
     CompleteWorkflowCommand, ExecutionError, ExecutionResult, FailWorkflowCommand, OrphanPolicy,
     QueryResponse, QueryResult, RecordStepResultCommand, RestartFreshCommand, ScheduleTaskCommand,
     SendEventCommand, StartChildWorkflowCommand, StartTimerCommand, StepFailure, TaskRetryPolicy,
-    UpdateResponse, UpdateResult, WaitForEventCommand,
+    UpdateResponse, UpdateResult, WaitForEventCommand, WorkflowRetryPolicy,
 };
 
 /// How long a task attempt may run when the command does not say.
@@ -210,6 +210,7 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
                     Ok(KernelOrphanPolicy::Abandon) => OrphanPolicy::Abandon,
                     _ => OrphanPolicy::Cancel,
                 },
+                retry_policy: child.retry_policy.map(workflow_retry_policy),
             })
         }
         Some(command::What::CancelChild(cancel)) => {
@@ -274,6 +275,9 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
             input: restart.input.into_iter().map(payload).collect(),
             task_queue: Some(restart.task_queue).filter(|queue| !queue.is_empty()),
             timeout: restart.execution_timeout.map(duration),
+            // The kernel's RestartFresh carries no retry policy yet, so the
+            // fresh run keeps the one of the run it replaces.
+            retry_policy: None,
         }),
         Some(command::What::UpsertLabels(_)) => {
             return Err(Error::Protocol(
@@ -304,6 +308,19 @@ fn recorded(outcome: Option<Outcome>) -> (Vec<u8>, Option<StepFailure>, i32) {
             attempts,
         ),
         None => (vec![], None, attempts),
+    }
+}
+
+/// A workflow's retry policy, its unset fields left unset: the engine fills
+/// them with its defaults for workflow retries, which are not the task
+/// defaults above.
+fn workflow_retry_policy(policy: RetryPolicy) -> WorkflowRetryPolicy {
+    WorkflowRetryPolicy {
+        max_attempts: policy.max_attempts,
+        initial_interval: policy.first_delay.map(duration),
+        max_interval: policy.max_delay.map(duration),
+        backoff_coefficient: policy.delay_multiplier,
+        non_retryable_errors: policy.never_retry_types,
     }
 }
 
@@ -356,6 +373,7 @@ mod tests {
             satisfied,
             step_id: step_id.into(),
             what: Some(what),
+            ..Default::default()
         }
     }
 
@@ -363,6 +381,7 @@ mod tests {
         KernelPayload {
             data: data.as_bytes().to_vec(),
             metadata: [("encoding".to_string(), b"json".to_vec())].into(),
+            ..Default::default()
         }
     }
 
@@ -370,6 +389,7 @@ mod tests {
         RunActivationResult {
             outcome: Some(run_activation_result::Outcome::Commands(Commands {
                 commands,
+                ..Default::default()
             })),
             ..Default::default()
         }
@@ -505,6 +525,7 @@ mod tests {
                     "timer_0",
                     command::What::StartTimer(StartTimer {
                         duration: seconds(900),
+                        ..Default::default()
                     }),
                 ),
                 call(
@@ -513,6 +534,7 @@ mod tests {
                     "",
                     command::What::CancelTimer(CancelTimer {
                         step_id: "timer_0".into(),
+                        ..Default::default()
                     }),
                 ),
                 call(
@@ -524,6 +546,7 @@ mod tests {
                             result: Some(outcome::Result::Value(json("42"))),
                             ..Default::default()
                         }),
+                        ..Default::default()
                     }),
                 ),
                 call(
@@ -533,6 +556,7 @@ mod tests {
                     command::What::AwaitEvent(AwaitEvent {
                         name: "go".into(),
                         timeout: seconds(60),
+                        ..Default::default()
                     }),
                 ),
                 call(
@@ -541,6 +565,7 @@ mod tests {
                     "",
                     command::What::CompleteRun(CompleteRun {
                         result: Some(json("\"done\"")),
+                        ..Default::default()
                     }),
                 ),
             ]),
@@ -585,6 +610,7 @@ mod tests {
         answer.queries = vec![QueryAnswer {
             query_id: "q1".into(),
             answer: Some(query_answer::Answer::Value(json("1"))),
+            ..Default::default()
         }];
         answer.updates = vec![UpdateAnswer {
             update_id: "u1".into(),
@@ -592,6 +618,7 @@ mod tests {
                 message: "closed".into(),
                 ..Default::default()
             })),
+            ..Default::default()
         }];
         let result = execution_result("run-1", answer).unwrap();
         assert!(
@@ -667,6 +694,60 @@ mod tests {
             panic!("{:?}", result.commands);
         };
         assert_eq!(restart.timeout, Some(Duration::from_secs(3600)));
+    }
+
+    /// A child's retry policy reaches the engine command as the SDK gave it.
+    /// Its unset delays stay unset, for the engine's workflow-retry defaults
+    /// rather than the task defaults.
+    #[test]
+    fn a_child_retry_policy_is_carried_with_its_unset_delays_unset() {
+        let child = |retry_policy| {
+            call(
+                0,
+                false,
+                "",
+                command::What::StartChild(StartChild {
+                    workflow_id: "order-7-child-0".into(),
+                    workflow_type: "ship".into(),
+                    retry_policy,
+                    ..Default::default()
+                }),
+            )
+        };
+        let result = execution_result(
+            "run-1",
+            answered(vec![
+                child(Some(RetryPolicy {
+                    max_attempts: 3,
+                    first_delay: seconds(5),
+                    delay_multiplier: 1.5,
+                    never_retry_types: vec!["Declined".into()],
+                    ..Default::default()
+                })),
+                child(None),
+            ]),
+        )
+        .unwrap();
+        let Command::StartChildWorkflow(with_policy) = &result.commands[0] else {
+            panic!("{:?}", result.commands);
+        };
+        assert_eq!(
+            with_policy.retry_policy,
+            Some(WorkflowRetryPolicy {
+                max_attempts: 3,
+                initial_interval: Some(Duration::from_secs(5)),
+                max_interval: None,
+                backoff_coefficient: 1.5,
+                non_retryable_errors: vec!["Declined".into()],
+            })
+        );
+        let Command::StartChildWorkflow(without) = &result.commands[1] else {
+            panic!("{:?}", result.commands);
+        };
+        assert_eq!(
+            without.retry_policy, None,
+            "unset: the child is not retried"
+        );
     }
 
     /// What the kernel cannot carry hands the activation back, never fails
