@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/orcher-io/sdk-core/compare/v0.15.0...v0.15.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* settle a cancelled step as cancelled ([#88](https://github.com/orcher-io/sdk-core/issues/88)) ([6771e49](https://github.com/orcher-io/sdk-core/commit/6771e49c100b0c8c2d032a08a9bab552e3e07859)), closes [#87](https://github.com/orcher-io/sdk-core/issues/87)
+
 ## [0.15.0](https://github.com/orcher-io/sdk-core/compare/v0.14.1...v0.15.0) (2026-10-14)
 
 
