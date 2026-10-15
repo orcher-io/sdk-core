@@ -275,9 +275,8 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
             input: restart.input.into_iter().map(payload).collect(),
             task_queue: Some(restart.task_queue).filter(|queue| !queue.is_empty()),
             timeout: restart.execution_timeout.map(duration),
-            // The kernel's RestartFresh carries no retry policy yet, so the
-            // fresh run keeps the one of the run it replaces.
-            retry_policy: None,
+            // Unset: the fresh run keeps the policy of the run it replaces.
+            retry_policy: restart.retry_policy.map(workflow_retry_policy),
         }),
         Some(command::What::UpsertLabels(_)) => {
             return Err(Error::Protocol(
@@ -694,6 +693,56 @@ mod tests {
             panic!("{:?}", result.commands);
         };
         assert_eq!(restart.timeout, Some(Duration::from_secs(3600)));
+    }
+
+    /// A restart's retry policy reaches the engine command as the SDK gave
+    /// it, its unset delays unset; a restart without one keeps the policy of
+    /// the run it replaces.
+    #[test]
+    fn a_restart_retry_policy_is_carried_with_its_unset_delays_unset() {
+        let restart = |retry_policy| {
+            call(
+                0,
+                false,
+                "",
+                command::What::RestartFresh(crate::proto::kernel::v1::RestartFresh {
+                    retry_policy,
+                    ..Default::default()
+                }),
+            )
+        };
+        let with_policy = execution_result(
+            "run-1",
+            answered(vec![restart(Some(RetryPolicy {
+                max_attempts: 4,
+                max_delay: seconds(60),
+                delay_multiplier: 2.0,
+                never_retry_types: vec!["Invalid".into()],
+                ..Default::default()
+            }))]),
+        )
+        .unwrap();
+        let Command::RestartFresh(with_policy) = &with_policy.commands[0] else {
+            panic!("{:?}", with_policy.commands);
+        };
+        assert_eq!(
+            with_policy.retry_policy,
+            Some(WorkflowRetryPolicy {
+                max_attempts: 4,
+                initial_interval: None,
+                max_interval: Some(Duration::from_secs(60)),
+                backoff_coefficient: 2.0,
+                non_retryable_errors: vec!["Invalid".into()],
+            })
+        );
+        let without = execution_result("run-1", answered(vec![restart(None)])).unwrap();
+        let Command::RestartFresh(without) = &without.commands[0] else {
+            panic!("{:?}", without.commands);
+        };
+        assert_eq!(
+            without.retry_policy, None,
+            "unset: the fresh run keeps its run's policy"
+        );
     }
 
     /// A child's retry policy reaches the engine command as the SDK gave it.
