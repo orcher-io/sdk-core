@@ -43,6 +43,7 @@ fn call(seq: u64, satisfied: bool, step_id: &str, task_type: &str) -> Command {
             task_type: task_type.into(),
             ..Default::default()
         })),
+        ..Default::default()
     }
 }
 
@@ -88,6 +89,7 @@ async fn an_answer_reaches_the_engine_as_commands() {
                 call(0, true, "charge_0", "charge"),
                 call(1, false, "ship_1", "ship"),
             ],
+            ..Default::default()
         })),
         ..Default::default()
     })
@@ -125,6 +127,7 @@ async fn an_answer_that_disagrees_with_history_is_not_applied() {
         activation_id: run.activation_id,
         outcome: Some(run_activation_result::Outcome::Commands(Commands {
             commands: vec![call(0, false, "charge_0", "refund")],
+            ..Default::default()
         })),
         ..Default::default()
     })

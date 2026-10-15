@@ -10,6 +10,11 @@ description = "Worker host for ORCHER SDKs: one worker's plumbing (drivers, life
 keywords = ["orchestration", "workflow", "worker", "sdk"]
 categories = ["asynchronous", "network-programming"]
 
+# Protocol messages are built with `..Default::default()` (see the workspace
+# lints in ../Cargo.toml).
+[lints]
+workspace = true
+
 [dependencies]
 # Released together with the host, at the same version.
 orcher-sdk-core = { path = "..", version = "0.15.1" } # x-release-please-version

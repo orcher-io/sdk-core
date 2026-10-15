@@ -162,6 +162,7 @@ impl ActorService {
                 })
                 .collect(),
             metadata: metadata.clone(),
+            ..Default::default()
         };
         let response = self
             .client
@@ -192,6 +193,7 @@ impl ActorService {
                 key: scope.key.clone(),
                 state_key: state_key.to_string(),
                 execution_id: scope.execution_id.clone(),
+                ..Default::default()
             }))
             .await
             .map_err(Error::from)?
@@ -219,6 +221,7 @@ impl ActorService {
                 value,
                 execution_id: scope.execution_id.clone(),
                 expected_version: expected_version.unwrap_or_default().to_string(),
+                ..Default::default()
             }))
             .await
             .map_err(Error::from)?
@@ -241,6 +244,7 @@ impl ActorService {
                 key: scope.key.clone(),
                 state_key: state_key.to_string(),
                 execution_id: scope.execution_id.clone(),
+                ..Default::default()
             }))
             .await
             .map_err(Error::from)?
@@ -257,6 +261,7 @@ impl ActorService {
                 key: scope.key.clone(),
                 execution_id: scope.execution_id.clone(),
                 prefix: prefix.to_string(),
+                ..Default::default()
             }))
             .await
             .map_err(Error::from)?
@@ -349,6 +354,7 @@ impl Actors {
             payload: (!operation.payload.is_empty()).then(|| Payload {
                 data: operation.payload,
                 metadata: [("encoding".to_string(), b"json".to_vec())].into(),
+                ..Default::default()
             }),
             mode: match engine::OperationMode::try_from(operation.mode) {
                 Ok(engine::OperationMode::Shared) => ActorMode::Shared,
@@ -356,6 +362,7 @@ impl Actors {
                 _ => ActorMode::Unspecified,
             } as i32,
             metadata: operation.metadata,
+            ..Default::default()
         })
     }
 

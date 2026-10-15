@@ -352,7 +352,10 @@ pub struct CancelWorkflowCommand {
 }
 
 /// Starts a child workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Build it with `..Default::default()`, so a field added later leaves the
+/// code building.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StartChildWorkflowCommand {
     /// Sequence number, checked on replay for determinism.
     pub sequence: u32,
@@ -374,15 +377,43 @@ pub struct StartChildWorkflowCommand {
 
     /// What happens to the child when the parent closes.
     pub orphan_policy: OrphanPolicy,
+
+    /// How the child is retried when it fails. `None`: it is not retried.
+    #[serde(default)]
+    pub retry_policy: Option<WorkflowRetryPolicy>,
+}
+
+/// How a workflow run is retried: a child, or the fresh run a workflow
+/// restarts as. A delay or multiplier left unset takes the engine's default
+/// for workflow retries, which is not the task default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRetryPolicy {
+    /// Maximum number of attempts, the first included; 0 is unlimited.
+    pub max_attempts: u32,
+
+    /// Delay before the first retry; `None`: the engine's default.
+    pub initial_interval: Option<Duration>,
+
+    /// Upper bound on the delay between retries; `None`: the engine's
+    /// default.
+    pub max_interval: Option<Duration>,
+
+    /// Multiplier applied to the delay after each retry; 0: the engine's
+    /// default.
+    pub backoff_coefficient: f64,
+
+    /// Error types that are never retried.
+    pub non_retryable_errors: Vec<String>,
 }
 
 /// What happens to a child workflow when its parent closes.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OrphanPolicy {
     /// Terminate the child immediately.
     Terminate,
 
-    /// Request graceful cancellation of the child.
+    /// Request graceful cancellation of the child, the kernel's default.
+    #[default]
     Cancel,
 
     /// Leave the child running.
@@ -407,7 +438,10 @@ pub struct RequestCancellationCommand {
 }
 
 /// Restarts the workflow as a fresh run with clean state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Build it with `..Default::default()`, so a field added later leaves the
+/// code building.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RestartFreshCommand {
     /// Workflow type for the fresh run; may differ from the current one.
     pub workflow_type: String,
@@ -420,6 +454,11 @@ pub struct RestartFreshCommand {
 
     /// Timeout for the fresh run, if set.
     pub timeout: Option<Duration>,
+
+    /// How the fresh run is retried. `None`: it keeps the retry policy of
+    /// the run it replaces, as the engine reads an unset policy.
+    #[serde(default)]
+    pub retry_policy: Option<WorkflowRetryPolicy>,
 }
 
 /// Queries a child workflow.

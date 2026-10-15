@@ -123,6 +123,7 @@ async fn operations_and_their_results_round_trip() {
             data: b"42".to_vec(),
             ..Default::default()
         })),
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -134,6 +135,7 @@ async fn operations_and_their_results_round_trip() {
             error_type: "OutOfStock".into(),
             ..Default::default()
         })),
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -159,6 +161,7 @@ async fn operations_and_their_results_round_trip() {
             operation_id: "op-1".into(),
             execution_id: "op-1-exec".into(),
             result: Some(actor_result::Result::Value(Payload::default())),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -229,6 +232,7 @@ async fn every_actor_call_carries_the_workers_credentials() {
         operation_id: "op-1".into(),
         execution_id: "op-1-exec".into(),
         result: Some(actor_result::Result::Value(Payload::default())),
+        ..Default::default()
     })
     .await
     .unwrap();

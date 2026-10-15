@@ -1465,10 +1465,8 @@ mod tests {
             sequence: 0,
             workflow_id: workflow_id.into(),
             workflow_type: workflow_type.into(),
-            task_queue: String::new(),
-            input: vec![],
-            timeout: None,
             orphan_policy: crate::protocol::OrphanPolicy::Abandon,
+            ..Default::default()
         })
     }
 

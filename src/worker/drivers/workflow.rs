@@ -12,7 +12,7 @@ use crate::proto::orcher::v1::{self as proto};
 use crate::protocol::{
     validate_execution_result, Command as BridgeCommand, ExecutionErrorType, ExecutionResult,
     QueryResponse, QueryResult as BridgeQueryResult, UpdateResponse,
-    UpdateResult as BridgeUpdateResult,
+    UpdateResult as BridgeUpdateResult, WorkflowRetryPolicy,
 };
 use crate::state::cache::WorkflowCache;
 use crate::state::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
@@ -220,6 +220,23 @@ pub struct WorkflowWorkResult {
 }
 
 /// An activation to hand back, named by the token its poll carried.
+/// A workflow retry policy as the engine reads it. A delay left unset stays
+/// unset, so the engine applies its own workflow-retry default.
+fn workflow_retry_policy(policy: &WorkflowRetryPolicy) -> proto::RetryPolicy {
+    let duration = |d: Duration| crate::proto::prost_types::Duration {
+        seconds: d.as_secs() as i64,
+        nanos: d.subsec_nanos() as i32,
+    };
+    proto::RetryPolicy {
+        initial_interval: policy.initial_interval.map(duration),
+        backoff_coefficient: policy.backoff_coefficient,
+        maximum_interval: policy.max_interval.map(duration),
+        maximum_attempts: i32::try_from(policy.max_attempts).unwrap_or(i32::MAX),
+        non_retryable_error_types: policy.non_retryable_errors.clone(),
+        ..Default::default()
+    }
+}
+
 fn leftover(task: WorkflowExecutionTask) -> Leftover {
     Leftover {
         token: activation_token(task.task_token, task.stream_entry_id.as_deref()),
@@ -1238,7 +1255,7 @@ impl WorkflowDriver {
                         }),
                         run_timeout: None,
                         task_timeout: None,
-                        retry_policy: None,
+                        retry_policy: cmd.retry_policy.as_ref().map(workflow_retry_policy),
                         annotations: Default::default(),
                         labels: Default::default(),
                         ..Default::default()
@@ -1299,7 +1316,7 @@ impl WorkflowDriver {
                                 run_timeout: None,
                                 task_timeout: None,
                                 orphan_policy: orphan_policy as i32,
-                                retry_policy: None,
+                                retry_policy: cmd.retry_policy.as_ref().map(workflow_retry_policy),
                                 // A child runs in its parent worker's
                                 // namespace. Left empty, the server would file
                                 // the child under a namespace named "default",
@@ -1417,11 +1434,8 @@ impl WorkflowDriver {
 mod tests {
     use super::*;
 
-    /// A language that could not process an activation hands it back: it is
-    /// released at once, not reported as the run's failure.
-    #[tokio::test]
-    async fn a_protocol_error_releases_the_activation() {
-        // A bare HTTP/2 server to connect to; the test sends it nothing.
+    /// A driver connected to a bare HTTP/2 server that is sent nothing.
+    async fn idle_driver() -> WorkflowDriver {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1439,6 +1453,14 @@ mod tests {
         })
         .await
         .unwrap();
+        driver
+    }
+
+    /// A language that could not process an activation hands it back: it is
+    /// released at once, not reported as the run's failure.
+    #[tokio::test]
+    async fn a_protocol_error_releases_the_activation() {
+        let driver = idle_driver().await;
         let report = driver.report_for(WorkflowWorkResult {
             workflow_id: "order-7".into(),
             run_id: "run-1".into(),
@@ -1450,6 +1472,71 @@ mod tests {
             matches!(&report, Report::Release(leftover) if leftover.run_id == "run-1"),
             "{report:?}"
         );
+    }
+
+    /// The retry policy of a child and of a fresh run reaches the engine, a
+    /// delay left unset staying unset for the engine's workflow default; no
+    /// policy is sent as none.
+    #[tokio::test]
+    async fn child_and_restart_retry_policies_reach_the_engine() {
+        use crate::protocol::{RestartFreshCommand, StartChildWorkflowCommand};
+        use proto::command::Attributes;
+
+        let policy = WorkflowRetryPolicy {
+            max_attempts: 4,
+            initial_interval: Some(Duration::from_millis(1500)),
+            max_interval: None,
+            backoff_coefficient: 3.0,
+            non_retryable_errors: vec!["Declined".into()],
+        };
+        let expected = proto::RetryPolicy {
+            initial_interval: Some(crate::proto::prost_types::Duration {
+                seconds: 1,
+                nanos: 500_000_000,
+            }),
+            backoff_coefficient: 3.0,
+            maximum_interval: None,
+            maximum_attempts: 4,
+            non_retryable_error_types: vec!["Declined".into()],
+            ..Default::default()
+        };
+        let driver = idle_driver().await;
+        let commands = driver
+            .convert_commands_to_proto(
+                vec![
+                    BridgeCommand::StartChildWorkflow(StartChildWorkflowCommand {
+                        workflow_id: "order-7-child-0".into(),
+                        workflow_type: "ship".into(),
+                        retry_policy: Some(policy.clone()),
+                        ..Default::default()
+                    }),
+                    BridgeCommand::StartChildWorkflow(StartChildWorkflowCommand {
+                        workflow_id: "order-7-child-1".into(),
+                        workflow_type: "ship".into(),
+                        ..Default::default()
+                    }),
+                    BridgeCommand::RestartFresh(RestartFreshCommand {
+                        workflow_type: "checkout".into(),
+                        retry_policy: Some(policy),
+                        ..Default::default()
+                    }),
+                    BridgeCommand::RestartFresh(RestartFreshCommand {
+                        workflow_type: "checkout".into(),
+                        ..Default::default()
+                    }),
+                ],
+                "default",
+            )
+            .unwrap();
+        let sent: Vec<Option<proto::RetryPolicy>> = commands
+            .into_iter()
+            .map(|command| match command.attributes {
+                Some(Attributes::StartChildWorkflow(child)) => child.retry_policy,
+                Some(Attributes::RestartFresh(restart)) => restart.retry_policy,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(sent, [Some(expected.clone()), None, Some(expected), None]);
     }
 
     #[test]

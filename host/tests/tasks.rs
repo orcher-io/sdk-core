@@ -36,6 +36,7 @@ fn value(data: &[u8]) -> Option<task_outcome::Result> {
     Some(task_outcome::Result::Value(Payload {
         data: data.to_vec(),
         metadata: Default::default(),
+        ..Default::default()
     }))
 }
 
@@ -63,6 +64,7 @@ async fn a_task_reaches_the_language_whole() {
     host.complete_task(TaskOutcome {
         token: assignment.token.clone(),
         result: value(b"\"charged\""),
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -89,6 +91,7 @@ async fn a_task_failure_is_reported_as_the_tasks_own() {
             non_retryable: true,
             ..Default::default()
         })),
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -119,6 +122,7 @@ async fn a_cancellation_request_reaches_a_heartbeating_task() {
     let details = Payload {
         data: b"half way".to_vec(),
         metadata: Default::default(),
+        ..Default::default()
     };
     let mut answered = false;
     for _ in 0..200 {
@@ -168,6 +172,7 @@ async fn a_reported_task_is_no_longer_held() {
     host.complete_task(TaskOutcome {
         token: assignment.token.clone(),
         result: value(b"1"),
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -192,6 +197,7 @@ async fn an_empty_outcome_is_refused() {
         .complete_task(TaskOutcome {
             token: assignment.token,
             result: None,
+            ..Default::default()
         })
         .await
         .unwrap_err();

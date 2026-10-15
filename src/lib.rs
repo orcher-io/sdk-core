@@ -1,8 +1,4 @@
 #![allow(clippy::result_large_err)]
-// Protocol messages are built with `..Default::default()` even when every
-// field is set today: a field added to the protocol then leaves an older
-// release of this crate building, sending the field unset.
-#![allow(clippy::needless_update)]
 //! # ORCHER SDK Core
 //!
 //! The shared engine behind the ORCHER language SDKs. It handles:

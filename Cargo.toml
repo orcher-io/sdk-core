@@ -75,6 +75,12 @@ tracing-subscriber = "0.3"
 # A bare HTTP/2 server, to answer calls in ways a tonic server never does.
 http = "1"
 
+# Protocol messages are built with `..Default::default()` even when every
+# field is set today, so a field added to orcher-proto leaves this workspace
+# building (scripts/check-proto-literals.py keeps it that way).
+[lints]
+workspace = true
+
 [features]
 default = []
 test-utils = []
@@ -84,3 +90,7 @@ test-utils = []
 [workspace]
 members = ["host"]
 resolver = "2"
+
+[workspace.lints.clippy]
+# See [lints] above: the struct update is there for fields not yet added.
+needless_update = "allow"
