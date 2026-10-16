@@ -213,7 +213,7 @@ impl Command {
 }
 
 /// Schedules a task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScheduleTaskCommand {
     /// Task sequence number, checked on replay for determinism.
     pub sequence: u32,
@@ -282,8 +282,27 @@ pub struct TaskRetryPolicy {
     pub non_retryable_errors: Vec<String>,
 }
 
+/// The attempts a task gets when its policy leaves the count out, the first
+/// included: the SDKs' documented default.
+pub const DEFAULT_TASK_MAX_ATTEMPTS: u32 = 3;
+
+impl Default for TaskRetryPolicy {
+    /// The policy a task gets when it names none of its fields: the documented
+    /// attempts and the kernel's default delays, so building one with
+    /// `..Default::default()` asks for the defaults rather than for no delay.
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_TASK_MAX_ATTEMPTS,
+            initial_interval: crate::kernel::completion::DEFAULT_RETRY_FIRST_DELAY,
+            max_interval: crate::kernel::completion::DEFAULT_RETRY_MAX_DELAY,
+            backoff_coefficient: crate::kernel::completion::DEFAULT_RETRY_MULTIPLIER,
+            non_retryable_errors: Vec::new(),
+        }
+    }
+}
+
 /// Starts a timer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StartTimerCommand {
     /// Timer sequence number, checked on replay for determinism.
     pub sequence: u32,
@@ -296,7 +315,7 @@ pub struct StartTimerCommand {
 }
 
 /// Cancels a timer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CancelTimerCommand {
     /// Timer sequence number, checked on replay for determinism.
     pub sequence: u32,
@@ -306,7 +325,7 @@ pub struct CancelTimerCommand {
 }
 
 /// Sends an event to another workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SendEventCommand {
     /// Target workflow ID.
     pub workflow_id: String,
@@ -325,14 +344,14 @@ pub struct SendEventCommand {
 }
 
 /// Completes the workflow successfully.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompleteWorkflowCommand {
     /// Workflow output.
     pub result: Payload,
 }
 
 /// Fails the workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FailWorkflowCommand {
     /// Failure message.
     pub message: String,
@@ -345,7 +364,7 @@ pub struct FailWorkflowCommand {
 }
 
 /// Cancels the workflow execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CancelWorkflowCommand {
     /// Cancellation details.
     pub details: Option<Payload>,
@@ -421,7 +440,7 @@ pub enum OrphanPolicy {
 }
 
 /// Cancels a child workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CancelChildWorkflowCommand {
     /// Child workflow ID.
     pub workflow_id: String,
@@ -431,7 +450,7 @@ pub struct CancelChildWorkflowCommand {
 }
 
 /// Requests graceful cancellation of the workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestCancellationCommand {
     /// Why cancellation is requested.
     pub reason: String,
@@ -462,7 +481,7 @@ pub struct RestartFreshCommand {
 }
 
 /// Queries a child workflow.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryChildWorkflowCommand {
     /// Child workflow ID.
     pub workflow_id: String,
@@ -482,7 +501,7 @@ pub struct QueryChildWorkflowCommand {
 /// The SDK sends this after a step (closure, task, child workflow or side effect) finishes.
 /// The server stores the result, and later replays receive it as a `CompleteStep` job
 /// instead of running the step again.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordStepResultCommand {
     /// Unique step name, for example `"fetch_user_1"`.
     pub step_name: String,
@@ -505,7 +524,7 @@ pub struct RecordStepResultCommand {
 /// This produces no server-side proto command. The engine keeps the workflow
 /// claimed while it waits; when `SendEvent` delivers an `EventReceived` journal
 /// entry, the claim is released and the workflow is dispatched again.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WaitForEventCommand {
     /// Deterministic step ID, for example `"event_approve_1"`.
     ///
@@ -523,7 +542,7 @@ pub struct WaitForEventCommand {
 }
 
 /// Details of a failed step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StepFailure {
     /// Error message.
     pub message: String,
@@ -830,5 +849,91 @@ mod tests {
             }
             other => panic!("expected WaitForEvent, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod bridge_command_defaults {
+    use super::*;
+
+    /// Every bridge command can be built naming only the fields a caller
+    /// sets, so a field added to one later is not a breaking change for the
+    /// SDKs (sdk-core#97). Dropping a Default derive fails to compile here.
+    #[test]
+    fn every_bridge_command_is_built_with_room_for_new_fields() {
+        let commands = [
+            Command::ScheduleTask(ScheduleTaskCommand {
+                task_type: "t".into(),
+                ..Default::default()
+            }),
+            Command::StartTimer(StartTimerCommand {
+                timer_id: "t".into(),
+                ..Default::default()
+            }),
+            Command::CancelTimer(CancelTimerCommand {
+                timer_id: "t".into(),
+                ..Default::default()
+            }),
+            Command::SendEvent(SendEventCommand {
+                event_name: "e".into(),
+                ..Default::default()
+            }),
+            Command::CompleteWorkflow(CompleteWorkflowCommand {
+                ..Default::default()
+            }),
+            Command::FailWorkflow(FailWorkflowCommand {
+                message: "m".into(),
+                ..Default::default()
+            }),
+            Command::CancelWorkflowExecution(CancelWorkflowCommand {
+                ..Default::default()
+            }),
+            Command::StartChildWorkflow(StartChildWorkflowCommand {
+                workflow_type: "w".into(),
+                ..Default::default()
+            }),
+            Command::CancelChildWorkflow(CancelChildWorkflowCommand {
+                workflow_id: "w".into(),
+                ..Default::default()
+            }),
+            Command::RequestCancellation(RequestCancellationCommand {
+                reason: "r".into(),
+                ..Default::default()
+            }),
+            Command::RestartFresh(RestartFreshCommand {
+                workflow_type: "w".into(),
+                ..Default::default()
+            }),
+            Command::QueryChildWorkflow(QueryChildWorkflowCommand {
+                query_type: "q".into(),
+                ..Default::default()
+            }),
+            Command::RecordStepResult(RecordStepResultCommand {
+                step_name: "s".into(),
+                ..Default::default()
+            }),
+            Command::WaitForEvent(WaitForEventCommand {
+                event_name: "e".into(),
+                ..Default::default()
+            }),
+        ];
+        assert_eq!(commands.len(), 14);
+        let _ = StepFailure {
+            message: "m".into(),
+            ..Default::default()
+        };
+    }
+
+    /// A task policy built from its defaults asks for the documented attempts
+    /// and the kernel's delays, not for none.
+    #[test]
+    fn a_default_task_retry_policy_is_the_documented_one() {
+        let policy = TaskRetryPolicy::default();
+        assert_eq!(policy.max_attempts, DEFAULT_TASK_MAX_ATTEMPTS);
+        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.initial_interval, Duration::from_secs(1));
+        assert_eq!(policy.max_interval, Duration::from_secs(60));
+        assert_eq!(policy.backoff_coefficient, 2.0);
+        assert!(policy.non_retryable_errors.is_empty());
     }
 }
