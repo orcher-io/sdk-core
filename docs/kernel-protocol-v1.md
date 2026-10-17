@@ -70,7 +70,7 @@ Returning already-satisfied commands is what makes the comparison complete: the 
 
 **`replaying`** is diagnostic metadata (true while resolutions repeat outcomes the run already saw), for log de-duplication. It is not a safety mechanism: correctness comes from durable calls resolving from history. The SDK API must not offer it to user code as a way to decide whether to perform an external effect; external effects belong in tasks, with idempotency where needed.
 
-**Cancellation.** A `CancelAsked` resolution is delivered once, to the first durable wait whose outcome history did not record at or before the request time, exactly as the three SDKs do today (cancel-with-cleanup); later waits run normally. The kernel computes the delivery point and puts it in the resolution list, so SDKs stop computing it.
+**Cancellation.** A `CancelAsked` resolution is delivered once, to the first durable wait that has no outcome or whose outcome comes after the request (cancel-with-cleanup); later waits run normally. Before and after are decided by each resolution's `sequence`, its place in the resolution order, never by times: two outcomes recorded in the same millisecond tie on time but never on `sequence` (sdk-core#90).
 
 ## 6. Messages (`orcher.kernel.v1`, semantic core)
 
@@ -95,6 +95,7 @@ message RunActivation {
 
 message Resolution {
   string step_id = 1;  google.protobuf.Timestamp at = 2;  bool replaying = 3;
+  uint64 sequence = 4;                      // place in the resolution order: before/after is decided by it, not by `at`
   oneof what {
     RunStarted    started = 10;   // input, attempt, start time, scheme, lineage-derived seed, parent, headers
     StepSettled   step    = 11;   // Outcome of a task, closure/side effect or session step
@@ -102,7 +103,7 @@ message Resolution {
     TimerElapsed  timer   = 13;
     EventArrived  event   = 14;   // event_id, name, payload
     UpdateArrived update  = 15;   // update_id, name, args; delivered at the same wait in every SDK
-    CancelAsked   cancel  = 16;   // reason, requested_at; already placed at its delivery wait (§5)
+    CancelAsked   cancel  = 16;   // reason, requested_at; delivered at the first wait whose outcome has a greater sequence, or none (§5)
     ChildStarted  child_started = 17; // child workflow id and run id, before it settles: an unnamed child keeps the id history holds
   }
 }
