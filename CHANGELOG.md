@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* builds on orcher-proto 0.8, whose Resolution gains sequence; an SDK depending on orcher-proto directly must move to 0.8 in the same change.
+* builds on orcher-proto 0.9, whose Resolution gains sequence (0.8) and whose kernel RestartFresh gains retry_policy (0.9); an SDK depending on orcher-proto directly must move to 0.9 in the same change.
 * StartChildWorkflowCommand and RestartFreshCommand gain retry_policy (a new WorkflowRetryPolicy). Both now implement Default, as does OrphanPolicy (Cancel), so build them with ..Default::default().
 
 ### Features
