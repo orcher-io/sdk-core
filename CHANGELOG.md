@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/orcher-io/sdk-core/compare/v0.16.0...v0.16.1) (2026-10-17)
+
+
+### Documentation
+
+* name orcher-proto 0.9 in the 0.16.0 changelog ([#99](https://github.com/orcher-io/sdk-core/issues/99)) ([31b9c91](https://github.com/orcher-io/sdk-core/commit/31b9c910dad4ea610c39416c3d1287c5cbafce0f))
+
 ## [0.16.0](https://github.com/orcher-io/sdk-core/compare/v0.15.1...v0.16.0) (2026-10-17)
 
 
