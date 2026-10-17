@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.16.0](https://github.com/orcher-io/sdk-core/compare/v0.15.1...v0.16.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* builds on orcher-proto 0.8, whose Resolution gains sequence; an SDK depending on orcher-proto directly must move to 0.8 in the same change.
+* StartChildWorkflowCommand and RestartFreshCommand gain retry_policy (a new WorkflowRetryPolicy). Both now implement Default, as does OrphanPolicy (Cancel), so build them with ..Default::default().
+
+### Features
+
+* let every bridge command be built with room for new fields ([#98](https://github.com/orcher-io/sdk-core/issues/98)) ([7c60de9](https://github.com/orcher-io/sdk-core/commit/7c60de90c3e1d7b97a976005b4ff10c6f77b57de)), closes [#97](https://github.com/orcher-io/sdk-core/issues/97)
+* number each resolution in the order the run observes it ([#92](https://github.com/orcher-io/sdk-core/issues/92)) ([c2d239e](https://github.com/orcher-io/sdk-core/commit/c2d239e955dbe8c5e15d593d6092e19241e1a927))
+
+
+### Bug Fixes
+
+* build proto messages with room for new fields and send child retry policies ([#95](https://github.com/orcher-io/sdk-core/issues/95)) ([79c4025](https://github.com/orcher-io/sdk-core/commit/79c4025ecb2dab4866eb115a831f172a85d2f5d6))
+
 ## [0.15.1](https://github.com/orcher-io/sdk-core/compare/v0.15.0...v0.15.1) (2026-10-15)
 
 
