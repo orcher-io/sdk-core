@@ -178,6 +178,29 @@ fn every_driver_is_built_from_one_config() {
     assert_eq!(actor.registration_id.as_deref(), Some("registration-1"));
 }
 
+/// The worker protocol version is the language SDK's to raise, and every
+/// report of it says the same: registration and the workflow driver alike.
+#[test]
+fn the_protocol_version_is_the_sdks_to_raise() {
+    use orcher_sdk_core::worker_protocol::{CANCEL_REQUEST, WORKFLOW_FAILURE_RETRYABILITY};
+    let registrations = Registrations::default();
+    let config = HostConfig::new("http://engine", "q");
+    assert_eq!(config.workflow_driver().protocol_version, CANCEL_REQUEST);
+    assert_eq!(
+        config.registration(&registrations).protocol_version,
+        CANCEL_REQUEST
+    );
+    let config = config.with_protocol_version(WORKFLOW_FAILURE_RETRYABILITY);
+    assert_eq!(
+        config.workflow_driver().protocol_version,
+        WORKFLOW_FAILURE_RETRYABILITY
+    );
+    assert_eq!(
+        config.registration(&registrations).protocol_version,
+        WORKFLOW_FAILURE_RETRYABILITY
+    );
+}
+
 /// An identity is generated once; a blank one or a blank release is not a
 /// value.
 #[test]

@@ -91,6 +91,12 @@ pub struct HostConfig {
     pub sdk_name: String,
     /// The SDK's version.
     pub sdk_version: String,
+    /// The worker protocol version the worker reports, numbered as in
+    /// [`orcher_sdk_core::worker_protocol`]. What a version promises covers
+    /// the language SDK too, so the SDK raises it once it does what the
+    /// version says. Default:
+    /// [`CANCEL_REQUEST`](orcher_sdk_core::worker_protocol::CANCEL_REQUEST).
+    pub protocol_version: u32,
 }
 
 impl HostConfig {
@@ -118,6 +124,7 @@ impl HostConfig {
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             sdk_name: String::new(),
             sdk_version: String::new(),
+            protocol_version: orcher_sdk_core::worker_protocol::CANCEL_REQUEST,
         }
     }
 
@@ -209,6 +216,14 @@ impl HostConfig {
         self
     }
 
+    /// Reports worker protocol version `version`
+    /// ([`orcher_sdk_core::worker_protocol`]): set by a language SDK that does
+    /// what the version promises.
+    pub fn with_protocol_version(mut self, version: u32) -> Self {
+        self.protocol_version = version;
+        self
+    }
+
     /// The workflow driver's configuration.
     pub fn workflow_driver(&self) -> WorkflowDriverConfig {
         let mut config = WorkflowDriverConfig::default();
@@ -225,7 +240,7 @@ impl HostConfig {
         config.api_key = self.api_key.clone();
         config.tls_config = self.tls.clone();
         config.version_id = self.version_id.clone();
-        config.protocol_version = orcher_sdk_core::worker_protocol::CANCEL_REQUEST;
+        config.protocol_version = self.protocol_version;
         config
     }
 
@@ -312,7 +327,7 @@ impl HostConfig {
         config.tls_config = self.tls.clone();
         config.api_key = self.api_key.clone();
         config.organization_id = self.organization_id.clone();
-        config.protocol_version = orcher_sdk_core::worker_protocol::CANCEL_REQUEST;
+        config.protocol_version = self.protocol_version;
         config
     }
 }

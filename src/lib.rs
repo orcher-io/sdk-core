@@ -216,6 +216,16 @@ pub mod worker_protocol {
     /// terminated or its cleanup limit passes. Below it, the engine ends the
     /// run as cancelled at once, as it did before cancellation requests.
     pub const CANCEL_REQUEST: u32 = 1;
+
+    /// A workflow failure's `non_retryable` is what the workflow code raised:
+    /// set only for a failure the code raised as non-retryable, with the same
+    /// error the language gives task code for it. The engine then never
+    /// retries such a failure, whatever the workflow's retry policy allows.
+    ///
+    /// Report it only once the language SDK answers a failed activation that
+    /// way. Below it, the engine retries every workflow failure by its retry
+    /// policy alone, whatever its `non_retryable` says.
+    pub const WORKFLOW_FAILURE_RETRYABILITY: u32 = 2;
 }
 
 /// The worker protocol version reported unless the language SDK sets one:

@@ -875,14 +875,16 @@ impl WorkflowDriver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&run_id);
-        let fail = |message: String| Report::Fail {
+        let failed = |message: String, non_retryable: bool| Report::Fail {
             workflow_id: workflow_id.clone(),
             run_id: run_id.clone(),
             token: token.clone(),
             message,
             failure_type: "WorkflowExecutionError".to_string(),
-            non_retryable: false,
+            non_retryable,
         };
+        // A failure of this worker's, not one the workflow code raised.
+        let fail = |message: String| failed(message, false);
         // Running the same code against the same journal would do the same
         // again, and failing the run would end it for good, though a deploy
         // of the code that recorded it could carry it on. So the activation
@@ -984,7 +986,14 @@ impl WorkflowDriver {
                 return non_deterministic(error_msg);
             }
             self.forget_non_deterministic(&run_id);
-            return fail(error_msg);
+            // Whether the workflow code raised it as non-retryable, as the
+            // language reported it. The engine honours the mark only from a
+            // worker whose protocol version says the language means it.
+            let non_retryable = execution_result
+                .error
+                .as_ref()
+                .is_some_and(|error| !error.retryable);
+            return failed(error_msg, non_retryable);
         }
         self.forget_non_deterministic(&run_id);
 
@@ -1472,6 +1481,43 @@ mod tests {
             matches!(&report, Report::Release(leftover) if leftover.run_id == "run-1"),
             "{report:?}"
         );
+    }
+
+    /// A workflow failure reaches the engine marked non-retryable exactly when
+    /// the language answered it so: the mark the workflow code raised.
+    #[tokio::test]
+    async fn a_workflow_failure_carries_the_mark_the_language_gave_it() {
+        use crate::proto::kernel::v1::{run_activation_result, Failure, RunActivationResult};
+
+        let driver = idle_driver().await;
+        for non_retryable in [true, false] {
+            let answer = RunActivationResult {
+                outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+                    message: "out of stock".into(),
+                    non_retryable,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            let report = driver.report_for(WorkflowWorkResult {
+                workflow_id: "order-7".into(),
+                run_id: "run-1".into(),
+                task_token: b"act-1".to_vec(),
+                stream_entry_id: None,
+                result: crate::kernel::execution_result("run-1", answer),
+            });
+            match report {
+                Report::Fail {
+                    message,
+                    non_retryable: sent,
+                    ..
+                } => {
+                    assert_eq!(message, "out of stock");
+                    assert_eq!(sent, non_retryable);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     /// The retry policy of a child and of a fresh run reaches the engine, a

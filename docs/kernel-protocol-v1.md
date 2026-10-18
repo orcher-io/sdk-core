@@ -216,7 +216,7 @@ Comparison is a structured key per command, field by field, not a hash of the se
 
 Everything a replay must reproduce derives from the lineage, never from the run id: default child workflow ids, and the deterministic random seed (`RunStarted.random_seed`). Deriving them from the run id would change them on reset, breaking the copied steps; deriving them from the workflow id alone would let a retry collide with a child a previous attempt left open.
 
-**Routing.** The compatibility contract is **support for the run's recorded scheme**: the engine hands a run only to a worker that reports supporting its scheme (refuse, never fall through, as for versioning). Protocol version 2 is the initial proxy (a v2 worker supports `KERNEL_V1` plus its own legacy scheme), but workers report the list of schemes they support (`WorkerHello`), and that list is what routing checks. A worker never receives a run whose scheme it cannot replay.
+**Routing.** The compatibility contract is **support for the run's recorded scheme**: the engine hands a run only to a worker that reports supporting its scheme (refuse, never fall through, as for versioning). Protocol version 3 is the initial proxy (a v3 worker supports `KERNEL_V1` plus its own legacy scheme), but workers report the list of schemes they support (`WorkerHello`), and that list is what routing checks. A worker never receives a run whose scheme it cannot replay.
 
 **Retirement.** The kernel keeps legacy comparison indefinitely; it costs nothing beyond comparing supplied ids. Each SDK's legacy-id module stays for as long as historical replay and reset of legacy histories are supported, which is a support-policy decision, not tied to whether legacy runs are still open.
 
@@ -286,7 +286,7 @@ Each step is gated on every SDK suite, the conformance tests, an end-to-end run 
 
 1. **Messages** (protos#14), additive, minor release.
 2. **Recorded-activation conformance harness** and the legacy-scheme replay check against real journals.
-3. **Kernel resolution** (#26): the kernel builds `RunActivation` from today's full journal; SDKs opt in with protocol version 2 in `WorkerHello`. The raw-task path stays until all three SDKs have switched, then is removed in the same arc.
+3. **Kernel resolution** (#26): the kernel builds `RunActivation` from today's full journal; SDKs opt in with protocol version 3 in `WorkerHello`. The raw-task path stays until all three SDKs have switched, then is removed in the same arc.
 4. **Kernel step identity and full command comparison** (#27), with frozen legacy schemes.
 5. **Binary boundary** (#37) as each SDK switches.
 6. **Kernel history cache + incremental fetch** (§9.2), with orcher#307.
@@ -295,7 +295,7 @@ Each step is gated on every SDK suite, the conformance tests, an end-to-end run 
 
 ## 15. Versioning
 
-`protocol_version` already exists on the engine wire (0 = baseline, 1 = handles a cancel request; sent on Complete, Fail and registration). It stays **the one number** for what the worker's semantics are, and is extended: **2 = activations resolved by the kernel, kernel-assigned step ids for new runs, full command comparison.** The kernel reports to the engine the highest version it and the SDK both implement. A bump is required only for a change that alters what a replay produces, what the comparison accepts (§8.2), or what the engine must do for the worker. Capabilities (§10) are never versions.
+`protocol_version` already exists on the engine wire (0 = baseline, 1 = handles a cancel request; sent on Complete, Fail and registration). It stays **the one number** for what the worker's semantics are, and is extended: **2 = a workflow failure's `non_retryable` is what the workflow code raised** (sdk-core#102; the engine retries every workflow failure by its policy alone below it), **3 = activations resolved by the kernel, kernel-assigned step ids for new runs, full command comparison.** The kernel reports to the engine the highest version it and the SDK both implement. A bump is required only for a change that alters what a replay produces, what the comparison accepts (§8.2), or what the engine must do for the worker. Capabilities (§10) are never versions.
 
 ## 16. Decisions taken and still open
 
