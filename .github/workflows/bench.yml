@@ -9,6 +9,8 @@ name: Benchmark
 # made on the same kind of runner.
 
 on:
+  push:
+    branches: [chore/bench-suite]
   workflow_dispatch:
     inputs:
       label:
@@ -41,11 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 340
     env:
-      LABEL: ${{ inputs.label }}
-      ENGINE_VERSION: ${{ inputs.engine_version }}
-      ONLY: ${{ inputs.only }}
-      UPSTREAM: ${{ inputs.upstream }}
-      RUST_LOG: ${{ inputs.rust_log }}
+      LABEL: ${{ inputs.label || 'diag-fanout' }}
+      ENGINE_VERSION: ${{ inputs.engine_version || 'latest' }}
+      ONLY: ${{ inputs.only || 'sequential-10,fanout-1000,heartbeat-100,footprint-task-worker,timers,events' }}
+      UPSTREAM: ${{ inputs.upstream || 'mirror' }}
+      RUST_LOG: ${{ inputs.rust_log || 'orcher_sdk_core=warn,orcher_sdk_host=warn' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -59,6 +61,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: bench-${{ inputs.label }}
-          path: bench/results/${{ inputs.label }}*
+          name: bench-${{ env.LABEL }}
+          path: bench/results/${{ env.LABEL }}*
           if-no-files-found: warn
