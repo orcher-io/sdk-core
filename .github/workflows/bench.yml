@@ -1,0 +1,64 @@
+name: Benchmark
+
+# The benchmark suite (bench/README.md), on demand only: it starts an engine
+# and Postgres in Docker and runs for up to a few hours, so it is never part
+# of CI. Run it from the Actions tab or with
+#   gh workflow run bench.yml -f label=my-change [-f only=a,b] [-f engine_version=0.5.5]
+# and download the results from the run's artifact. A hosted runner is a
+# quieter, more repeatable machine than a developer's laptop; compare runs
+# made on the same kind of runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "Name of the results (bench/results/<label>.json and .md)"
+        required: true
+        type: string
+      engine_version:
+        description: "Engine image tag (ghcr.io/orcher-io/orcher:<tag>)"
+        default: latest
+        type: string
+      only:
+        description: "Comma-separated scenarios (orcher-bench list); empty runs them all"
+        default: ""
+        type: string
+      upstream:
+        description: "How the proxy connects to the engine (#38)"
+        default: mirror
+        type: choice
+        options: [mirror, shared]
+      rust_log:
+        description: "RUST_LOG for the measured workers' logs (empty: none)"
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      LABEL: ${{ inputs.label }}
+      ENGINE_VERSION: ${{ inputs.engine_version }}
+      ONLY: ${{ inputs.only }}
+      UPSTREAM: ${{ inputs.upstream }}
+      RUST_LOG: ${{ inputs.rust_log }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the suite
+        run: |
+          [ -n "$RUST_LOG" ] || unset RUST_LOG
+          args=(--engine-version "$ENGINE_VERSION" --upstream "$UPSTREAM")
+          [ -z "$ONLY" ] || args+=(--only "$ONLY")
+          bench/run.sh "$LABEL" "${args[@]}" 2>&1 | tee "bench/results/$LABEL.run.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ inputs.label }}
+          path: bench/results/${{ inputs.label }}*
+          if-no-files-found: warn
