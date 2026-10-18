@@ -508,7 +508,7 @@ async fn run_one(
         let client = client.clone();
         let workflow_id = workflow_id.clone();
         tokio::spawn(async move {
-            for i in 0u64.. {
+            for i in 0u64..=u64::MAX {
                 tokio::time::sleep(Duration::from_millis(every_ms)).await;
                 if client
                     .send_event(&workflow_id, None, program::EVENT_NAME, i)
