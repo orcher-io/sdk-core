@@ -49,12 +49,13 @@ pub struct ExecutionRequest {
     /// first time.
     pub is_replaying: bool,
 
-    /// Whether the workflow should continue as a fresh run. Always `false` from [`Self::new`].
-    pub continue_as_new: bool,
+    /// Whether the workflow should restart fresh. Always `false` from [`Self::new`].
+    #[serde(default)]
+    pub restart_fresh: bool,
 }
 
 impl ExecutionRequest {
-    /// Creates a request timestamped with the current time, with `continue_as_new` unset.
+    /// Creates a request timestamped with the current time, with `restart_fresh` unset.
     pub fn new(
         run_id: String,
         execution: WorkflowExecution,
@@ -69,7 +70,7 @@ impl ExecutionRequest {
             jobs,
             journal_length,
             is_replaying,
-            continue_as_new: false,
+            restart_fresh: false,
         }
     }
 
