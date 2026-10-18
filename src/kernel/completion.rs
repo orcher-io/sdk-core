@@ -12,9 +12,13 @@
 //! - **Satisfied calls** send nothing; **new calls** become commands for the
 //!   engine.
 //! - **Query and update answers** pass through.
-//! - **A workflow failure** fails the run; **a protocol error** (the SDK could
-//!   not process the activation) is [`Error::Protocol`], which hands the
-//!   activation back rather than failing the run.
+//! - **A workflow failure** fails the run. The calls the code made before it
+//!   failed, when the SDK says what they were, are steps reached like a
+//!   completing activation's, so code that fails after leaving a recorded
+//!   step behind is held rather than failed; none of them is sent.
+//! - **A protocol error** (the SDK could not process the activation) is
+//!   [`Error::Protocol`], which hands the activation back rather than failing
+//!   the run.
 //!
 //! **Step ids.** A run bound to a legacy step-id scheme keeps the ids its SDK
 //! supplies, in the command's own fields (a task's id, a timer's id, a child's
@@ -69,18 +73,14 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
     let mut result =
         match answer.outcome {
             Some(run_activation_result::Outcome::Commands(commands)) => {
-                let mut reached = Vec::new();
-                let mut issued = Vec::new();
-                for command in commands.commands {
-                    // Every step the code called for is reached, answered
-                    // from history or not: a step still open in history is
-                    // sent again, and the determinism check compares the
-                    // order of all of them with the journal's.
-                    reached.extend(reached_step(&command));
-                    if !command.satisfied {
-                        issued.push(engine_command(command)?);
-                    }
-                }
+                let reached = reached_steps(&commands.commands);
+                // Satisfied calls send nothing; new calls become commands.
+                let issued = commands
+                    .commands
+                    .into_iter()
+                    .filter(|command| !command.satisfied)
+                    .map(engine_command)
+                    .collect::<Result<Vec<_>>>()?;
                 let mut result = ExecutionResult::success(run_id.to_string(), issued);
                 result.set_reached_steps(reached);
                 result
@@ -93,7 +93,15 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
                 } else {
                     ExecutionError::workflow_error(failure.message, !failure.non_retryable)
                 };
-                ExecutionResult::failed(run_id.to_string(), error)
+                let mut result = ExecutionResult::failed(run_id.to_string(), error);
+                // The calls the code made before it failed are only checked,
+                // never sent: the steps they reached are held to history as a
+                // completing activation's are. An SDK that does not say what
+                // calls the code made leaves the failure unchecked.
+                if let Some(calls) = &answer.calls_before_failure {
+                    result.set_reached_steps(reached_steps(&calls.commands));
+                }
+                result
             }
             Some(run_activation_result::Outcome::ProtocolError(error)) => {
                 return Err(Error::Protocol(error.message));
@@ -147,6 +155,14 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
         })
         .collect();
     Ok(result)
+}
+
+/// Every step the calls reached, in issue order. A call to a step is a step
+/// reached, answered from history or not: a step still open in history is
+/// sent again, and the determinism check compares the order of all of them
+/// with the journal's.
+fn reached_steps(calls: &[KernelCommand]) -> Vec<String> {
+    calls.iter().filter_map(reached_step).collect()
 }
 
 /// The step a call reached, as the determinism check names it: a
@@ -646,6 +662,189 @@ mod tests {
         let error = result.error.unwrap();
         assert_eq!(error.message, "out of stock");
         assert!(!error.retryable);
+    }
+
+    fn failed(calls_before_failure: Option<Vec<KernelCommand>>) -> RunActivationResult {
+        RunActivationResult {
+            outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+                message: "out of stock".into(),
+                ..Default::default()
+            })),
+            calls_before_failure: calls_before_failure.map(|commands| Commands {
+                commands,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A failure's calls are steps reached, answered from history or not, in
+    /// order, exactly as a completing activation's; none is sent, not even
+    /// one the engine could not take.
+    #[test]
+    fn a_failure_reports_the_steps_its_calls_reached_and_sends_none() {
+        let result = execution_result(
+            "run-1",
+            failed(Some(vec![
+                call(
+                    0,
+                    true,
+                    "charge_0",
+                    command::What::RunTask(RunTask::default()),
+                ),
+                call(
+                    1,
+                    false,
+                    "",
+                    command::What::RecordValue(RecordValue::default()),
+                ),
+                call(
+                    2,
+                    false,
+                    "timer_2",
+                    command::What::StartTimer(StartTimer {
+                        duration: seconds(60),
+                        ..Default::default()
+                    }),
+                ),
+                call(
+                    3,
+                    false,
+                    "",
+                    command::What::UpsertLabels(UpsertLabels::default()),
+                ),
+            ])),
+        )
+        .unwrap();
+        assert!(!result.successful);
+        assert!(result.commands.is_empty(), "{:?}", result.commands);
+        assert_eq!(
+            result.reached_steps.as_deref(),
+            Some(&["charge_0".to_string(), "timer_2".to_string()][..])
+        );
+    }
+
+    /// Code that failed before making any call reached no step, which is not
+    /// the same as an SDK that does not say: only the first is checked.
+    #[test]
+    fn a_failure_with_no_calls_reached_nothing_and_one_without_calls_is_unchecked() {
+        let none_made = execution_result("run-1", failed(Some(vec![]))).unwrap();
+        assert_eq!(none_made.reached_steps, Some(vec![]));
+        let unsaid = execution_result("run-1", failed(None)).unwrap();
+        assert_eq!(unsaid.reached_steps, None);
+    }
+
+    /// The calls before a failure belong with the failure: beside any other
+    /// outcome they are not read.
+    #[test]
+    fn calls_before_failure_beside_commands_are_not_read() {
+        let mut answer = answered(vec![call(
+            0,
+            false,
+            "ship_0",
+            command::What::RunTask(RunTask::default()),
+        )]);
+        answer.calls_before_failure = Some(Commands {
+            commands: vec![call(
+                0,
+                true,
+                "charge_0",
+                command::What::RunTask(RunTask::default()),
+            )],
+            ..Default::default()
+        });
+        let result = execution_result("run-1", answer).unwrap();
+        assert_eq!(
+            result.reached_steps.as_deref(),
+            Some(&["ship_0".to_string()][..])
+        );
+    }
+
+    /// Code that fails after skipping a step history recorded no longer
+    /// replays that history (a changed deploy, say), and is held, as code
+    /// that completes after skipping one is; code that fails having reached
+    /// every recorded step fails the run. So is code that fails before any
+    /// call, when history recorded a step.
+    #[test]
+    fn a_failure_after_leaving_a_recorded_step_behind_is_held() {
+        use crate::proto::orcher::v1::journal_entry::Attributes;
+        use crate::proto::orcher::v1::{
+            EntryType, JournalEntry, TaskCompletedEventAttributes, TaskScheduledEventAttributes,
+            WorkflowExecutionStartedEventAttributes,
+        };
+        let entry = |entry_id: i64, entry_type: EntryType, attributes: Attributes| JournalEntry {
+            entry_id,
+            entry_type: entry_type as i32,
+            attributes: Some(attributes),
+            ..Default::default()
+        };
+        let scheduled = |task_id: &str, task_type: &str| {
+            Attributes::TaskScheduled(TaskScheduledEventAttributes {
+                task_id: task_id.into(),
+                task_type: task_type.into(),
+                ..Default::default()
+            })
+        };
+        let completed = |scheduled_event_id| {
+            Attributes::TaskCompleted(TaskCompletedEventAttributes {
+                scheduled_event_id,
+                ..Default::default()
+            })
+        };
+        let journal = vec![
+            entry(
+                1,
+                EntryType::WorkflowExecutionStarted,
+                Attributes::WorkflowExecutionStarted(WorkflowExecutionStartedEventAttributes {
+                    workflow_type: "checkout".into(),
+                    ..Default::default()
+                }),
+            ),
+            entry(2, EntryType::TaskScheduled, scheduled("charge_0", "charge")),
+            entry(3, EntryType::TaskCompleted, completed(2)),
+            entry(4, EntryType::TaskScheduled, scheduled("ship_1", "ship")),
+            entry(5, EntryType::TaskCompleted, completed(4)),
+        ];
+        let task = |seq, step_id: &str| {
+            call(
+                seq,
+                true,
+                step_id,
+                command::What::RunTask(RunTask::default()),
+            )
+        };
+        let check = |calls| {
+            let result = execution_result("run-1", failed(calls)).unwrap();
+            crate::Replayer::check_activation(&journal, &result)
+        };
+
+        let left_last = check(Some(vec![task(0, "charge_0")]));
+        assert_eq!(left_last.len(), 1, "{left_last:?}");
+        assert_eq!(left_last[0].step_id.as_deref(), Some("ship_1"));
+        assert!(
+            left_last[0]
+                .to_string()
+                .contains("failed the workflow (out of stock)"),
+            "{}",
+            left_last[0]
+        );
+
+        let skipped_first = check(Some(vec![task(0, "ship_1")]));
+        assert_eq!(skipped_first.len(), 1, "{skipped_first:?}");
+        assert_eq!(skipped_first[0].step_id.as_deref(), Some("charge_0"));
+
+        let failed_before_any_call = check(Some(vec![]));
+        assert_eq!(
+            failed_before_any_call.len(),
+            1,
+            "{failed_before_any_call:?}"
+        );
+
+        let reached_every_step = check(Some(vec![task(0, "charge_0"), task(1, "ship_1")]));
+        assert!(reached_every_step.is_empty(), "{reached_every_step:?}");
+
+        let unsaid = check(None);
+        assert!(unsaid.is_empty(), "{unsaid:?}");
     }
 
     /// Code that no longer replays its history is reported as

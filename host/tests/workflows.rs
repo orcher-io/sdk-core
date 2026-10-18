@@ -206,6 +206,67 @@ async fn a_workflow_failure_fails_the_run() {
     host.shutdown().await;
 }
 
+fn failed(activation_id: Vec<u8>, calls: Vec<Command>) -> RunActivationResult {
+    RunActivationResult {
+        activation_id,
+        outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+            message: "out of stock".into(),
+            ..Default::default()
+        })),
+        calls_before_failure: Some(Commands {
+            commands: calls,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Code that fails having reached the recorded step fails the run.
+#[tokio::test]
+async fn a_failure_after_every_recorded_step_fails_the_run() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+    let run = host.next_activation().await.unwrap();
+
+    host.complete_activation(failed(
+        run.activation_id,
+        vec![call(0, true, "charge_0", "charge")],
+    ))
+    .await
+    .unwrap();
+
+    eventually("the failure", || {
+        !engine.script().workflow_failures.is_empty()
+    })
+    .await;
+    assert!(engine.script().releases.is_empty());
+    host.shutdown().await;
+}
+
+/// Code that fails without reaching the recorded step no longer replays its
+/// history, so the run is held, not failed: the kernel's determinism check
+/// sees the calls made before the failure.
+#[tokio::test]
+async fn a_failure_that_left_a_recorded_step_behind_is_held() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+    let run = host.next_activation().await.unwrap();
+
+    host.complete_activation(failed(run.activation_id, vec![]))
+        .await
+        .unwrap();
+
+    eventually("the activation handed back", || {
+        !engine.script().releases.is_empty()
+    })
+    .await;
+    assert!(engine.script().workflow_failures.is_empty());
+    assert!(engine.script().workflow_completions.is_empty());
+    host.shutdown().await;
+}
+
 /// An answer to an activation the host does not hold is refused.
 #[tokio::test]
 async fn an_answer_to_no_held_activation_is_refused() {
