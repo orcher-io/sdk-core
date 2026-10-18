@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.17.0](https://github.com/orcher-io/sdk-core/compare/v0.16.0...v0.17.0) (2026-10-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* ExecutionRequest.continue_as_new is now restart_fresh, the name ExecutionResult already uses for a restart. It is still always false from ExecutionRequest::new; a request serialized without it reads as false.
+
+### Bug Fixes
+
+* name ExecutionRequest's restart flag restart_fresh ([#101](https://github.com/orcher-io/sdk-core/issues/101)) ([b9ea22d](https://github.com/orcher-io/sdk-core/commit/b9ea22dd3d0b9e3d514fe86225dae772c36b04d1))
+
+
+### Documentation
+
+* name orcher-proto 0.9 in the 0.16.0 changelog ([#99](https://github.com/orcher-io/sdk-core/issues/99)) ([31b9c91](https://github.com/orcher-io/sdk-core/commit/31b9c910dad4ea610c39416c3d1287c5cbafce0f))
+
 ## [0.16.0](https://github.com/orcher-io/sdk-core/compare/v0.15.1...v0.16.0) (2026-10-17)
 
 
