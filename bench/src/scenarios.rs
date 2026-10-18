@@ -38,8 +38,9 @@ pub struct Scenario {
     pub program: Program,
     /// Events each run waits for. One is sent to it every `event_every_ms`
     /// until it ends: an event that arrives before the run waits for it is
-    /// journaled but does not wake the run on engine 0.5.5, so sending
-    /// exactly as many can leave a run waiting forever.
+    /// journaled but does not wake the run on engine 0.5.5
+    /// (orcher-io/orcher#376), so sending exactly as many can leave a run
+    /// waiting forever.
     pub events_per_run: u64,
     pub event_every_ms: u64,
     /// Tasks run on a second, task-only worker, which is the one measured;
@@ -139,6 +140,8 @@ pub fn all() -> Vec<Scenario> {
         payload("payload-10k", 10 << 10),
         payload("payload-100k", 100 << 10),
         payload("payload-1m", 1 << 20),
+        // 1 s, not shorter: a timer shorter than the engine's delay in storing
+        // it fails the completion on engine 0.5.5 (orcher-io/orcher#375).
         Scenario::new(
             "timers",
             "20 runs of 10 timers of 1 s in sequence",

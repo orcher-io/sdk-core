@@ -43,11 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 340
     env:
-      LABEL: ${{ inputs.label || 'diag-fanout' }}
+      LABEL: ${{ inputs.label || 'baseline-2026-10-18' }}
       ENGINE_VERSION: ${{ inputs.engine_version || 'latest' }}
-      ONLY: ${{ inputs.only || 'sequential-10,fanout-1000,heartbeat-100,footprint-task-worker,timers,events' }}
+      ONLY: ${{ inputs.only || '' }}
       UPSTREAM: ${{ inputs.upstream || 'mirror' }}
-      RUST_LOG: ${{ inputs.rust_log || 'orcher_sdk_core=warn,orcher_sdk_host=warn' }}
+      RUST_LOG: ${{ inputs.rust_log || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

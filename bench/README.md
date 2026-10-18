@@ -100,8 +100,8 @@ one engine and database for the whole run, in a fixed order.
 | `idle` | a worker with a workflow and a task type registered, nothing to do, 10 s | the cost of waiting: polls, heartbeats, CPU, heap, tokio tasks, connections |
 | `sequential-10/100/300/1000` | one run of n no-op tasks in sequence | the O(n²) journal reads: every activation reads and ships the whole journal (#36) |
 | `payload-1k/10k/100k/1m` | one run of 5 tasks in sequence, each returning a result of that size | boundary encoding and payload shipping per activation (#37) |
-| `timers` | 20 runs of 10 timers of 1 s in sequence | timer-heavy runs: activations with no task |
-| `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends because on engine 0.5.5 an event that arrives before the run waits for it does not wake the run |
+| `timers` | 20 runs of 10 timers of 1 s in sequence | timer-heavy runs: activations with no task. The timers are 1 s, not shorter, because on engine 0.5.5 a timer shorter than the engine's delay in storing it fails the completion (orcher-io/orcher#375) |
+| `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends because on engine 0.5.5 an event that arrives before the run waits for it does not wake the run (orcher-io/orcher#376) |
 | `fanout-1000`, `fanout-10000` | one run issuing n no-op tasks at once and waiting for all | one run's activations as its tasks complete; eager dispatch; claims in bulk (#33) |
 | `concurrent-100x10` | 100 runs at once of 10 tasks each | many runs at once against 100 slots |
 | `footprint-task-worker` | a task-only worker, 10 s idle, then 1,000 tasks of 20 ms through 100 slots | a task-only worker's footprint idle and busy, and claimed-but-not-started tasks (#33) |
