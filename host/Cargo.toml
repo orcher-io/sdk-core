@@ -1,6 +1,6 @@
 [package]
 name = "orcher-sdk-host"
-version = "0.17.0" # x-release-please-version
+version = "0.17.1" # x-release-please-version
 edition = "2021"
 license = "Apache-2.0"
 authors = ["ORCHER Contributors"]
@@ -17,7 +17,7 @@ workspace = true
 
 [dependencies]
 # Released together with the host, at the same version.
-orcher-sdk-core = { path = "..", version = "0.17.0" } # x-release-please-version
+orcher-sdk-core = { path = "..", version = "0.17.1" } # x-release-please-version
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }

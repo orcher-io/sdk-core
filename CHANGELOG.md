@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.1](https://github.com/orcher-io/sdk-core/compare/v0.17.0...v0.17.1) (2026-10-19)
+
+
+### Features
+
+* carry a workflow failure's non-retryable mark to the engine ([#103](https://github.com/orcher-io/sdk-core/issues/103)) ([84f189c](https://github.com/orcher-io/sdk-core/commit/84f189c7501660960c4f2adc9b9c8bd6aa96224d)), closes [#102](https://github.com/orcher-io/sdk-core/issues/102)
+* hold a failing activation that left a recorded step behind ([#104](https://github.com/orcher-io/sdk-core/issues/104)) ([71ac27d](https://github.com/orcher-io/sdk-core/commit/71ac27d51dcbd5b21b56083971ac3b4775266f5d))
+
 ## [0.17.0](https://github.com/orcher-io/sdk-core/compare/v0.16.0...v0.17.0) (2026-10-18)
 
 
