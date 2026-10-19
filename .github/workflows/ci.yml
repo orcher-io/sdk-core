@@ -38,4 +38,4 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
       # Builds both crates exactly as crates.io would receive them.
-      - run: cargo package --workspace
+      - run: cargo package --workspace --exclude orcher-bench

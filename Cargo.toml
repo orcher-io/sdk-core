@@ -88,7 +88,7 @@ test-utils = []
 # The worker host (orcher-sdk-host) is built and released with this crate:
 # one version, one tag, one changelog (see release-please-config.json).
 [workspace]
-members = ["host"]
+members = ["host", "bench"]
 resolver = "2"
 
 [workspace.lints.clippy]

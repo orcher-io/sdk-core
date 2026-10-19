@@ -1,0 +1,2 @@
+# Engine logs a run leaves behind, for diagnosis only.
+*.log
