@@ -123,6 +123,7 @@ message RunActivationResult {
     ProtocolError protocol_error = 4;      // the SDK could not process the activation (§7)
   }
   repeated QueryAnswer queries = 5;  repeated UpdateAnswer updates = 6;
+  Commands calls_before_failure = 7;       // with workflow_failed: the calls made before it (§7)
 }
 message Command {
   uint64 seq = 1;                          // call sequence: the order user code issued it
@@ -154,7 +155,8 @@ An activation is identified by `activation_id`, which today's activation token a
 |---|---|---|---|
 | `commands`, valid | new decisions | send them | completion |
 | `commands`, violates history | **determinism violation** | send nothing; hold the run open and retry it with a growing, capped pause, logging the violation each time (today's behaviour, kept) | release; the run stays open. It is never failed for this: the fix is deploying code that replays its journal, and failing would lose the run |
-| `workflow_failed` | user code failed | send as the workflow's failure | failure |
+| `workflow_failed`, `calls_before_failure` replays history (or is unset) | user code failed | send as the workflow's failure | failure |
+| `workflow_failed`, `calls_before_failure` leaves a recorded step behind | **determinism violation**: the code failed on a path its history never took | as for `commands` that violate history; none of the calls is sent | release; the run stays open |
 | `protocol_error` | SDK cannot process it (unknown resolution, decode error, version mismatch) | do not fail the run; release it so another worker can take it, and report loudly | release |
 | no result (SDK crash, timeout) | **transient** | nothing was sent | the activation's claim times out and the run is handed out again |
 
