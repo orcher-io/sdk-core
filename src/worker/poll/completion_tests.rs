@@ -1141,6 +1141,11 @@ async fn serve_raw(answer: Raw, calls: Arc<std::sync::atomic::AtomicUsize>) -> S
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     connection.abrupt_shutdown(h2::Reason::NO_ERROR);
                     while connection.accept().await.is_some() {}
+                    // A draining server keeps the socket until the client has
+                    // read the GOAWAY; closing it at once would hand a request
+                    // already in flight a broken pipe instead.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    drop(connection);
                     return;
                 }
                 while let Some(Ok((_request, mut respond))) = connection.accept().await {
