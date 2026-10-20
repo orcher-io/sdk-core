@@ -280,5 +280,16 @@ async fn calls_to_the_engine_are_measured_by_method() {
     );
     assert_eq!(completes.retries, 1);
     assert_eq!(completes.latency_buckets.iter().sum::<u64>(), 2);
+
+    // The task itself, counted as it was handed over and reported.
+    eventually("the report counted", || {
+        host.wire_metrics().work.task_reports == 1
+    })
+    .await;
+    let work = host.wire_metrics().work;
+    assert_eq!(work.tasks, 1);
+    assert_eq!(work.task_input_bytes, br#"{"amount":7}"#.len() as u64);
+    assert_eq!(work.task_result_bytes, br#""charged""#.len() as u64);
+    assert_eq!(work.task_failures, 0);
     host.shutdown().await;
 }

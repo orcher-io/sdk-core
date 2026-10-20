@@ -109,6 +109,17 @@ async fn an_answer_reaches_the_engine_as_commands() {
         (task.task_id.as_str(), task.task_type.as_str()),
         ("ship_1", "ship")
     );
+    // Counted on the wire: one activation with its journal, one report
+    // carrying the one command sent (sdk-core#43).
+    eventually("the report counted", || {
+        host.wire_metrics().work.workflow_reports == 1
+    })
+    .await;
+    let work = host.wire_metrics().work;
+    assert_eq!(work.activations, 1);
+    assert!(work.activation_journal_entries >= 1, "{work:?}");
+    assert_eq!(work.workflow_commands, 1);
+    assert_eq!(work.workflow_failures, 0);
     host.shutdown().await;
 }
 
