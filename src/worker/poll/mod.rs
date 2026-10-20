@@ -6,6 +6,7 @@
 
 pub(crate) mod completion;
 pub mod polling;
+pub mod scaler;
 
 pub use completion::CompletionRetryConfig;
 pub use polling::{

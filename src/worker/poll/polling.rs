@@ -11,6 +11,7 @@
 //! - **Task**: a unit of work that a workflow schedules.
 //! - **Execution step**: a point where the workflow's code runs to decide what happens next.
 
+use crate::worker::poll::scaler::PollerScaler;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -299,6 +300,12 @@ pub struct WorkflowExecutionPoller {
     /// Poll request built once and cloned for each poll.
     poll_request_template: PollWorkflowExecutionRequest,
 
+    /// Shared with the driver's other pollers: whether this one may poll now.
+    scaler: Option<Arc<PollerScaler>>,
+
+    /// This poller's number among its driver's pollers, from 0.
+    index: usize,
+
     /// Server address, used to reconnect after a cool-off.
     server_url: String,
 
@@ -382,6 +389,8 @@ impl WorkflowExecutionPoller {
             shutdown: shutdown_rx,
             task_sender,
             poll_request_template,
+            scaler: None,
+            index: 0,
             server_url: address,
             consecutive_idle_polls: 0,
             consecutive_timeouts: 0,
@@ -400,6 +409,14 @@ impl WorkflowExecutionPoller {
     /// # Errors
     ///
     /// Returns an error if reconnecting after a cool-off fails.
+    /// Share a scaler with the driver's other pollers; this poller is number
+    /// `index` among them. Without one it always polls.
+    pub fn with_scaler(mut self, scaler: Arc<PollerScaler>, index: usize) -> Self {
+        self.scaler = Some(scaler);
+        self.index = index;
+        self
+    }
+
     pub async fn poll_loop(&mut self) -> Result<()> {
         tracing::info!(
             task_queue = %self.config.task_queue,
@@ -485,6 +502,15 @@ impl WorkflowExecutionPoller {
                 self.consecutive_timeouts = 0;
             }
 
+            // While the driver's polls bring no work for this poller to
+            // share, it waits; a poll that brings work lets it in again.
+            if let Some(scaler) = self.scaler.clone() {
+                if !scaler.may_poll(self.index) {
+                    self.park(&scaler).await;
+                    continue;
+                }
+            }
+
             // Poll for work; this waits up to `poll_timeout_seconds`.
             //
             // Abandoned only when the driver has stopped taking activations:
@@ -506,7 +532,11 @@ impl WorkflowExecutionPoller {
 
             match result {
                 Ok(Some(task)) => {
-                    // Work arrived: reset the idle, timeout and error counts.
+                    // Work arrived: reset the idle, timeout and error counts,
+                    // and let one more poller poll.
+                    if let Some(scaler) = &self.scaler {
+                        scaler.worked();
+                    }
                     self.consecutive_idle_polls = 0;
                     self.consecutive_timeouts = 0;
                     consecutive_errors = 0;
@@ -540,6 +570,9 @@ impl WorkflowExecutionPoller {
                     // An empty answer is still an answer: the path works again.
                     consecutive_errors = 0;
                     self.consecutive_idle_polls = self.consecutive_idle_polls.saturating_add(1);
+                    if let Some(scaler) = &self.scaler {
+                        scaler.idle(self.index);
+                    }
 
                     // Enter cool-off after too many idle polls
                     if self.consecutive_idle_polls >= MAX_CONSECUTIVE_IDLE {
@@ -571,6 +604,9 @@ impl WorkflowExecutionPoller {
                             "Poll timeout (normal during long-polling)"
                         );
                         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                        if let Some(scaler) = &self.scaler {
+                            scaler.idle(self.index);
+                        }
 
                         // Enter cool-off after too many timeouts
                         if self.consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
@@ -637,6 +673,22 @@ impl WorkflowExecutionPoller {
     /// Waits `duration` between polls, or less if the poller is told to stop
     /// meanwhile, so a shutdown is not held up by a backoff of up to thirty
     /// seconds.
+    /// Waits until this poller may poll again, or is told to stop.
+    async fn park(&mut self, scaler: &PollerScaler) {
+        let driver_gone = self.task_sender.clone();
+        let shutdown = &mut self.shutdown;
+        let index = self.index;
+        tokio::select! {
+            _ = scaler.turn(index) => {}
+            _ = driver_gone.closed() => {}
+            _ = async {
+                if shutdown.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+
     async fn pause(&mut self, duration: Duration) {
         let driver_gone = self.task_sender.clone();
         let shutdown = &mut self.shutdown;
@@ -834,6 +886,12 @@ pub struct TaskExecutionPoller {
 
     /// Poll request built once and cloned for each poll.
     poll_request_template: PollTaskExecutionRequest,
+
+    /// Shared with the driver's other pollers: whether this one may poll now.
+    scaler: Option<Arc<PollerScaler>>,
+
+    /// This poller's number among its driver's pollers, from 0.
+    index: usize,
 }
 
 impl TaskExecutionPoller {
@@ -908,6 +966,8 @@ impl TaskExecutionPoller {
             shutdown: shutdown_rx,
             task_sender,
             poll_request_template,
+            scaler: None,
+            index: 0,
         };
 
         Ok(poller)
@@ -919,6 +979,14 @@ impl TaskExecutionPoller {
     /// Polled tasks are sent through `task_sender`. Errors from the server are
     /// retried after a pause and never end the loop, so this always returns
     /// `Ok`.
+    /// Share a scaler with the driver's other pollers; this poller is number
+    /// `index` among them. Without one it always polls.
+    pub fn with_scaler(mut self, scaler: Arc<PollerScaler>, index: usize) -> Self {
+        self.scaler = Some(scaler);
+        self.index = index;
+        self
+    }
+
     pub async fn poll_loop(&mut self) -> Result<()> {
         tracing::info!(
             task_queue = %self.config.task_queue,
@@ -995,6 +1063,15 @@ impl TaskExecutionPoller {
                 }
             }
 
+            // While the driver's polls bring no work for this poller to
+            // share, it waits; a poll that brings work lets it in again.
+            if let Some(scaler) = self.scaler.clone() {
+                if !scaler.may_poll(self.index) {
+                    self.park(&scaler).await;
+                    continue;
+                }
+            }
+
             // Poll for work; this waits up to `poll_timeout_seconds`.
             //
             // Abandoned only when the driver has stopped taking tasks: its
@@ -1024,7 +1101,11 @@ impl TaskExecutionPoller {
                         "Received task execution task"
                     );
 
-                    // Work arrived: reset the idle and timeout counts.
+                    // Work arrived: reset the idle and timeout counts, and let
+                    // one more poller poll.
+                    if let Some(scaler) = &self.scaler {
+                        scaler.worked();
+                    }
                     consecutive_idle_polls = 0;
                     consecutive_timeouts = 0;
 
@@ -1052,6 +1133,9 @@ impl TaskExecutionPoller {
 
                     // Count idle polls and enter cool-off after too many.
                     consecutive_idle_polls = consecutive_idle_polls.saturating_add(1);
+                    if let Some(scaler) = &self.scaler {
+                        scaler.idle(self.index);
+                    }
                     if consecutive_idle_polls >= MAX_CONSECUTIVE_IDLE {
                         let backoff = calc_backoff(consecutive_idle_polls);
                         // Jitter 0..250ms
@@ -1086,6 +1170,9 @@ impl TaskExecutionPoller {
 
                         // Count normal timeouts and enter cool-off after too many.
                         consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                        if let Some(scaler) = &self.scaler {
+                            scaler.idle(self.index);
+                        }
                         if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
                             let backoff = calc_backoff(consecutive_timeouts);
                             // Jitter 0..250ms
@@ -1130,6 +1217,22 @@ impl TaskExecutionPoller {
 
     /// Waits `duration` between polls, or less if the poller is told to stop
     /// meanwhile, so a shutdown is not held up by a backoff.
+    /// Waits until this poller may poll again, or is told to stop.
+    async fn park(&mut self, scaler: &PollerScaler) {
+        let driver_gone = self.task_sender.clone();
+        let shutdown = &mut self.shutdown;
+        let index = self.index;
+        tokio::select! {
+            _ = scaler.turn(index) => {}
+            _ = driver_gone.closed() => {}
+            _ = async {
+                if shutdown.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+
     async fn pause(&mut self, duration: Duration) {
         let driver_gone = self.task_sender.clone();
         let shutdown = &mut self.shutdown;
@@ -1346,6 +1449,12 @@ pub struct ActorOperationPoller {
     /// Poll request built once and cloned for each poll.
     poll_request_template: PollActorOperationRequest,
 
+    /// Shared with the driver's other pollers: whether this one may poll now.
+    scaler: Option<Arc<PollerScaler>>,
+
+    /// This poller's number among its driver's pollers, from 0.
+    index: usize,
+
     /// Server address, used to reconnect after a cool-off.
     server_url: String,
 
@@ -1409,6 +1518,8 @@ impl ActorOperationPoller {
             shutdown: shutdown_rx,
             operation_sender,
             poll_request_template,
+            scaler: None,
+            index: 0,
             server_url: address,
             consecutive_idle_polls: 0,
             consecutive_timeouts: 0,
@@ -1425,6 +1536,28 @@ impl ActorOperationPoller {
     /// # Errors
     ///
     /// Returns an error if reconnecting after a cool-off fails.
+    /// Waits until this poller may poll again, or is told to stop.
+    async fn park(&mut self, scaler: &PollerScaler) {
+        let shutdown = &mut self.shutdown;
+        let index = self.index;
+        tokio::select! {
+            _ = scaler.turn(index) => {}
+            _ = async {
+                if shutdown.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+
+    /// Share a scaler with the driver's other pollers; this poller is number
+    /// `index` among them. Without one it always polls.
+    pub fn with_scaler(mut self, scaler: Arc<PollerScaler>, index: usize) -> Self {
+        self.scaler = Some(scaler);
+        self.index = index;
+        self
+    }
+
     pub async fn poll_loop(&mut self) -> Result<()> {
         tracing::info!(
             service_id = %self.config.service_id,
@@ -1481,10 +1614,22 @@ impl ActorOperationPoller {
                 self.consecutive_timeouts = 0;
             }
 
+            // While the driver's polls bring no work for this poller to
+            // share, it waits; a poll that brings work lets it in again.
+            if let Some(scaler) = self.scaler.clone() {
+                if !scaler.may_poll(self.index) {
+                    self.park(&scaler).await;
+                    continue;
+                }
+            }
+
             let result = self.poll_once_inner().await;
 
             match result {
                 Ok(operations) if !operations.is_empty() => {
+                    if let Some(scaler) = &self.scaler {
+                        scaler.worked();
+                    }
                     self.consecutive_idle_polls = 0;
                     self.consecutive_timeouts = 0;
                     consecutive_errors = 0;
@@ -1502,6 +1647,9 @@ impl ActorOperationPoller {
                     // No work, but an answer: the path to the server works.
                     consecutive_errors = 0;
                     self.consecutive_idle_polls = self.consecutive_idle_polls.saturating_add(1);
+                    if let Some(scaler) = &self.scaler {
+                        scaler.idle(self.index);
+                    }
 
                     if self.consecutive_idle_polls >= MAX_CONSECUTIVE_IDLE {
                         let backoff = calc_backoff(self.consecutive_idle_polls);
@@ -1525,6 +1673,9 @@ impl ActorOperationPoller {
                 Err(e) => {
                     if e.is_normal_timeout() {
                         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                        if let Some(scaler) = &self.scaler {
+                            scaler.idle(self.index);
+                        }
 
                         if self.consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
                             let backoff = calc_backoff(self.consecutive_timeouts);

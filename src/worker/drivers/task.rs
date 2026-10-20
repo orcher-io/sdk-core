@@ -415,6 +415,10 @@ impl TaskDriver {
         let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
 
         let poller_count = config.poller_count.max(1);
+        // One scaler for all of them: an idle driver holds one poll, a busy
+        // one up to `poller_count`.
+        let scaler =
+            std::sync::Arc::new(crate::worker::poll::scaler::PollerScaler::new(poller_count));
         tracing::info!(
             poller_count = poller_count,
             namespace = %config.namespace,
@@ -443,7 +447,8 @@ impl TaskDriver {
                 shutdown_sender.clone(),
                 task_sender.clone(),
             )
-            .await?;
+            .await?
+            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx);
 
             let poller_id = poller_idx;
             tokio::spawn(async move {
