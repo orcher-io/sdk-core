@@ -69,6 +69,8 @@ struct Script {
     poll_instance_ids: Vec<String>,
     /// The queue each task poll named.
     poll_queues: Vec<String>,
+    /// The identity each task poll carried, which names its poller.
+    poll_identities: Vec<String>,
     /// Answer ShutdownWorker UNIMPLEMENTED and keep polls open, as an engine
     /// before 0.5.0 does.
     old_engine: bool,
@@ -151,6 +153,7 @@ impl ExecutionService for Engine {
             let request = request.into_inner();
             script.poll_instance_ids.push(request.worker_instance_id);
             script.poll_queues.push(request.task_queue);
+            script.poll_identities.push(request.identity);
             script.poll_capabilities.push(request.task_capabilities);
             script.poll_gate.clone()
         };
@@ -1917,6 +1920,95 @@ async fn a_task_is_heartbeated_until_its_result_reaches_the_engine() {
         "heartbeated after its completion was answered"
     );
 
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// The pollers, by number, whose polls reached the engine since `from`.
+fn pollers_seen(engine: &Engine, from: usize) -> std::collections::BTreeSet<String> {
+    engine.script().poll_identities[from..]
+        .iter()
+        .map(|identity| identity.rsplit('-').next().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// A task driver for `engine` with four pollers, which scale with the work.
+async fn scaled_task_driver(engine: &Engine) -> TaskParts {
+    let addr = serve(engine.clone()).await;
+    let (driver, work_rx, result_tx, sessions) = TaskDriver::new(TaskDriverConfig {
+        server_url: format!("http://{addr}"),
+        poller_count: 4,
+        max_concurrent_executions: 8,
+        poll_timeout: Duration::from_secs(1),
+        ..TaskDriverConfig::default()
+    })
+    .await
+    .unwrap();
+    TaskParts {
+        driver: driver.with_completion_retry(quick()),
+        work_rx,
+        result_tx,
+        sessions,
+    }
+}
+
+/// An idle driver holds one poll, however many pollers it may use (#34).
+#[tokio::test]
+async fn an_idle_task_driver_holds_one_poll() {
+    let engine = Engine::default();
+    let parts = scaled_task_driver(&engine).await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    wait_for(|| engine.script().polls_started >= 4).await;
+    assert_eq!(
+        pollers_seen(&engine, 0),
+        std::collections::BTreeSet::from(["0".to_string()]),
+        "only the first poller polls while there is no work"
+    );
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// Polls that bring work let more pollers poll, and once the work stops
+/// they step back down to one (#34).
+#[tokio::test]
+async fn task_pollers_scale_up_with_work_and_back_down_without_it() {
+    let engine = Engine::default();
+    {
+        let mut script = engine.script();
+        for i in 0..12 {
+            script
+                .tasks
+                .push_back(task(&format!("t-{i}"), &format!("tok-{i}")));
+        }
+    }
+    let mut parts = scaled_task_driver(&engine).await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    for _ in 0..12 {
+        let work = next_work(&mut parts.work_rx).await;
+        parts.result_tx.send(succeeded(&work)).await.unwrap();
+    }
+    assert!(
+        pollers_seen(&engine, 0).len() > 1,
+        "work let more pollers poll: {:?}",
+        pollers_seen(&engine, 0)
+    );
+
+    // Empty polls retire the extra pollers, highest first, down to one.
+    let settled = engine.script().polls_started;
+    wait_for(|| engine.script().polls_started >= settled + 12).await;
+    let quiet = engine.script().polls_started;
+    wait_for(|| engine.script().polls_started >= quiet + 4).await;
+    assert_eq!(
+        pollers_seen(&engine, quiet),
+        std::collections::BTreeSet::from(["0".to_string()]),
+        "back to one poller once the work stopped"
+    );
     handle.shutdown();
     stops_within(running, GRACE + MARGIN).await;
 }
