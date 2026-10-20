@@ -18,7 +18,7 @@ use crate::state::cache::WorkflowCache;
 use crate::state::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
 use crate::transport::channel::ChannelManager;
 use crate::types::WorkflowExecution;
-use crate::worker::governor::{InFlight, SlotBudget, SlotPermit};
+use crate::worker::governor::{Credits, InFlight, SlotBudget, SlotPermit};
 use crate::worker::lifecycle::Leftover;
 use crate::worker::poll::completion::{
     activation_token, Caller, Completer, CompletionRetryConfig, EagerTasks, Report,
@@ -323,6 +323,8 @@ pub struct WorkflowDriver {
     metrics: Option<Arc<SharedWorkerMetrics>>,
     /// How hard to try to deliver each completion and failure report.
     completion_retry: CompletionRetryConfig,
+    /// The activations this driver may have claimed, shared with its pollers.
+    credits: Arc<Credits>,
 }
 
 impl WorkflowDriver {
@@ -364,6 +366,9 @@ impl WorkflowDriver {
         // one up to `poller_count`.
         let scaler =
             std::sync::Arc::new(crate::worker::poll::scaler::PollerScaler::new(poller_count));
+        // One credit per activation the driver can run: its pollers claim no
+        // more than that.
+        let credits = Arc::new(Credits::new(config.max_concurrent_executions));
         tracing::info!(
             poller_count = poller_count,
             namespace = %config.namespace,
@@ -394,7 +399,8 @@ impl WorkflowDriver {
                 task_sender.clone(),
             )
             .await?
-            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx);
+            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx)
+            .with_credits(Arc::clone(&credits));
 
             let poller_id = poller_idx;
             tokio::spawn(async move {
@@ -426,6 +432,7 @@ impl WorkflowDriver {
             eager_task_injector: None,
             metrics: None,
             completion_retry: CompletionRetryConfig::default(),
+            credits,
         };
 
         Ok((driver, work_receiver, result_sender))
@@ -521,7 +528,15 @@ impl WorkflowDriver {
         let completer = self.completer();
         let metrics = self.metrics.clone();
         let wire = Arc::clone(&self.config.wire);
+        let credits = Arc::clone(&self.credits);
         let send = |report: Report, succeeded: bool| {
+            // The activation's credit is given back once its report has been
+            // sent, or given up on: until then it is still this driver's
+            // work. One held to be tried again later is not run meanwhile,
+            // so its credit goes back at once.
+            let credit = credits
+                .give_back(report.token())
+                .filter(|_| !report.waits());
             let completer = completer.clone();
             let metrics = metrics.clone();
             let wire = Arc::clone(&wire);
@@ -543,6 +558,7 @@ impl WorkflowDriver {
                 if let Some(metrics) = metrics {
                     metrics.workflow_finished(succeeded);
                 }
+                drop(credit);
             }
         };
         // A slot for the next report, taken before anything that may produce
@@ -742,6 +758,7 @@ impl WorkflowDriver {
             );
             let completer = completer.clone();
             let release = Report::Release(leftover(task));
+            drop(self.credits.give_back(release.token()));
             in_flight.spawn(async move { completer.send(release).await }, None);
         }
     }

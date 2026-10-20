@@ -11,7 +11,12 @@
 //! - **Task**: a unit of work that a workflow schedules.
 //! - **Execution step**: a point where the workflow's code runs to decide what happens next.
 
+use crate::worker::governor::{Credit, Credits};
 use crate::worker::poll::scaler::PollerScaler;
+
+/// How long the engine holds an activation claimed by a worker before giving
+/// it to another: its default claim timeout.
+const ACTIVATION_CLAIM: Duration = Duration::from_secs(300);
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -308,6 +313,10 @@ pub struct WorkflowExecutionPoller {
     /// Shared with the driver's other pollers: whether this one may poll now.
     scaler: Option<Arc<PollerScaler>>,
 
+    /// Shared with the driver: a credit is taken before each poll and spent
+    /// on the work it brings.
+    credits: Option<Arc<Credits>>,
+
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 
@@ -398,6 +407,7 @@ impl WorkflowExecutionPoller {
             task_sender,
             poll_request_template,
             scaler: None,
+            credits: None,
             index: 0,
             server_url: address,
             consecutive_idle_polls: 0,
@@ -406,6 +416,21 @@ impl WorkflowExecutionPoller {
         };
 
         Ok(poller)
+    }
+
+    /// Share a scaler with the driver's other pollers; this poller is number
+    /// `index` among them. Without one it always polls.
+    pub fn with_scaler(mut self, scaler: Arc<PollerScaler>, index: usize) -> Self {
+        self.scaler = Some(scaler);
+        self.index = index;
+        self
+    }
+
+    /// Poll only with a credit from the driver's, spent on the activation the
+    /// poll brings. Without credits it polls whatever the driver has in hand.
+    pub(crate) fn with_credits(mut self, credits: Arc<Credits>) -> Self {
+        self.credits = Some(credits);
+        self
     }
 
     /// Polls for workflow execution steps until shutdown.
@@ -417,14 +442,6 @@ impl WorkflowExecutionPoller {
     /// # Errors
     ///
     /// Returns an error if reconnecting after a cool-off fails.
-    /// Share a scaler with the driver's other pollers; this poller is number
-    /// `index` among them. Without one it always polls.
-    pub fn with_scaler(mut self, scaler: Arc<PollerScaler>, index: usize) -> Self {
-        self.scaler = Some(scaler);
-        self.index = index;
-        self
-    }
-
     pub async fn poll_loop(&mut self) -> Result<()> {
         tracing::info!(
             task_queue = %self.config.task_queue,
@@ -520,6 +537,17 @@ impl WorkflowExecutionPoller {
                 }
             }
 
+            // Only with room for what the poll brings: with every credit
+            // spent on work not yet reported, it waits.
+            let credit = match self.credits.clone() {
+                Some(credits) => match self.wait_for_credit(&credits).await {
+                    Some(credit) => Some(credit),
+                    // Told to stop: the check above ends the loop.
+                    None => continue,
+                },
+                None => None,
+            };
+
             // Poll for work; this waits up to `poll_timeout_seconds`.
             //
             // Abandoned only when the driver has stopped taking activations:
@@ -557,7 +585,17 @@ impl WorkflowExecutionPoller {
                         workflow_type = %task.workflow_type,
                         "Received workflow execution task"
                     );
+                    let token = crate::worker::poll::completion::activation_token(
+                        task.task_token.clone(),
+                        task.stream_entry_id.as_deref(),
+                    );
+                    if let (Some(credits), Some(credit)) = (&self.credits, credit) {
+                        credits.spend(credit, token.clone(), Some(ACTIVATION_CLAIM));
+                    }
                     if let Err(mpsc::error::SendError(task)) = self.task_sender.send(task).await {
+                        if let Some(credits) = &self.credits {
+                            drop(credits.give_back(&token));
+                        }
                         // The engine counts this activation as claimed by this
                         // worker. Handed back, it goes to the next poll
                         // immediately. An engine that cannot take it back holds
@@ -574,6 +612,7 @@ impl WorkflowExecutionPoller {
                     }
                 }
                 Ok(None) => {
+                    drop(credit);
                     // No work available - server timed out after long-poll
                     tracing::trace!("No workflow execution work available (timeout)");
                     // An empty answer is still an answer: the path works again.
@@ -606,6 +645,7 @@ impl WorkflowExecutionPoller {
                     self.pause(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
+                    drop(credit);
                     // Timeouts are normal during long polling; they are not warnings.
                     if e.is_normal_timeout() {
                         tracing::trace!(
@@ -679,9 +719,6 @@ impl WorkflowExecutionPoller {
         Ok(())
     }
 
-    /// Waits `duration` between polls, or less if the poller is told to stop
-    /// meanwhile, so a shutdown is not held up by a backoff of up to thirty
-    /// seconds.
     /// Waits until this poller may poll again, or is told to stop.
     async fn park(&mut self, scaler: &PollerScaler) {
         let driver_gone = self.task_sender.clone();
@@ -698,6 +735,24 @@ impl WorkflowExecutionPoller {
         }
     }
 
+    /// Waits for a credit to poll with; `None` if told to stop meanwhile.
+    async fn wait_for_credit(&mut self, credits: &Credits) -> Option<Credit> {
+        let driver_gone = self.task_sender.clone();
+        let shutdown = &mut self.shutdown;
+        tokio::select! {
+            credit = credits.acquire() => Some(credit),
+            _ = driver_gone.closed() => None,
+            _ = async {
+                if shutdown.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => None,
+        }
+    }
+
+    /// Waits `duration` between polls, or less if the poller is told to stop
+    /// meanwhile, so a shutdown is not held up by a backoff of up to thirty
+    /// seconds.
     async fn pause(&mut self, duration: Duration) {
         let driver_gone = self.task_sender.clone();
         let shutdown = &mut self.shutdown;
@@ -899,6 +954,10 @@ pub struct TaskExecutionPoller {
     /// Shared with the driver's other pollers: whether this one may poll now.
     scaler: Option<Arc<PollerScaler>>,
 
+    /// Shared with the driver: a credit is taken before each poll and spent
+    /// on the work it brings.
+    credits: Option<Arc<Credits>>,
+
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 }
@@ -979,18 +1038,13 @@ impl TaskExecutionPoller {
             task_sender,
             poll_request_template,
             scaler: None,
+            credits: None,
             index: 0,
         };
 
         Ok(poller)
     }
 
-    /// Polls for task executions until shutdown.
-    ///
-    /// Runs until shutdown is requested or the driver stops taking tasks.
-    /// Polled tasks are sent through `task_sender`. Errors from the server are
-    /// retried after a pause and never end the loop, so this always returns
-    /// `Ok`.
     /// Share a scaler with the driver's other pollers; this poller is number
     /// `index` among them. Without one it always polls.
     pub fn with_scaler(mut self, scaler: Arc<PollerScaler>, index: usize) -> Self {
@@ -999,6 +1053,19 @@ impl TaskExecutionPoller {
         self
     }
 
+    /// Poll only with a credit from the driver's, spent on the task the poll
+    /// brings. Without credits it polls whatever the driver has in hand.
+    pub(crate) fn with_credits(mut self, credits: Arc<Credits>) -> Self {
+        self.credits = Some(credits);
+        self
+    }
+
+    /// Polls for task executions until shutdown.
+    ///
+    /// Runs until shutdown is requested or the driver stops taking tasks.
+    /// Polled tasks are sent through `task_sender`. Errors from the server are
+    /// retried after a pause and never end the loop, so this always returns
+    /// `Ok`.
     pub async fn poll_loop(&mut self) -> Result<()> {
         tracing::info!(
             task_queue = %self.config.task_queue,
@@ -1084,6 +1151,17 @@ impl TaskExecutionPoller {
                 }
             }
 
+            // Only with room for what the poll brings: with every credit
+            // spent on work not yet reported, it waits.
+            let credit = match self.credits.clone() {
+                Some(credits) => match self.wait_for_credit(&credits).await {
+                    Some(credit) => Some(credit),
+                    // Told to stop: the check above ends the loop.
+                    None => continue,
+                },
+                None => None,
+            };
+
             // Poll for work; this waits up to `poll_timeout_seconds`.
             //
             // Abandoned only when the driver has stopped taking tasks: its
@@ -1121,7 +1199,14 @@ impl TaskExecutionPoller {
                     consecutive_idle_polls = 0;
                     consecutive_timeouts = 0;
 
+                    let token = task.task_token.clone();
+                    if let (Some(credits), Some(credit)) = (&self.credits, credit) {
+                        credits.spend(credit, token.clone(), task.start_to_close_timeout);
+                    }
                     if let Err(mpsc::error::SendError(task)) = self.task_sender.send(task).await {
+                        if let Some(credits) = &self.credits {
+                            drop(credits.give_back(&token));
+                        }
                         // The engine has started this task for this worker;
                         // nothing gives it back, so it waits out its
                         // start-to-close timeout. Logged as an error so the
@@ -1137,6 +1222,7 @@ impl TaskExecutionPoller {
                     }
                 }
                 Ok(None) => {
+                    drop(credit);
                     // No work available - server timed out after long-poll
                     tracing::trace!("No task work available (timeout)");
 
@@ -1170,6 +1256,7 @@ impl TaskExecutionPoller {
                     self.pause(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
+                    drop(credit);
                     // Timeouts are normal during long polling; they are not warnings.
                     if e.is_normal_timeout() {
                         tracing::trace!(
@@ -1227,8 +1314,6 @@ impl TaskExecutionPoller {
         Ok(())
     }
 
-    /// Waits `duration` between polls, or less if the poller is told to stop
-    /// meanwhile, so a shutdown is not held up by a backoff.
     /// Waits until this poller may poll again, or is told to stop.
     async fn park(&mut self, scaler: &PollerScaler) {
         let driver_gone = self.task_sender.clone();
@@ -1245,6 +1330,23 @@ impl TaskExecutionPoller {
         }
     }
 
+    /// Waits for a credit to poll with; `None` if told to stop meanwhile.
+    async fn wait_for_credit(&mut self, credits: &Credits) -> Option<Credit> {
+        let driver_gone = self.task_sender.clone();
+        let shutdown = &mut self.shutdown;
+        tokio::select! {
+            credit = credits.acquire() => Some(credit),
+            _ = driver_gone.closed() => None,
+            _ = async {
+                if shutdown.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => None,
+        }
+    }
+
+    /// Waits `duration` between polls, or less if the poller is told to stop
+    /// meanwhile, so a shutdown is not held up by a backoff.
     async fn pause(&mut self, duration: Duration) {
         let driver_gone = self.task_sender.clone();
         let shutdown = &mut self.shutdown;

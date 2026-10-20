@@ -2012,3 +2012,95 @@ async fn task_pollers_scale_up_with_work_and_back_down_without_it() {
     handle.shutdown();
     stops_within(running, GRACE + MARGIN).await;
 }
+
+/// How many of the scripted tasks the engine has handed out.
+fn claimed(engine: &Engine, scripted: usize) -> usize {
+    scripted - engine.script().tasks.len()
+}
+
+/// A driver claims only the tasks it has room to run: with every one it can
+/// run handed over and unanswered, its pollers wait rather than claim more
+/// for a buffer, where they would sit claimed while other workers idle.
+/// Each answer makes room for one more.
+#[tokio::test]
+async fn a_busy_driver_claims_no_more_tasks_than_it_can_run() {
+    let engine = Engine::default();
+    for n in 0..6 {
+        engine
+            .script()
+            .tasks
+            .push_back(task(&format!("t-{n}"), &format!("tok-{n}")));
+    }
+    // Four pollers for two places, so it is not the poller count that holds
+    // the claims down.
+    let addr = serve(engine.clone()).await;
+    let (driver, mut work_rx, result_tx, _sessions) = TaskDriver::new(TaskDriverConfig {
+        server_url: format!("http://{addr}"),
+        max_concurrent_executions: 2,
+        poller_count: 4,
+        poll_timeout: Duration::from_secs(1),
+        ..TaskDriverConfig::default()
+    })
+    .await
+    .unwrap();
+    let mut driver = driver.with_completion_retry(quick());
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let first = next_work(&mut work_rx).await;
+    let _second = next_work(&mut work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(claimed(&engine, 6), 2, "claimed beyond what it can run");
+
+    result_tx.send(succeeded(&first)).await.unwrap();
+    let _third = next_work(&mut work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(claimed(&engine, 6), 3, "one answer, one more claim");
+
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// A task the language SDK never answers holds its place only as long as
+/// the engine holds its claim: once its start-to-close timeout has passed,
+/// the engine has given it to someone else, and the driver claims another.
+#[tokio::test]
+async fn a_task_never_answered_gives_its_place_back_when_its_claim_lapses() {
+    let engine = Engine::default();
+    {
+        let mut script = engine.script();
+        script.tasks.push_back(PollTaskExecutionResponse {
+            start_to_close_timeout: Some(crate::proto::prost_types::Duration {
+                seconds: 1,
+                nanos: 0,
+            }),
+            ..task("t-lost", "tok-lost")
+        });
+        script.tasks.push_back(task("t-next", "tok-next"));
+    }
+    let mut parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            max_concurrent_executions: 1,
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let lost = next_work(&mut parts.work_rx).await;
+    assert_eq!(lost.task.task_id, "t-lost");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        claimed(&engine, 2),
+        1,
+        "claimed while the first still held its place"
+    );
+
+    let next = next_work(&mut parts.work_rx).await;
+    assert_eq!(next.task.task_id, "t-next");
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}

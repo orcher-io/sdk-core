@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::PollTaskExecutionResponse;
 use crate::transport::channel::ChannelManager;
-use crate::worker::governor::{InFlight, SlotBudget, SlotPermit};
+use crate::worker::governor::{Credits, InFlight, SlotBudget, SlotPermit};
 use crate::worker::heartbeat::{TaskHeartbeat, TaskHeartbeats};
 use crate::worker::poll::completion::{
     Caller, Completer, CompletionRetryConfig, TaskIds, TaskReport,
@@ -378,6 +378,8 @@ pub struct TaskDriver {
     completion_retry: CompletionRetryConfig,
     /// The heartbeats of the tasks handed to the language SDK.
     heartbeats: TaskHeartbeats,
+    /// The tasks this driver may have claimed, shared with its pollers.
+    credits: Arc<Credits>,
 }
 
 impl TaskDriver {
@@ -426,6 +428,9 @@ impl TaskDriver {
         // one up to `poller_count`.
         let scaler =
             std::sync::Arc::new(crate::worker::poll::scaler::PollerScaler::new(poller_count));
+        // One credit per task the driver can run: its pollers, the session
+        // pollers among them, claim no more than that.
+        let credits = Arc::new(Credits::new(config.max_concurrent_executions));
         tracing::info!(
             poller_count = poller_count,
             namespace = %config.namespace,
@@ -456,7 +461,8 @@ impl TaskDriver {
                 task_sender.clone(),
             )
             .await?
-            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx);
+            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx)
+            .with_credits(Arc::clone(&credits));
 
             let poller_id = poller_idx;
             tokio::spawn(async move {
@@ -489,6 +495,7 @@ impl TaskDriver {
             metrics: None,
             completion_retry: CompletionRetryConfig::default(),
             heartbeats,
+            credits,
         };
 
         Ok((driver, work_receiver, result_sender, session_queue_tx))
@@ -578,9 +585,13 @@ impl TaskDriver {
         let stopped = follow_shutdown(&self.shutdown_sender, &stop);
         let config = Arc::clone(&self.config);
         let queues = Arc::clone(&self.session_queues);
+        let credits = Arc::clone(&self.credits);
         tokio::spawn(async move {
             match session_poller(&config, stop, task_sender, &session_queue).await {
-                Ok(poller) => run_session_poller(poller, session_queue, queues, stopped).await,
+                Ok(poller) => {
+                    let poller = poller.with_credits(credits);
+                    run_session_poller(poller, session_queue, queues, stopped).await
+                }
                 Err(e) => {
                     tracing::error!(
                         session_queue = %session_queue,
@@ -638,7 +649,11 @@ impl TaskDriver {
         let default_queue = self.config.task_queue.clone();
         let heartbeats = self.heartbeats.clone();
         let wire = Arc::clone(&self.config.wire);
+        let credits = Arc::clone(&self.credits);
         let send = |report: TaskReport, succeeded: bool| {
+            // The task's credit is given back once its report has been sent,
+            // or given up on: until then it is still this driver's work.
+            let credit = credits.give_back(report.token());
             let completer = completer.clone();
             let metrics = metrics.clone();
             let eager_work = eager_work.clone();
@@ -665,6 +680,7 @@ impl TaskDriver {
                 if let Some(metrics) = metrics {
                     metrics.task_finished(succeeded);
                 }
+                drop(credit);
             }
         };
         // A slot for the next report, taken before a result is accepted and
@@ -889,6 +905,7 @@ impl TaskDriver {
             if let Some(metrics) = &self.metrics {
                 metrics.task_finished(false);
             }
+            drop(self.credits.give_back(&token));
         } else {
             handed.insert(token, ids);
         }
@@ -908,6 +925,7 @@ impl TaskDriver {
                 workflow_id = %task.execution.workflow_id,
                 "Task received but never handed over; it waits out its start-to-close timeout"
             );
+            drop(self.credits.give_back(&task.task_token));
         }
     }
 
