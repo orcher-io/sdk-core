@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/orcher-io/sdk-core/compare/v0.17.1...v0.18.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* the driver and poller configurations gain a wire field (the worker's WireMetrics; each has its own by default), connect_channel takes the metrics to record into and returns a WireChannel, and the clients built on a worker's channels are generic over WireChannel instead of Channel.
+
+### Features
+
+* count the work a worker hands its language and reports back ([#116](https://github.com/orcher-io/sdk-core/issues/116)) ([24aa6a2](https://github.com/orcher-io/sdk-core/commit/24aa6a2b85816ea5ecb93f9659ae87f89118e91c))
+* measure a worker's calls to the engine on the wire ([#115](https://github.com/orcher-io/sdk-core/issues/115)) ([5f045e5](https://github.com/orcher-io/sdk-core/commit/5f045e5d9f861905d1a3b017982d439f63395f37))
+* scale each driver's pollers with the work their polls bring ([#113](https://github.com/orcher-io/sdk-core/issues/113)) ([a2d9c5a](https://github.com/orcher-io/sdk-core/commit/a2d9c5afa7acafcee2b200cb61b5c7bde074cda1)), closes [#34](https://github.com/orcher-io/sdk-core/issues/34)
+
 ## [0.17.1](https://github.com/orcher-io/sdk-core/compare/v0.17.0...v0.17.1) (2026-10-19)
 
 
