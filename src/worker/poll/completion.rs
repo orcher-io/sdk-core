@@ -509,6 +509,14 @@ impl Report {
     pub(crate) fn waits(&self) -> bool {
         matches!(self, Report::Retry { .. })
     }
+
+    /// The activation token it answers.
+    pub(crate) fn token(&self) -> &[u8] {
+        match self {
+            Report::Complete { token, .. } | Report::Fail { token, .. } => token,
+            Report::Release(leftover) | Report::Retry { leftover, .. } => &leftover.token,
+        }
+    }
 }
 
 /// One task attempt's outcome, ready to send.

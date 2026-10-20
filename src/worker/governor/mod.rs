@@ -13,16 +13,21 @@
 //!   a backlog of reports holds the language SDK and the pollers back.
 //! - [`InFlight`]: the reports a driver is still sending, each from a task
 //!   of its own, and the bounded wait for them when the driver stops.
+//! - [`Credits`]: the work a driver may have claimed from the engine. The
+//!   workflow and task drivers' pollers take a credit before each poll, so a
+//!   driver claims only the work it has room to run, and the credit is held
+//!   until that work has been reported.
 //!
 //! This is where the worker's resource model is meant to grow: one budget
 //! shared across the three drivers, with today's per-driver limits as
 //! ceilings within it; pressure signals (process CPU and memory, and a
-//! signal from the language runtime) feeding admission; and polling that
-//! asks only for the work there is capacity to run. None of that is built
-//! yet, and nothing here changes how the drivers poll.
+//! signal from the language runtime) feeding admission; and polls that ask
+//! for as many items as there are free credits.
 
 mod budget;
+mod credits;
 mod in_flight;
 
 pub(crate) use budget::{SlotBudget, SlotPermit};
+pub(crate) use credits::{Credit, Credits};
 pub(crate) use in_flight::InFlight;

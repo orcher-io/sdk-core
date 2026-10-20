@@ -1707,34 +1707,80 @@ async fn slow_to_stop(engine: &Engine, max_concurrent_executions: usize) -> Work
 
 const AT_ONCE: Duration = Duration::from_millis(1000);
 
+/// A driver with one report slot, and an engine that holds every completion
+/// until the test lets it through. Once the language SDK has answered one
+/// activation, its completion holds the slot, and the driver takes no more
+/// activations meanwhile: the ones its pollers bring wait in the driver.
+async fn held_by_one_report(
+    engine: &Engine,
+    max_concurrent_executions: usize,
+) -> (WorkflowDriverParts, Arc<tokio::sync::Semaphore>) {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    engine.0.lock().unwrap().gate = Some(Arc::clone(&gate));
+    let (driver, work_rx, result_tx) = slow_to_stop(engine, max_concurrent_executions).await;
+    let driver = driver.with_completion_retry(
+        quick()
+            .with_shutdown_grace(Duration::from_secs(3))
+            .with_max_in_flight(1),
+    );
+    ((driver, work_rx, result_tx), gate)
+}
+
+/// The language SDK's successful answer to an activation it was handed.
+fn answered(work: &crate::worker::drivers::WorkflowWork) -> WorkflowWorkResult {
+    WorkflowWorkResult {
+        workflow_id: work.task.execution.workflow_id.clone(),
+        run_id: work.task.execution.run_id.clone(),
+        task_token: work.task.task_token.clone(),
+        stream_entry_id: work.stream_entry_id.clone(),
+        result: Ok(ExecutionResult::success(
+            work.task.execution.run_id.clone(),
+            vec![BridgeCommand::CompleteWorkflow(CompleteWorkflowCommand {
+                result: crate::Payload::json(b"{}".to_vec()),
+            })],
+        )),
+    }
+}
+
+fn names(logs: &StdMutex<Vec<u8>>, workflow_id: &str) -> bool {
+    String::from_utf8(logs.lock().unwrap().clone())
+        .unwrap()
+        .contains(workflow_id)
+}
+
 /// The order some bindings stop in: the language side stops taking work
-/// first, and the driver is shut down afterwards. One activation was handed
-/// over and left unread; another was polled but could not be handed over.
-/// The driver stops at once, rather than waiting the grace for a result that
-/// cannot come, and names the activation it could not hand over.
+/// first, and the driver is shut down afterwards. One activation was
+/// answered, and another was polled but waits in the driver. The driver
+/// stops at once, rather than waiting the grace for a result that cannot
+/// come, and names the activation it could not hand over.
 #[tokio::test]
 async fn a_driver_shut_down_after_its_sdk_stopped_taking_work_stops_at_once() {
     let (logs, _logging) = capture_logs();
     let engine = Engine::default();
     {
         let mut script = engine.0.lock().unwrap();
-        script.polls.push_back(activation("wf-unread", "act1.dQ"));
+        script.polls.push_back(activation("wf-answered", "act1.dQ"));
         script.polls.push_back(activation("wf-waiting", "act1.dw"));
         // An engine before 0.5.0, which cannot take the activation back.
         script.old_engine = true;
     }
-    // One place in each channel: the first activation fills the SDK's, and
-    // the second waits in the driver's.
-    let (mut driver, work_rx, _result_tx) = slow_to_stop(&engine, 1).await;
+    let ((mut driver, mut work_rx, result_tx), gate) = held_by_one_report(&engine, 2).await;
     let handle = driver.shutdown_handle();
     let running = tokio::spawn(async move { driver.run().await });
 
-    // A third poll has started only once the second activation was passed
-    // to the driver.
-    wait_for(|| engine.0.lock().unwrap().polls_started >= 3).await;
-    assert_eq!(engine.handed_out(), vec!["wf-unread", "wf-waiting"]);
+    let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+        .await
+        .expect("an activation handed over")
+        .unwrap();
+    result_tx.send(answered(&work)).await.unwrap();
+    wait_for(|| engine.handed_out().len() >= 2).await;
+    assert_eq!(engine.handed_out(), vec!["wf-answered", "wf-waiting"]);
+    // Time for the second to reach the driver, where it waits.
+    tokio::time::sleep(Duration::from_millis(200)).await;
     drop(work_rx);
-    tokio::task::yield_now().await;
+    wait_for(|| !engine.releases().is_empty()).await;
+    gate.add_permits(10);
+    wait_for(|| engine.completes().len() == 1).await;
 
     let asked = Instant::now();
     handle.shutdown();
@@ -1749,7 +1795,7 @@ async fn a_driver_shut_down_after_its_sdk_stopped_taking_work_stops_at_once() {
         asked.elapsed()
     );
     assert!(
-        error_names(&logs, "wf-waiting"),
+        names(&logs, "wf-waiting"),
         "the stranded activation was not named"
     );
     // Offered back, answered UNIMPLEMENTED, and left to its claim.
@@ -1760,30 +1806,34 @@ async fn a_driver_shut_down_after_its_sdk_stopped_taking_work_stops_at_once() {
 }
 
 /// Activations received but never handed to the SDK are handed back with the
-/// token their poll carried: one waiting in the driver, and one the poller
-/// that brought it could no longer pass on. Neither is left to its claim.
+/// token their poll carried, not left to their claim, and not reported as
+/// errors.
 #[tokio::test]
 async fn activations_never_handed_over_are_released_with_their_tokens() {
     let (logs, _logging) = capture_logs();
     let engine = Engine::default();
     {
         let mut script = engine.0.lock().unwrap();
-        script.polls.push_back(activation("wf-unread", "act1.dQ"));
+        script.polls.push_back(activation("wf-answered", "act1.dQ"));
         script.polls.push_back(activation("wf-waiting", "act1.dw"));
-        script.polls.push_back(activation("wf-poller", "act1.dA"));
+        script
+            .polls
+            .push_back(activation("wf-also-waiting", "act1.dA"));
     }
-    // One place in each channel: the first activation fills the SDK's, the
-    // second waits in the driver's, and the third in its poller.
-    let (mut driver, work_rx, _result_tx) = slow_to_stop(&engine, 1).await;
+    let ((mut driver, mut work_rx, result_tx), gate) = held_by_one_report(&engine, 3).await;
     let handle = driver.shutdown_handle();
     let running = tokio::spawn(async move { driver.run().await });
 
+    let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+        .await
+        .expect("an activation handed over")
+        .unwrap();
+    result_tx.send(answered(&work)).await.unwrap();
     wait_for(|| engine.handed_out().len() >= 3).await;
-    // Time for the third to reach its poller, which then waits on the
-    // driver's full channel.
     tokio::time::sleep(Duration::from_millis(200)).await;
     drop(work_rx);
-    tokio::task::yield_now().await;
+    wait_for(|| engine.releases().len() >= 2).await;
+    gate.add_permits(10);
 
     let asked = Instant::now();
     handle.shutdown();
@@ -1797,18 +1847,17 @@ async fn activations_never_handed_over_are_released_with_their_tokens() {
         "stopping took {:?}",
         asked.elapsed()
     );
-    wait_for(|| engine.releases().len() >= 2).await;
     let mut released = engine.releases();
     released.sort();
     assert_eq!(
         released,
         vec![
-            ("wf-poller".to_string(), b"act1.dA".to_vec()),
+            ("wf-also-waiting".to_string(), b"act1.dA".to_vec()),
             ("wf-waiting".to_string(), b"act1.dw".to_vec()),
         ]
     );
     assert!(!error_names(&logs, "wf-waiting"));
-    assert!(!error_names(&logs, "wf-poller"));
+    assert!(!error_names(&logs, "wf-also-waiting"));
 }
 
 /// An idle driver has room in the SDK's channel reserved for the next
@@ -2844,4 +2893,61 @@ async fn workflow_reports_default_to_the_baseline_protocol_version() {
         crate::WORKER_PROTOCOL_VERSION,
         crate::worker_protocol::BASELINE
     );
+}
+
+/// A driver claims only the activations it has room to run: with every one
+/// it can run handed over and unanswered, its pollers wait rather than claim
+/// more for a buffer, where they would sit claimed until their claim timed
+/// out and was given to another worker. Each answer makes room for one more.
+#[tokio::test]
+async fn a_busy_driver_claims_no_more_activations_than_it_can_run() {
+    let engine = Engine::default();
+    for n in 0..6 {
+        engine
+            .0
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(activation(&format!("wf-{n}"), &format!("act1.{n}")));
+    }
+    // Four pollers for two places, so it is not the poller count that holds
+    // the claims down.
+    let (driver, mut work_rx, result_tx) = driver_for(
+        &engine,
+        WorkflowDriverConfig {
+            max_concurrent_executions: 2,
+            poller_count: 4,
+            ..test_config()
+        },
+    )
+    .await;
+    let mut driver = driver.with_completion_retry(quick());
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let first = next_activation(&mut work_rx).await;
+    let _second = next_activation(&mut work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        engine.handed_out().len(),
+        2,
+        "claimed beyond what it can run"
+    );
+
+    result_tx.send(answered(&first)).await.unwrap();
+    let _third = next_activation(&mut work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(engine.handed_out().len(), 3, "one answer, one more claim");
+
+    handle.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(10), running).await;
+}
+
+async fn next_activation(
+    work_rx: &mut mpsc::Receiver<crate::worker::drivers::WorkflowWork>,
+) -> crate::worker::drivers::WorkflowWork {
+    tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+        .await
+        .expect("an activation handed over")
+        .expect("the driver is running")
 }
