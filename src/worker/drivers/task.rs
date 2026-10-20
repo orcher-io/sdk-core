@@ -637,17 +637,24 @@ impl TaskDriver {
         let eager_work = self.work_sender.clone();
         let default_queue = self.config.task_queue.clone();
         let heartbeats = self.heartbeats.clone();
+        let wire = Arc::clone(&self.config.wire);
         let send = |report: TaskReport, succeeded: bool| {
             let completer = completer.clone();
             let metrics = metrics.clone();
             let eager_work = eager_work.clone();
             let default_queue = default_queue.clone();
             let heartbeats = heartbeats.clone();
+            let wire = Arc::clone(&wire);
             async move {
                 let token = report.token().to_vec();
+                let (result_bytes, failed) = match &report {
+                    TaskReport::Complete { result, .. } => (result.len(), false),
+                    TaskReport::Fail { .. } => (0, true),
+                };
                 completer
                     .send_task(report, Some(&eager_work), &default_queue)
                     .await;
+                wire.record_task_report(result_bytes, failed);
                 // The task is heartbeated until its outcome has reached the
                 // engine or been given up on: a report retried for a while
                 // must not find its attempt timed out for lack of heartbeats.
@@ -855,6 +862,7 @@ impl TaskDriver {
         if let Some(metrics) = &self.metrics {
             metrics.task_started();
         }
+        self.config.wire.record_task(task.input.len());
         let token = task.task_token.clone();
         let ids = TaskIds {
             task_id: task.task_id.clone(),

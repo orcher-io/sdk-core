@@ -520,11 +520,23 @@ impl WorkflowDriver {
         let mut in_flight = InFlight::new("Workflow driver", "workflow completions");
         let completer = self.completer();
         let metrics = self.metrics.clone();
+        let wire = Arc::clone(&self.config.wire);
         let send = |report: Report, succeeded: bool| {
             let completer = completer.clone();
             let metrics = metrics.clone();
+            let wire = Arc::clone(&wire);
             async move {
+                // An activation released or held to be retried is handed back, not
+                // reported.
+                let reported = match &report {
+                    Report::Complete { commands, .. } => Some((commands.len(), false)),
+                    Report::Fail { .. } => Some((0, true)),
+                    Report::Release(_) | Report::Retry { .. } => None,
+                };
                 completer.send(report).await;
+                if let Some((commands, failed)) = reported {
+                    wire.record_workflow_report(commands, failed);
+                }
                 // Counted when the outcome has reached the engine, or been
                 // given up on: until then the activation is still this
                 // worker's work.
@@ -753,6 +765,7 @@ impl WorkflowDriver {
         if let Some(metrics) = &self.metrics {
             metrics.workflow_started();
         }
+        self.config.wire.record_activation(task.journal.len());
         let workflow_id = task.execution.workflow_id.clone();
         let run_id = task.execution.run_id.clone();
         let workflow_type = task.workflow_type.clone();

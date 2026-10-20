@@ -10,6 +10,7 @@
 //! is plain data an SDK hands to whatever it reports with.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,10 +25,55 @@ pub const LATENCY_BUCKETS_MS: [u64; 12] =
 #[derive(Debug, Default)]
 pub struct WireMetrics {
     methods: parking_lot::Mutex<BTreeMap<String, MethodStats>>,
+    work: WorkCounters,
+}
+
+/// The work that crossed the wire, counted as it is handed to the language
+/// and as its outcome is sent.
+#[derive(Debug, Default)]
+struct WorkCounters {
+    activations: AtomicU64,
+    activation_journal_entries: AtomicU64,
+    workflow_reports: AtomicU64,
+    workflow_commands: AtomicU64,
+    workflow_failures: AtomicU64,
+    tasks: AtomicU64,
+    task_input_bytes: AtomicU64,
+    task_reports: AtomicU64,
+    task_result_bytes: AtomicU64,
+    task_failures: AtomicU64,
+}
+
+/// The work a worker has handed to its language and reported back, as
+/// [`WireMetrics::snapshot`] reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WorkStats {
+    /// Workflow activations handed to the language.
+    pub activations: u64,
+    /// Journal entries those activations carried.
+    pub activation_journal_entries: u64,
+    /// Workflow activation outcomes sent: completions and failures.
+    pub workflow_reports: u64,
+    /// Commands those completions carried.
+    pub workflow_commands: u64,
+    /// Workflow activation outcomes sent as failures.
+    pub workflow_failures: u64,
+    /// Tasks handed to the language.
+    pub tasks: u64,
+    /// Bytes of those tasks' input.
+    pub task_input_bytes: u64,
+    /// Task outcomes sent: completions and failures.
+    pub task_reports: u64,
+    /// Bytes of the results those completions carried.
+    pub task_result_bytes: u64,
+    /// Task outcomes sent as failures.
+    pub task_failures: u64,
 }
 
 /// What one RPC method has done, as [`WireMetrics::snapshot`] reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MethodStats {
     /// Calls sent.
     pub calls: u64,
@@ -46,10 +92,13 @@ pub struct MethodStats {
 
 /// A copy of a worker's wire measurements at one moment.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WireMetricsSnapshot {
     /// Each RPC method's measurements, by its full gRPC path
     /// (`/orcher.v1.ExecutionService/PollTaskExecution`).
     pub methods: BTreeMap<String, MethodStats>,
+    /// The work the worker handed to its language and reported back.
+    pub work: WorkStats,
 }
 
 /// How a call ended.
@@ -105,6 +154,47 @@ impl WireMetrics {
         methods.entry(method.to_string()).or_default().retries += 1;
     }
 
+    /// Record a workflow activation with `journal_entries` entries handed
+    /// to the language.
+    pub fn record_activation(&self, journal_entries: usize) {
+        let work = &self.work;
+        work.activations.fetch_add(1, Ordering::Relaxed);
+        work.activation_journal_entries
+            .fetch_add(journal_entries as u64, Ordering::Relaxed);
+    }
+
+    /// Record a workflow activation's outcome sent: a completion carrying
+    /// `commands` commands, or a failure.
+    pub fn record_workflow_report(&self, commands: usize, failed: bool) {
+        let work = &self.work;
+        work.workflow_reports.fetch_add(1, Ordering::Relaxed);
+        work.workflow_commands
+            .fetch_add(commands as u64, Ordering::Relaxed);
+        if failed {
+            work.workflow_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a task with `input_bytes` of input handed to the language.
+    pub fn record_task(&self, input_bytes: usize) {
+        let work = &self.work;
+        work.tasks.fetch_add(1, Ordering::Relaxed);
+        work.task_input_bytes
+            .fetch_add(input_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Record a task's outcome sent: a completion with `result_bytes` of
+    /// result, or a failure.
+    pub fn record_task_report(&self, result_bytes: usize, failed: bool) {
+        let work = &self.work;
+        work.task_reports.fetch_add(1, Ordering::Relaxed);
+        work.task_result_bytes
+            .fetch_add(result_bytes as u64, Ordering::Relaxed);
+        if failed {
+            work.task_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Copy the measurements out.
     pub fn snapshot(&self) -> WireMetricsSnapshot {
         let methods = self.methods.lock();
@@ -119,6 +209,26 @@ impl WireMetrics {
                     (method.clone(), stats)
                 })
                 .collect(),
+            work: self.work_stats(),
+        }
+    }
+}
+
+impl WireMetrics {
+    fn work_stats(&self) -> WorkStats {
+        let w = &self.work;
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        WorkStats {
+            activations: load(&w.activations),
+            activation_journal_entries: load(&w.activation_journal_entries),
+            workflow_reports: load(&w.workflow_reports),
+            workflow_commands: load(&w.workflow_commands),
+            workflow_failures: load(&w.workflow_failures),
+            tasks: load(&w.tasks),
+            task_input_bytes: load(&w.task_input_bytes),
+            task_reports: load(&w.task_reports),
+            task_result_bytes: load(&w.task_result_bytes),
+            task_failures: load(&w.task_failures),
         }
     }
 }
@@ -165,5 +275,31 @@ mod tests {
         let json = serde_json::to_string(&snapshot).unwrap();
         let back: WireMetricsSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snapshot);
+    }
+
+    #[test]
+    fn work_is_counted_as_it_is_handed_over_and_reported() {
+        let wire = WireMetrics::new();
+        wire.record_activation(5);
+        wire.record_workflow_report(3, false);
+        wire.record_workflow_report(0, true);
+        wire.record_task(120);
+        wire.record_task_report(40, false);
+        wire.record_task_report(0, true);
+        assert_eq!(
+            wire.snapshot().work,
+            WorkStats {
+                activations: 1,
+                activation_journal_entries: 5,
+                workflow_reports: 2,
+                workflow_commands: 3,
+                workflow_failures: 1,
+                tasks: 1,
+                task_input_bytes: 120,
+                task_reports: 2,
+                task_result_bytes: 40,
+                task_failures: 1,
+            }
+        );
     }
 }
