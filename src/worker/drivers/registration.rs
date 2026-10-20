@@ -85,6 +85,10 @@ pub struct WorkerRegistrationConfig {
     /// [`WorkflowDriverConfig::protocol_version`](crate::WorkflowDriverConfig::protocol_version),
     /// which should be the same.
     pub protocol_version: u32,
+    /// Where this driver's calls to the engine are recorded: the worker's
+    /// wire measurements, shared with its other drivers. A driver has
+    /// measurements of its own unless given these.
+    pub wire: std::sync::Arc<crate::observability::WireMetrics>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -108,6 +112,7 @@ impl std::fmt::Debug for WorkerRegistrationConfig {
             api_key,
             organization_id,
             protocol_version,
+            wire: _,
         } = self;
         f.debug_struct("WorkerRegistrationConfig")
             .field("server_url", server_url)
@@ -154,6 +159,7 @@ impl Default for WorkerRegistrationConfig {
             api_key: None,
             organization_id: None,
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
+            wire: crate::observability::WireMetrics::new(),
         }
     }
 }
@@ -207,7 +213,8 @@ impl WorkerRegistrationDriver {
         let channel_manager = match config.tls_config {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
-        };
+        }
+        .with_wire_metrics(std::sync::Arc::clone(&config.wire));
         let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
 
         let mut driver = Self {

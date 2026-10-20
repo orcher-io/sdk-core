@@ -29,6 +29,7 @@ mod workflows;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use orcher_sdk_core::observability::{WireMetrics, WireMetricsSnapshot};
 use orcher_sdk_core::proto::host::v1::{
     ActorOperation, ActorResult, HeartbeatAnswer, TaskAssignment, TaskOutcome,
 };
@@ -104,6 +105,7 @@ pub struct Host {
 
 struct Inner {
     config: HostConfig,
+    wire: Arc<WireMetrics>,
     needed: NeededDrivers,
     tasks: Option<tasks::Tasks>,
     workflows: Option<workflows::Workflows>,
@@ -147,12 +149,18 @@ impl Host {
                 "the worker registered no workflow, task or actor to run".to_string(),
             ));
         }
+        // One worker's wire measurements, shared by all its connections.
+        let wire = WireMetrics::new();
         let mut stops = Stops::default();
 
         let mut eager_tasks = None;
         let tasks = if needed.tasks {
-            let (driver, work, results, queue_changes) =
-                TaskDriver::new(config.task_driver()).await?;
+            let (driver, work, results, queue_changes) = TaskDriver::new({
+                let mut driver_config = config.task_driver();
+                driver_config.wire = Arc::clone(&wire);
+                driver_config
+            })
+            .await?;
             let mut driver = driver.with_completion_retry(config.completion_retry());
             // Tasks the engine hands back with a workflow's completion reach
             // this worker's task driver without a poll.
@@ -177,7 +185,12 @@ impl Host {
         };
 
         let workflows = if needed.workflows {
-            let (driver, work, results) = WorkflowDriver::new(config.workflow_driver()).await?;
+            let (driver, work, results) = WorkflowDriver::new({
+                let mut driver_config = config.workflow_driver();
+                driver_config.wire = Arc::clone(&wire);
+                driver_config
+            })
+            .await?;
             let driver = driver.with_completion_retry(config.completion_retry());
             let mut driver = match eager_tasks {
                 Some(injector) => driver.with_eager_task_injector(injector),
@@ -210,13 +223,17 @@ impl Host {
                     "actor type {bare} was registered with no operation"
                 )));
             }
-            let service = actors::ActorService::connect(&config).await?;
+            let service = actors::ActorService::connect(&config, &wire).await?;
             let metadata = actors::registration_metadata(&config);
             let registration_id = service
                 .register(&config.identity, &registrations.actor_handlers, &metadata)
                 .await?;
-            let (driver, work, results, events) =
-                ActorDriver::new(config.actor_driver(Some(registration_id))).await?;
+            let (driver, work, results, events) = ActorDriver::new({
+                let mut driver_config = config.actor_driver(Some(registration_id));
+                driver_config.wire = Arc::clone(&wire);
+                driver_config
+            })
+            .await?;
             stops.re_registration = Some(actors::follow_re_registration(
                 service.clone(),
                 config.identity.clone(),
@@ -238,8 +255,12 @@ impl Host {
             None
         };
 
-        let mut registration =
-            WorkerRegistrationDriver::new(config.registration(&registrations)).await?;
+        let mut registration = WorkerRegistrationDriver::new({
+            let mut driver_config = config.registration(&registrations);
+            driver_config.wire = Arc::clone(&wire);
+            driver_config
+        })
+        .await?;
         let stop = registration.shutdown_handle();
         let running = tokio::spawn(async move {
             if let Err(error) = registration.run().await {
@@ -258,6 +279,7 @@ impl Host {
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
+                wire,
                 needed,
                 tasks,
                 workflows,
@@ -265,6 +287,13 @@ impl Host {
                 stops: Mutex::new(stops),
             }),
         })
+    }
+
+    /// What the worker's calls to the engine have done so far, by RPC
+    /// method: calls, latency, outcomes and retries. The same for every
+    /// language SDK, to report as it likes.
+    pub fn wire_metrics(&self) -> WireMetricsSnapshot {
+        self.inner.wire.snapshot()
     }
 
     /// The worker's configuration.

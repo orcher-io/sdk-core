@@ -115,6 +115,10 @@ pub struct WorkflowDriverConfig {
     /// The engine reads it on the activation it answers, so it must match
     /// what the language SDK really does with every activation it is given.
     pub protocol_version: u32,
+    /// Where this driver's calls to the engine are recorded: the worker's
+    /// wire measurements, shared with its other drivers. A driver has
+    /// measurements of its own unless given these.
+    pub wire: std::sync::Arc<crate::observability::WireMetrics>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -139,6 +143,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             non_determinism_retry,
             non_determinism_retry_max,
             protocol_version,
+            wire: _,
         } = self;
         f.debug_struct("WorkflowDriverConfig")
             .field("server_url", server_url)
@@ -182,6 +187,7 @@ impl Default for WorkflowDriverConfig {
             non_determinism_retry: Duration::from_secs(2),
             non_determinism_retry_max: Duration::from_secs(60),
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
+            wire: crate::observability::WireMetrics::new(),
         }
     }
 }
@@ -338,6 +344,7 @@ impl WorkflowDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_wire_metrics(std::sync::Arc::clone(&config.wire))
         .with_max_message_bytes(config.max_message_bytes);
         let _channel = channel_manager
             .get()
@@ -377,6 +384,7 @@ impl WorkflowDriver {
                 auto_heartbeat: false,
                 tls_config: config.tls_config.clone(),
                 max_message_bytes: config.max_message_bytes,
+                wire: std::sync::Arc::clone(&config.wire),
             };
 
             let poller = WorkflowExecutionPoller::new(

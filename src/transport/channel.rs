@@ -1,7 +1,12 @@
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
+use std::sync::Arc;
+
 use tonic::transport::{Channel, Endpoint};
+
+use crate::observability::WireMetrics;
+use crate::transport::instrument::{Instrumented, WireChannel};
 
 /// TLS configuration for gRPC connections.
 ///
@@ -120,6 +125,8 @@ pub struct ChannelManager {
     tls_config: Option<TlsConfig>,
     // The largest message a client on this manager's channel sends or receives.
     max_message_bytes: usize,
+    // Where the calls on this manager's channel are recorded.
+    wire: Arc<WireMetrics>,
 }
 
 struct State {
@@ -185,7 +192,21 @@ impl ChannelManager {
             jitter_ms: 250,
             tls_config: None,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            wire: WireMetrics::new(),
         }
+    }
+
+    /// Records the calls on this manager's channel in `wire`, shared with the
+    /// rest of the worker's connections. A manager has measurements of its
+    /// own unless given these.
+    pub fn with_wire_metrics(mut self, wire: Arc<WireMetrics>) -> Self {
+        self.wire = wire;
+        self
+    }
+
+    /// Where the calls on this manager's channel are recorded.
+    pub fn wire_metrics(&self) -> &Arc<WireMetrics> {
+        &self.wire
     }
 
     /// Sets the largest message a client on this manager's channel sends or
@@ -310,7 +331,7 @@ impl ChannelManager {
     /// Returns `Error::connection` while cooling off (the message gives the
     /// remaining time), or when the connect attempt fails. Returns
     /// `Error::configuration` if the server address or TLS settings are invalid.
-    pub async fn get(&mut self) -> Result<Channel> {
+    pub async fn get(&mut self) -> Result<WireChannel> {
         match self.connection(Breaker::Respect).await {
             Ok((channel, _)) => Ok(channel),
             Err(Unconnected::CoolingOff(remaining)) => {
@@ -330,6 +351,18 @@ impl ChannelManager {
     /// Callers that find no channel share one connect: whoever gets there
     /// first connects, and the rest wait for it and take its outcome.
     pub(crate) async fn connection(
+        &self,
+        breaker: Breaker,
+    ) -> std::result::Result<(WireChannel, u64), Unconnected> {
+        let (channel, generation) = self.raw_connection(breaker).await?;
+        Ok((
+            Instrumented::new(channel, Arc::clone(&self.wire)),
+            generation,
+        ))
+    }
+
+    /// [`connection`](Self::connection), before its calls are measured.
+    async fn raw_connection(
         &self,
         breaker: Breaker,
     ) -> std::result::Result<(Channel, u64), Unconnected> {
@@ -536,7 +569,18 @@ fn is_https(endpoint: &Endpoint) -> bool {
 ///
 /// Returns `Error::configuration` for an invalid address or TLS settings, and
 /// `Error::connection` (naming the address) if the connect fails.
-pub async fn connect_channel(server_url: &str, tls: Option<&TlsConfig>) -> Result<Channel> {
+pub async fn connect_channel(
+    server_url: &str,
+    tls: Option<&TlsConfig>,
+    wire: &Arc<WireMetrics>,
+) -> Result<WireChannel> {
+    connect_raw_channel(server_url, tls)
+        .await
+        .map(|channel| Instrumented::new(channel, Arc::clone(wire)))
+}
+
+/// [`connect_channel`], before its calls are measured.
+async fn connect_raw_channel(server_url: &str, tls: Option<&TlsConfig>) -> Result<Channel> {
     build_endpoint(
         server_url,
         tls,
@@ -647,9 +691,13 @@ mod connect_tests {
             let (socket, _) = listener.accept().await.unwrap();
             drop(socket);
         });
-        let err = connect_channel(&format!("https://localhost:{port}"), None)
-            .await
-            .expect_err("must fail");
+        let err = connect_channel(
+            &format!("https://localhost:{port}"),
+            None,
+            &WireMetrics::new(),
+        )
+        .await
+        .expect_err("must fail");
         let text = err.to_string();
         // Not just tonic's bare "transport error": the cause follows it.
         let after = text.split("transport error").nth(1).unwrap_or_default();
@@ -663,7 +711,9 @@ mod connect_tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let url = format!("http://127.0.0.1:{port}");
-        let err = connect_channel(&url, None).await.expect_err("must fail");
+        let err = connect_channel(&url, None, &WireMetrics::new())
+            .await
+            .expect_err("must fail");
         assert!(err.to_string().contains(&url), "{err}");
     }
 }

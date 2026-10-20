@@ -30,7 +30,6 @@ pub(crate) fn unexpected_poll_error_backoff(consecutive_errors: u32) -> Duration
     Duration::from_millis((FIRST << doublings).min(CAP))
 }
 use tokio::sync::mpsc;
-use tonic::transport::Channel;
 
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
@@ -105,6 +104,10 @@ pub struct PollerConfig {
     /// The largest message the poller receives, and tells the engine it can
     /// receive. [`crate::transport::limits::default_max_message_bytes`] unless set.
     pub max_message_bytes: usize,
+
+    /// Where this poller's calls are recorded: the worker's wire
+    /// measurements, shared with its other connections.
+    pub wire: Arc<crate::observability::WireMetrics>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -123,6 +126,7 @@ impl std::fmt::Debug for PollerConfig {
             version_id,
             auto_heartbeat,
             max_message_bytes,
+            wire: _,
         } = self;
         f.debug_struct("PollerConfig")
             .field("namespace", namespace)
@@ -158,6 +162,7 @@ impl Default for PollerConfig {
             tls_config: None,
             auto_heartbeat: false,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            wire: crate::observability::WireMetrics::new(),
         }
     }
 }
@@ -289,7 +294,7 @@ pub struct WorkflowExecutionPoller {
     config: Arc<PollerConfig>,
 
     /// gRPC client for `ExecutionService`.
-    client: ExecutionServiceClient<Channel>,
+    client: ExecutionServiceClient<crate::transport::instrument::WireChannel>,
 
     /// Shutdown signal.
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -350,9 +355,12 @@ impl WorkflowExecutionPoller {
         // Through the same builder as the driver's channel manager, so this
         // connection carries the same TLS setting as the one that was just
         // reported connected.
-        let channel =
-            crate::transport::channel::connect_channel(&address, config.tls_config.as_ref())
-                .await?;
+        let channel = crate::transport::channel::connect_channel(
+            &address,
+            config.tls_config.as_ref(),
+            &config.wire,
+        )
+        .await?;
 
         tracing::info!(
             server_url = %address,
@@ -488,6 +496,7 @@ impl WorkflowExecutionPoller {
                 let channel = crate::transport::channel::connect_channel(
                     &self.server_url,
                     self.config.tls_config.as_ref(),
+                    &self.config.wire,
                 )
                 .await
                 .map_err(|e| {
@@ -876,7 +885,7 @@ pub struct TaskExecutionPoller {
     config: Arc<PollerConfig>,
 
     /// gRPC client for `ExecutionService`.
-    client: ExecutionServiceClient<Channel>,
+    client: ExecutionServiceClient<crate::transport::instrument::WireChannel>,
 
     /// Shutdown signal.
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -925,9 +934,12 @@ impl TaskExecutionPoller {
         // Through the same builder as the driver's channel manager, so this
         // connection carries the same TLS setting as the one that was just
         // reported connected.
-        let channel =
-            crate::transport::channel::connect_channel(&address, config.tls_config.as_ref())
-                .await?;
+        let channel = crate::transport::channel::connect_channel(
+            &address,
+            config.tls_config.as_ref(),
+            &config.wire,
+        )
+        .await?;
 
         tracing::info!(
             server_url = %address,
@@ -1384,6 +1396,10 @@ pub struct ActorPollerConfig {
     /// The largest message the poller receives; see
     /// `PollerConfig::max_message_bytes`.
     pub max_message_bytes: usize,
+
+    /// Where this poller's calls are recorded: the worker's wire
+    /// measurements, shared with its other connections.
+    pub wire: Arc<crate::observability::WireMetrics>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -1399,6 +1415,7 @@ impl std::fmt::Debug for ActorPollerConfig {
             api_key,
             tls_config,
             max_message_bytes,
+            wire: _,
         } = self;
         f.debug_struct("ActorPollerConfig")
             .field("service_id", service_id)
@@ -1424,6 +1441,7 @@ impl Default for ActorPollerConfig {
             api_key: None,
             tls_config: None,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            wire: crate::observability::WireMetrics::new(),
         }
     }
 }
@@ -1438,7 +1456,7 @@ pub struct ActorOperationPoller {
     config: Arc<ActorPollerConfig>,
 
     /// gRPC client for `ActorService`.
-    client: ActorServiceClient<Channel>,
+    client: ActorServiceClient<crate::transport::instrument::WireChannel>,
 
     /// Shutdown signal.
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -1491,9 +1509,12 @@ impl ActorOperationPoller {
         // Through the same builder as the driver's channel manager, so this
         // connection carries the same TLS setting as the one that was just
         // reported connected.
-        let channel =
-            crate::transport::channel::connect_channel(&address, config.tls_config.as_ref())
-                .await?;
+        let channel = crate::transport::channel::connect_channel(
+            &address,
+            config.tls_config.as_ref(),
+            &config.wire,
+        )
+        .await?;
 
         tracing::info!(
             server_url = %address,
@@ -1600,6 +1621,7 @@ impl ActorOperationPoller {
                 let channel = crate::transport::channel::connect_channel(
                     &self.server_url,
                     self.config.tls_config.as_ref(),
+                    &self.config.wire,
                 )
                 .await
                 .map_err(|e| {
@@ -1874,6 +1896,7 @@ mod tests {
             tls_config: None,
             auto_heartbeat: false,
             max_message_bytes: 1024,
+            wire: crate::observability::WireMetrics::new(),
         };
 
         assert_eq!(config.namespace, "custom-ns");

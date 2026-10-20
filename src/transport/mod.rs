@@ -4,6 +4,7 @@
 
 pub mod channel;
 pub mod credentials;
+pub mod instrument;
 pub mod limits;
 pub mod non_grpc;
 

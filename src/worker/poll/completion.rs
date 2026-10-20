@@ -64,7 +64,6 @@ use std::time::{Duration, Instant};
 
 use rand::Rng;
 use tokio::sync::{mpsc, watch};
-use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::proto::orcher::v1::{
@@ -456,6 +455,8 @@ macro_rules! report_event {
 pub(crate) struct Subject<'a> {
     /// "completion" or "failure report".
     pub(crate) what: &'static str,
+    /// The gRPC method that sends it, as the wire measurements name it.
+    pub(crate) method: &'static str,
     pub(crate) ids: Ids<'a>,
 }
 
@@ -762,6 +763,7 @@ impl Completer {
         let delivery = self
             .deliver(
                 Subject {
+                    method: "/orcher.v1.ExecutionService/CompleteWorkflowExecution",
                     what: "completion",
                     ids: Ids::Workflow {
                         workflow_id,
@@ -821,6 +823,7 @@ impl Completer {
         let delivery = self
             .deliver(
                 Subject {
+                    method: "/orcher.v1.ExecutionService/FailWorkflowExecution",
                     what: "failure report",
                     ids: Ids::Workflow {
                         workflow_id,
@@ -895,6 +898,7 @@ impl Completer {
                 let delivery = self
                     .deliver(
                         Subject {
+                            method: "/orcher.v1.ExecutionService/CompleteTaskExecution",
                             what: "completion",
                             ids: task.ids(),
                         },
@@ -995,6 +999,7 @@ impl Completer {
         let delivery = self
             .deliver(
                 Subject {
+                    method: "/orcher.v1.ExecutionService/FailTaskExecution",
                     what: "failure report",
                     ids: task.ids(),
                 },
@@ -1036,7 +1041,11 @@ impl Completer {
         };
         let delivery = self
             .deliver(
-                Subject { what, ids },
+                Subject {
+                    method: "/orcher.v1.ActorService/CompleteActorOperation",
+                    what,
+                    ids,
+                },
                 request,
                 move |channel, request| async move {
                     sized!(ActorServiceClient::new(channel), max)
@@ -1078,7 +1087,7 @@ impl Completer {
     ) -> Delivery<Resp>
     where
         Req: Clone,
-        F: Fn(Channel, tonic::Request<Req>) -> Fut,
+        F: Fn(crate::transport::instrument::WireChannel, tonic::Request<Req>) -> Fut,
         Fut: Future<Output = std::result::Result<tonic::Response<Resp>, Status>>,
     {
         let started = Instant::now();
@@ -1162,6 +1171,11 @@ impl Completer {
             };
 
             attempt += 1;
+            if attempt > 1 {
+                self.channel_manager
+                    .wire_metrics()
+                    .record_retry(subject.method);
+            }
             let mut request = self.credentialed(body.clone());
             // Bounded by the budget, so an engine that stops answering
             // mid-call cannot hold a completion past it. The engine also

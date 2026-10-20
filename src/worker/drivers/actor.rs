@@ -94,6 +94,10 @@ pub struct ActorDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+    /// Where this driver's calls to the engine are recorded: the worker's
+    /// wire measurements, shared with its other drivers. A driver has
+    /// measurements of its own unless given these.
+    pub wire: std::sync::Arc<crate::observability::WireMetrics>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -115,6 +119,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             registration_id,
             tls_config,
             max_message_bytes,
+            wire: _,
         } = self;
         f.debug_struct("ActorDriverConfig")
             .field("server_url", server_url)
@@ -152,6 +157,7 @@ impl Default for ActorDriverConfig {
             registration_id: None,
             tls_config: None,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            wire: crate::observability::WireMetrics::new(),
         }
     }
 }
@@ -250,6 +256,7 @@ impl ActorDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_wire_metrics(std::sync::Arc::clone(&config.wire))
         .with_max_message_bytes(config.max_message_bytes);
 
         // Channels to and from the language SDK.
@@ -284,6 +291,7 @@ impl ActorDriver {
                 api_key: config.api_key.clone(),
                 tls_config: config.tls_config.clone(),
                 max_message_bytes: config.max_message_bytes,
+                wire: std::sync::Arc::clone(&config.wire),
             };
 
             let poller = ActorOperationPoller::new(
