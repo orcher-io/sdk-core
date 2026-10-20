@@ -22,7 +22,6 @@ use orcher_sdk_core::transport::{credentialed_request, limits};
 use orcher_sdk_core::worker::{ActorWork, ActorWorkResult, RegistrationHandle};
 use orcher_sdk_core::{Error, Result, TaskFailure};
 use tokio::sync::mpsc;
-use tonic::transport::Channel;
 
 use crate::HostConfig;
 
@@ -109,16 +108,20 @@ impl StateScope {
 /// The host's calls to the actor service, with the worker's credentials.
 #[derive(Clone)]
 pub(crate) struct ActorService {
-    client: ActorServiceClient<Channel>,
+    client: ActorServiceClient<orcher_sdk_core::transport::instrument::WireChannel>,
     api_key: Option<String>,
     organization_id: Option<String>,
 }
 
 impl ActorService {
-    pub(crate) async fn connect(config: &HostConfig) -> Result<Self> {
+    pub(crate) async fn connect(
+        config: &HostConfig,
+        wire: &std::sync::Arc<orcher_sdk_core::observability::WireMetrics>,
+    ) -> Result<Self> {
         let channel = orcher_sdk_core::transport::channel::connect_channel(
             &config.server_url,
             config.tls.as_ref(),
+            wire,
         )
         .await?;
         let max = limits::default_max_message_bytes();

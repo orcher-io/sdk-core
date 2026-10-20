@@ -44,7 +44,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::proto::orcher::v1::{
@@ -199,7 +198,7 @@ pub(crate) async fn release(
 /// Hand an activation back through `client`: for a poller, which has a
 /// connection of its own and no driver to go through.
 pub(crate) async fn release_on(
-    mut client: ExecutionServiceClient<Channel>,
+    mut client: ExecutionServiceClient<crate::transport::instrument::WireChannel>,
     namespace: &str,
     identity: &str,
     api_key: Option<&str>,

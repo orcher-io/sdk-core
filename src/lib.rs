@@ -128,6 +128,7 @@ pub mod error;
 pub mod error_code;
 pub mod interceptor;
 pub mod kernel;
+pub mod observability;
 pub mod payload;
 pub mod protocol;
 pub mod state;

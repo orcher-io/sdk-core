@@ -241,3 +241,44 @@ async fn pulls_end_after_shutdown() {
             .is_none()
     );
 }
+
+/// The worker's calls to the engine are measured on the wire, by method: a
+/// completion the engine refused once is two calls, one refusal by its
+/// status code, and one retry (sdk-core#43).
+#[tokio::test]
+async fn calls_to_the_engine_are_measured_by_method() {
+    const POLL: &str = "/orcher.v1.ExecutionService/PollTaskExecution";
+    const COMPLETE: &str = "/orcher.v1.ExecutionService/CompleteTaskExecution";
+    let engine = Engine::default();
+    {
+        let mut script = engine.script();
+        script.tasks.push_back(task("charge_0", "token-1"));
+        script
+            .refuse_completions
+            .push_back(tonic::Code::Unavailable);
+    }
+    let host = task_worker(&engine).await;
+
+    let assignment = host.next_task().await.expect("a task");
+    host.complete_task(TaskOutcome {
+        token: assignment.token.clone(),
+        result: value(b"\"charged\""),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    eventually("the completion", || !engine.script().completed.is_empty()).await;
+
+    let wire = host.wire_metrics();
+    let polls = &wire.methods[POLL];
+    assert!(polls.calls >= 1, "{polls:?}");
+    let completes = &wire.methods[COMPLETE];
+    assert_eq!(completes.calls, 2, "{completes:?}");
+    assert_eq!(
+        completes.status_errors,
+        std::collections::BTreeMap::from([(tonic::Code::Unavailable as i32, 1)])
+    );
+    assert_eq!(completes.retries, 1);
+    assert_eq!(completes.latency_buckets.iter().sum::<u64>(), 2);
+    host.shutdown().await;
+}

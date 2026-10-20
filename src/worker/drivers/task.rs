@@ -151,6 +151,10 @@ pub struct TaskDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+    /// Where this driver's calls to the engine are recorded: the worker's
+    /// wire measurements, shared with its other drivers. A driver has
+    /// measurements of its own unless given these.
+    pub wire: std::sync::Arc<crate::observability::WireMetrics>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -173,6 +177,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             version_id,
             auto_heartbeat,
             max_message_bytes,
+            wire: _,
         } = self;
         f.debug_struct("TaskDriverConfig")
             .field("server_url", server_url)
@@ -212,6 +217,7 @@ impl Default for TaskDriverConfig {
             version_id: None,
             auto_heartbeat: true,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            wire: crate::observability::WireMetrics::new(),
         }
     }
 }
@@ -395,6 +401,7 @@ impl TaskDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_wire_metrics(std::sync::Arc::clone(&config.wire))
         .with_max_message_bytes(config.max_message_bytes);
 
         // Channels to and from the language SDK.
@@ -439,6 +446,7 @@ impl TaskDriver {
                 auto_heartbeat: config.auto_heartbeat,
                 tls_config: config.tls_config.clone(),
                 max_message_bytes: config.max_message_bytes,
+                wire: std::sync::Arc::clone(&config.wire),
             };
 
             let poller = TaskExecutionPoller::new(
@@ -1006,6 +1014,7 @@ async fn session_poller(
         auto_heartbeat: config.auto_heartbeat,
         tls_config: config.tls_config.clone(),
         max_message_bytes: config.max_message_bytes,
+        wire: std::sync::Arc::clone(&config.wire),
     };
     TaskExecutionPoller::new(
         poller_config,

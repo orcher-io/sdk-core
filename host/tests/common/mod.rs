@@ -36,6 +36,8 @@ pub struct Script {
     /// Whether heartbeats are answered with a cancellation request.
     pub cancel_requested: bool,
     pub completed: Vec<CompleteTaskExecutionRequest>,
+    /// Task completions to refuse, one per completion, with these codes.
+    pub refuse_completions: VecDeque<tonic::Code>,
     pub failed: Vec<FailTaskExecutionRequest>,
     pub heartbeats: Vec<RecordTaskHeartbeatRequest>,
     pub registrations: Vec<RegisterWorkerRequest>,
@@ -199,6 +201,9 @@ impl ExecutionService for Engine {
         &self,
         request: Request<CompleteTaskExecutionRequest>,
     ) -> Result<Response<CompleteTaskExecutionResponse>, Status> {
+        if let Some(code) = self.script().refuse_completions.pop_front() {
+            return Err(Status::new(code, "refused by the fake engine"));
+        }
         self.script().completed.push(request.into_inner());
         Ok(Response::new(CompleteTaskExecutionResponse::default()))
     }
