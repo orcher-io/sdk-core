@@ -67,6 +67,12 @@ impl Credits {
         }
     }
 
+    /// Take a credit if one is free now, without giving back those whose
+    /// claim has lapsed.
+    pub(crate) fn try_acquire(&self) -> Option<Credit> {
+        Arc::clone(&self.slots).try_acquire_owned().ok().map(Credit)
+    }
+
     /// Spend `credit` on the work named by `token`, until
     /// [`give_back`](Self::give_back) or until the engine's claim lapses
     /// `lapse` from now.

@@ -87,6 +87,11 @@ struct Script {
     workflow_eager: Option<Vec<PollTaskExecutionResponse>>,
     /// The eager-task capabilities each accepted workflow completion declared.
     eager_capabilities: Vec<Option<TaskCapabilities>>,
+    /// Hand out several tasks to a poll that asks for them; refuse such
+    /// polls as unimplemented otherwise, as an engine that predates them does.
+    serves_batches: bool,
+    /// How many tasks each poll for several asked for, in order.
+    batches_asked: Vec<u32>,
 }
 
 #[derive(Clone, Default)]
@@ -136,6 +141,46 @@ impl Engine {
 
 #[tonic::async_trait]
 impl ExecutionService for Engine {
+    async fn poll_workflow_executions(
+        &self,
+        _: Request<PollWorkflowExecutionsRequest>,
+    ) -> std::result::Result<Response<PollWorkflowExecutionsResponse>, Status> {
+        Err(Status::unimplemented(
+            "an engine that hands out one activation per poll",
+        ))
+    }
+    /// Unimplemented unless the script serves batches: then up to
+    /// `max_items` of the scripted tasks, each counted as a poll for one.
+    async fn poll_task_executions(
+        &self,
+        request: Request<PollTaskExecutionsRequest>,
+    ) -> std::result::Result<Response<PollTaskExecutionsResponse>, Status> {
+        let batch = request.into_inner();
+        if !self.script().serves_batches {
+            return Err(Status::unimplemented(
+                "an engine that hands out one task per poll",
+            ));
+        }
+        self.script().batches_asked.push(batch.max_items);
+        let first = self
+            .poll_task_execution(Request::new(batch.poll.clone().unwrap_or_default()))
+            .await?
+            .into_inner();
+        if first.task_token.is_empty() {
+            return Ok(Response::new(PollTaskExecutionsResponse::default()));
+        }
+        let mut tasks = vec![first];
+        while tasks.len() < batch.max_items as usize {
+            let Some(next) = self.script().tasks.pop_front() else {
+                break;
+            };
+            tasks.push(next);
+        }
+        Ok(Response::new(PollTaskExecutionsResponse {
+            tasks,
+            ..Default::default()
+        }))
+    }
     async fn poll_workflow_execution(
         &self,
         _: Request<PollWorkflowExecutionRequest>,
@@ -2101,6 +2146,84 @@ async fn a_task_never_answered_gives_its_place_back_when_its_claim_lapses() {
 
     let next = next_work(&mut parts.work_rx).await;
     assert_eq!(next.task.task_id, "t-next");
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// Of an engine that hands out several tasks to a poll, a driver asks for as
+/// many as it has room for, in one poll, and takes no more than that.
+#[tokio::test]
+async fn a_driver_asks_for_as_many_tasks_as_it_has_room_for_in_one_poll() {
+    let engine = Engine::default();
+    {
+        let mut script = engine.script();
+        script.serves_batches = true;
+        for n in 0..6 {
+            script
+                .tasks
+                .push_back(task(&format!("t-{n}"), &format!("tok-{n}")));
+        }
+    }
+    let mut parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            max_concurrent_executions: 4,
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let mut handed = Vec::new();
+    for _ in 0..4 {
+        handed.push(next_work(&mut parts.work_rx).await.task.task_id);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(handed, ["t-0", "t-1", "t-2", "t-3"]);
+    assert_eq!(claimed(&engine, 6), 4, "claimed beyond what it can run");
+    assert_eq!(
+        engine.script().batches_asked.first(),
+        Some(&4),
+        "the first poll did not ask for every place free"
+    );
+
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// Of an engine that hands out one task per poll, a driver polls for one at
+/// a time, and still takes every task.
+#[tokio::test]
+async fn a_driver_polls_for_one_task_at_a_time_of_an_engine_that_hands_out_one() {
+    let engine = Engine::default();
+    for n in 0..3 {
+        engine
+            .script()
+            .tasks
+            .push_back(task(&format!("t-{n}"), &format!("tok-{n}")));
+    }
+    let mut parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            max_concurrent_executions: 4,
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    for n in 0..3 {
+        assert_eq!(
+            next_work(&mut parts.work_rx).await.task.task_id,
+            format!("t-{n}")
+        );
+    }
+    assert!(engine.script().batches_asked.is_empty());
+
     handle.shutdown();
     stops_within(running, GRACE + MARGIN).await;
 }
