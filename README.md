@@ -89,6 +89,8 @@ A language SDK builds on the drivers instead: `WorkflowDriver`, `TaskDriver` and
 
 The core polls and the language SDK executes: the engine never sees your handlers, and your handlers never see gRPC. The generated protocol types are re-exported as `orcher_sdk_core::proto`.
 
+Because those types are re-exported, a release that moves to a newer `orcher-proto` is a minor release of this crate: a crate that also depends on `orcher-proto` must move to the same version. The core asks the engine for several activations or tasks per poll, and sends the heartbeats of tasks due together in one call; an engine older than those calls is polled for one item at a time and sent one heartbeat per call, with nothing to configure.
+
 <br />
 
 ### <img height="16" src="https://octicons-col.vercel.app/heart/38BDF0"> Contributing
