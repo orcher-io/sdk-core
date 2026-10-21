@@ -46,6 +46,7 @@ pub use tokio_util::sync::CancellationToken;
 
 use crate::proto::orcher::v1::{
     execution_service_client::ExecutionServiceClient, RecordTaskHeartbeatRequest,
+    RecordTaskHeartbeatsRequest, TaskHeartbeatEntry,
 };
 use crate::transport::channel::{Breaker, ChannelManager};
 use crate::worker::poll::completion::{note_connection_failure, Caller};
@@ -254,8 +255,9 @@ pub(crate) struct TaskHeartbeats {
 }
 
 struct Registry {
-    caller: Arc<Caller>,
-    channel_manager: Arc<ChannelManager>,
+    /// Takes each heartbeat to send, to send it with the others due about
+    /// the same time.
+    batcher: Batcher,
     /// Heartbeat every task on a timer, not only when its code asks.
     auto: bool,
     /// The heartbeats running, by task token.
@@ -277,8 +279,7 @@ impl TaskHeartbeats {
     pub(crate) fn new(caller: Caller, channel_manager: Arc<ChannelManager>, auto: bool) -> Self {
         Self {
             inner: Arc::new(Registry {
-                caller: Arc::new(caller),
-                channel_manager,
+                batcher: Batcher::new(Arc::new(caller), channel_manager),
                 auto,
                 running: Mutex::new(HashMap::new()),
                 stopped: CancellationToken::new(),
@@ -341,6 +342,7 @@ impl TaskHeartbeats {
     /// Stop every heartbeat: the driver is stopping.
     pub(crate) fn stop_all(&self) {
         self.inner.stopped.cancel();
+        self.inner.batcher.stopped.cancel();
         for (_, beat) in self.inner.running.lock().drain() {
             if let Some(beat) = beat.upgrade() {
                 beat.finished.cancel();
@@ -474,20 +476,272 @@ async fn beat_until_finished(registry: Arc<Registry>, beat: Arc<Beat>) {
     }
 }
 
-/// Send one heartbeat. `Ok` carries whether the engine asked the task to
-/// stop; `Err` the code of a call that failed.
+/// Send one heartbeat, with the others due about the same time. `Ok`
+/// carries whether the engine asked the task to stop; `Err` the code it was
+/// refused with, or that the call failed with.
 async fn send(
     registry: &Registry,
     beat: &Beat,
     details: Option<Vec<u8>>,
     period: Duration,
 ) -> std::result::Result<bool, Code> {
-    let (channel, generation) = match registry.channel_manager.connection(Breaker::Respect).await {
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    registry.batcher.submit(Submission {
+        token: beat.token.clone(),
+        details,
+        period,
+        task_id: beat.task_id.clone(),
+        workflow_id: beat.workflow_id.clone(),
+        answer,
+    });
+    answered.await.unwrap_or(Err(Code::Unavailable))
+}
+
+/// The most heartbeats one call carries; the engine takes no more.
+const MAX_HEARTBEATS_PER_CALL: usize = 1000;
+
+/// The longest a heartbeat waits for others to go with it. Never more than a
+/// quarter of its own interval, so a task's heartbeats keep their pace.
+const MAX_LINGER: Duration = Duration::from_millis(200);
+
+/// One heartbeat waiting to be sent, with where its answer goes.
+struct Submission {
+    token: Vec<u8>,
+    details: Option<Vec<u8>>,
+    period: Duration,
+    task_id: String,
+    workflow_id: String,
+    answer: tokio::sync::oneshot::Sender<std::result::Result<bool, Code>>,
+}
+
+impl Submission {
+    /// How long it may wait for others.
+    fn linger(&self) -> Duration {
+        (self.period / 4).min(MAX_LINGER)
+    }
+}
+
+/// Sends the heartbeats of a driver's tasks together: those due within a
+/// short wait of each other go in one call, `RecordTaskHeartbeats`, rather
+/// than one call each. Of an engine that does not take several in one call,
+/// each is sent on its own, at once.
+struct Batcher {
+    queue: tokio::sync::mpsc::UnboundedSender<Submission>,
+    /// The receiving end, until the loop that sends is started by the
+    /// first heartbeat (a driver is built before it runs, possibly outside
+    /// any runtime).
+    pending: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Submission>>>,
+    context: Arc<BatchContext>,
+    /// Cancelled when the driver stops.
+    stopped: CancellationToken,
+}
+
+struct BatchContext {
+    caller: Arc<Caller>,
+    channel_manager: Arc<ChannelManager>,
+    /// Cleared for good once the engine answers that it takes one heartbeat
+    /// per call.
+    batches: std::sync::atomic::AtomicBool,
+}
+
+impl Batcher {
+    fn new(caller: Arc<Caller>, channel_manager: Arc<ChannelManager>) -> Self {
+        let (queue, pending) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            queue,
+            pending: Mutex::new(Some(pending)),
+            context: Arc::new(BatchContext {
+                caller,
+                channel_manager,
+                batches: std::sync::atomic::AtomicBool::new(true),
+            }),
+            stopped: CancellationToken::new(),
+        }
+    }
+
+    fn submit(&self, submission: Submission) {
+        if let Some(pending) = self.pending.lock().take() {
+            tokio::spawn(batch_loop(
+                pending,
+                Arc::clone(&self.context),
+                self.stopped.clone(),
+            ));
+        }
+        // With the loop gone the answer is dropped, which reads as a failed
+        // call, retried with the next heartbeat.
+        let _ = self.queue.send(submission);
+    }
+}
+
+/// Gather heartbeats into batches and send each from a task of its own, so
+/// a slow call holds up neither the next batch nor the gathering.
+async fn batch_loop(
+    mut queue: tokio::sync::mpsc::UnboundedReceiver<Submission>,
+    context: Arc<BatchContext>,
+    stopped: CancellationToken,
+) {
+    loop {
+        let first = tokio::select! {
+            _ = stopped.cancelled() => return,
+            next = queue.recv() => match next {
+                Some(submission) => submission,
+                None => return,
+            },
+        };
+        let mut batch = vec![first];
+        if context.batches.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut send_by = Instant::now() + batch[0].linger();
+            while batch.len() < MAX_HEARTBEATS_PER_CALL {
+                tokio::select! {
+                    _ = stopped.cancelled() => return,
+                    _ = tokio::time::sleep_until(send_by) => break,
+                    next = queue.recv() => match next {
+                        Some(submission) => {
+                            send_by = send_by.min(Instant::now() + submission.linger());
+                            batch.push(submission);
+                        }
+                        None => break,
+                    },
+                }
+            }
+        }
+        tokio::spawn(send_batch(Arc::clone(&context), batch));
+    }
+}
+
+/// Send a batch in one call, or each on its own of an engine that takes one
+/// per call, and hand each heartbeat its answer.
+async fn send_batch(context: Arc<BatchContext>, batch: Vec<Submission>) {
+    if batch.len() > 1 && context.batches.load(std::sync::atomic::Ordering::Relaxed) {
+        match send_together(&context, &batch).await {
+            Ok(answers) => {
+                for (submission, answer) in batch.into_iter().zip(answers) {
+                    let _ = submission.answer.send(answer);
+                }
+                return;
+            }
+            Err(Code::Unimplemented) => {
+                tracing::info!(
+                    "The engine takes one task heartbeat per call; sending each on its own"
+                );
+                context
+                    .batches
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(code) => {
+                for submission in batch {
+                    let _ = submission.answer.send(Err(code));
+                }
+                return;
+            }
+        }
+    }
+    let mut sends = tokio::task::JoinSet::new();
+    for submission in batch {
+        let context = Arc::clone(&context);
+        sends.spawn(async move {
+            let answer = send_one(&context, &submission).await;
+            let _ = submission.answer.send(answer);
+        });
+    }
+    while sends.join_next().await.is_some() {}
+}
+
+/// Send several heartbeats in one call; each answer in the batch's order.
+async fn send_together(
+    context: &BatchContext,
+    batch: &[Submission],
+) -> std::result::Result<Vec<std::result::Result<bool, Code>>, Code> {
+    let (channel, generation) = context
+        .channel_manager
+        .connection(Breaker::Respect)
+        .await
+        .map_err(|_| Code::Unavailable)?;
+    let mut request = crate::transport::credentials::credentialed_request(
+        RecordTaskHeartbeatsRequest {
+            namespace: context.caller.namespace.clone(),
+            identity: context.caller.identity.clone(),
+            heartbeats: batch
+                .iter()
+                .map(|submission| TaskHeartbeatEntry {
+                    task_token: submission.token.clone(),
+                    details: submission.details.clone().unwrap_or_default(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        },
+        context.caller.api_key.as_deref(),
+        context.caller.organization_id.as_deref(),
+    );
+    let shortest = batch
+        .iter()
+        .map(|s| s.period)
+        .min()
+        .unwrap_or(MAX_CALL_TIMEOUT);
+    request.set_timeout(shortest.min(MAX_CALL_TIMEOUT));
+    let answered = crate::transport::limits::sized!(
+        ExecutionServiceClient::new(channel),
+        context.channel_manager.max_message_bytes()
+    )
+    .record_task_heartbeats(request)
+    .await;
+    let answers = match answered {
+        Ok(response) => response.into_inner().answers,
+        Err(status) => {
+            let status = crate::transport::clarify(status);
+            if status.code() != Code::Unimplemented {
+                note_connection_failure(&context.channel_manager, &status, generation);
+                tracing::debug!(
+                    heartbeats = batch.len(),
+                    code = ?status.code(),
+                    error = %status.message(),
+                    "Task heartbeats failed"
+                );
+            }
+            return Err(status.code());
+        }
+    };
+    if answers.len() != batch.len() {
+        tracing::warn!(
+            sent = batch.len(),
+            answered = answers.len(),
+            "The engine answered a different number of heartbeats than were sent"
+        );
+        return Err(Code::Internal);
+    }
+    Ok(batch
+        .iter()
+        .zip(answers)
+        .map(
+            |(submission, answer)| match Code::from(answer.refused_code) {
+                Code::Ok => Ok(answer.cancel_requested),
+                code => {
+                    tracing::debug!(
+                        task_id = %submission.task_id,
+                        workflow_id = %submission.workflow_id,
+                        code = ?code,
+                        error = %answer.refused_message,
+                        "Task heartbeat refused"
+                    );
+                    Err(code)
+                }
+            },
+        )
+        .collect())
+}
+
+/// Send one heartbeat in a call of its own.
+async fn send_one(
+    context: &BatchContext,
+    submission: &Submission,
+) -> std::result::Result<bool, Code> {
+    let (channel, generation) = match context.channel_manager.connection(Breaker::Respect).await {
         Ok(connected) => connected,
         Err(_) => {
             tracing::debug!(
-                task_id = %beat.task_id,
-                workflow_id = %beat.workflow_id,
+                task_id = %submission.task_id,
+                workflow_id = %submission.workflow_id,
                 "No connection for a task heartbeat; trying again with the next"
             );
             return Err(Code::Unavailable);
@@ -495,19 +749,19 @@ async fn send(
     };
     let mut request = crate::transport::credentials::credentialed_request(
         RecordTaskHeartbeatRequest {
-            task_token: beat.token.clone(),
-            namespace: registry.caller.namespace.clone(),
-            identity: registry.caller.identity.clone(),
-            details: details.unwrap_or_default(),
+            task_token: submission.token.clone(),
+            namespace: context.caller.namespace.clone(),
+            identity: context.caller.identity.clone(),
+            details: submission.details.clone().unwrap_or_default(),
             ..Default::default()
         },
-        registry.caller.api_key.as_deref(),
-        registry.caller.organization_id.as_deref(),
+        context.caller.api_key.as_deref(),
+        context.caller.organization_id.as_deref(),
     );
-    request.set_timeout(period.min(MAX_CALL_TIMEOUT));
+    request.set_timeout(submission.period.min(MAX_CALL_TIMEOUT));
     match crate::transport::limits::sized!(
         ExecutionServiceClient::new(channel),
-        registry.channel_manager.max_message_bytes()
+        context.channel_manager.max_message_bytes()
     )
     .record_task_heartbeat(request)
     .await
@@ -515,10 +769,10 @@ async fn send(
         Ok(response) => Ok(response.into_inner().cancel_requested),
         Err(status) => {
             let status = crate::transport::clarify(status);
-            note_connection_failure(&registry.channel_manager, &status, generation);
+            note_connection_failure(&context.channel_manager, &status, generation);
             tracing::debug!(
-                task_id = %beat.task_id,
-                workflow_id = %beat.workflow_id,
+                task_id = %submission.task_id,
+                workflow_id = %submission.workflow_id,
                 code = ?status.code(),
                 error = %status.message(),
                 "Task heartbeat failed"
