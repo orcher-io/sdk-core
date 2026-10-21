@@ -137,6 +137,22 @@ impl Drop for Abandoned {
 
 #[tonic::async_trait]
 impl ExecutionService for Engine {
+    async fn poll_workflow_executions(
+        &self,
+        _: Request<PollWorkflowExecutionsRequest>,
+    ) -> std::result::Result<Response<PollWorkflowExecutionsResponse>, Status> {
+        Err(Status::unimplemented(
+            "an engine that hands out one item per poll",
+        ))
+    }
+    async fn poll_task_executions(
+        &self,
+        _: Request<PollTaskExecutionsRequest>,
+    ) -> std::result::Result<Response<PollTaskExecutionsResponse>, Status> {
+        Err(Status::unimplemented(
+            "an engine that hands out one item per poll",
+        ))
+    }
     async fn poll_workflow_execution(
         &self,
         request: Request<PollWorkflowExecutionRequest>,
@@ -2443,6 +2459,22 @@ mod size_limits {
 
     #[tonic::async_trait]
     impl ExecutionService for SizeEngine {
+        async fn poll_workflow_executions(
+            &self,
+            _: Request<PollWorkflowExecutionsRequest>,
+        ) -> std::result::Result<Response<PollWorkflowExecutionsResponse>, Status> {
+            Err(Status::unimplemented(
+                "an engine that hands out one item per poll",
+            ))
+        }
+        async fn poll_task_executions(
+            &self,
+            _: Request<PollTaskExecutionsRequest>,
+        ) -> std::result::Result<Response<PollTaskExecutionsResponse>, Status> {
+            Err(Status::unimplemented(
+                "an engine that hands out one item per poll",
+            ))
+        }
         async fn poll_workflow_execution(
             &self,
             _: Request<PollWorkflowExecutionRequest>,

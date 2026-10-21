@@ -142,6 +142,22 @@ impl WorkerService for Engine {
 
 #[tonic::async_trait]
 impl ExecutionService for Engine {
+    async fn poll_workflow_executions(
+        &self,
+        _: Request<PollWorkflowExecutionsRequest>,
+    ) -> std::result::Result<Response<PollWorkflowExecutionsResponse>, Status> {
+        Err(Status::unimplemented(
+            "an engine that hands out one item per poll",
+        ))
+    }
+    async fn poll_task_executions(
+        &self,
+        _: Request<PollTaskExecutionsRequest>,
+    ) -> std::result::Result<Response<PollTaskExecutionsResponse>, Status> {
+        Err(Status::unimplemented(
+            "an engine that hands out one item per poll",
+        ))
+    }
     async fn poll_workflow_execution(
         &self,
         _: Request<PollWorkflowExecutionRequest>,

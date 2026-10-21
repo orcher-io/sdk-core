@@ -17,6 +17,10 @@ use crate::worker::poll::scaler::PollerScaler;
 /// How long the engine holds an activation claimed by a worker before giving
 /// it to another: its default claim timeout.
 const ACTIVATION_CLAIM: Duration = Duration::from_secs(300);
+
+/// The most items one poll asks for, however many credits are free: the
+/// engine caps a poll at this too.
+const MAX_ITEMS_PER_POLL: usize = 16;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +44,8 @@ use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
     actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
     ActorOperation, JournalEntry, PollActorOperationRequest, PollTaskExecutionRequest,
-    PollWorkflowExecutionRequest, PollWorkflowExecutionResponse, QueryRequest, UpdateRequest,
+    PollTaskExecutionResponse, PollTaskExecutionsRequest, PollWorkflowExecutionRequest,
+    PollWorkflowExecutionResponse, PollWorkflowExecutionsRequest, QueryRequest, UpdateRequest,
 };
 use crate::types::WorkflowExecution;
 
@@ -317,6 +322,10 @@ pub struct WorkflowExecutionPoller {
     /// on the work it brings.
     credits: Option<Arc<Credits>>,
 
+    /// Whether to ask for several items in one poll. Cleared for good once
+    /// the engine answers that it hands out only one.
+    batch_polls: bool,
+
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 
@@ -408,6 +417,7 @@ impl WorkflowExecutionPoller {
             poll_request_template,
             scaler: None,
             credits: None,
+            batch_polls: true,
             index: 0,
             server_url: address,
             consecutive_idle_polls: 0,
@@ -538,15 +548,24 @@ impl WorkflowExecutionPoller {
             }
 
             // Only with room for what the poll brings: with every credit
-            // spent on work not yet reported, it waits.
-            let credit = match self.credits.clone() {
-                Some(credits) => match self.wait_for_credit(&credits).await {
-                    Some(credit) => Some(credit),
+            // spent on work not yet reported, it waits. Of an engine that
+            // hands out several items to a poll, it asks for as many as it
+            // has credits free.
+            let mut in_hand: Vec<Credit> = Vec::new();
+            if let Some(credits) = self.credits.clone() {
+                match self.wait_for_credit(&credits).await {
+                    Some(credit) => in_hand.push(credit),
                     // Told to stop: the check above ends the loop.
                     None => continue,
-                },
-                None => None,
-            };
+                }
+                while self.batch_polls && in_hand.len() < MAX_ITEMS_PER_POLL {
+                    match credits.try_acquire() {
+                        Some(credit) => in_hand.push(credit),
+                        None => break,
+                    }
+                }
+            }
+            let max_items = in_hand.len().max(1);
 
             // Poll for work; this waits up to `poll_timeout_seconds`.
             //
@@ -557,7 +576,7 @@ impl WorkflowExecutionPoller {
             // always offered to the driver.
             let result = tokio::select! {
                 biased;
-                result = self.poll_once_inner() => result,
+                result = self.poll_inner(max_items) => result,
                 _ = driver_gone.closed() => {
                     tracing::info!(
                         task_queue = %self.config.task_queue,
@@ -568,7 +587,7 @@ impl WorkflowExecutionPoller {
             };
 
             match result {
-                Ok(Some(task)) => {
+                Ok(tasks) if !tasks.is_empty() => {
                     // Work arrived: reset the idle, timeout and error counts,
                     // and let one more poller poll.
                     if let Some(scaler) = &self.scaler {
@@ -578,41 +597,55 @@ impl WorkflowExecutionPoller {
                     self.consecutive_timeouts = 0;
                     consecutive_errors = 0;
 
-                    tracing::info!(
-                        task_queue = %self.config.task_queue,
-                        workflow_id = %task.execution.workflow_id,
-                        run_id = %task.execution.run_id,
-                        workflow_type = %task.workflow_type,
-                        "Received workflow execution task"
-                    );
-                    let token = crate::worker::poll::completion::activation_token(
-                        task.task_token.clone(),
-                        task.stream_entry_id.as_deref(),
-                    );
-                    if let (Some(credits), Some(credit)) = (&self.credits, credit) {
-                        credits.spend(credit, token.clone(), Some(ACTIVATION_CLAIM));
-                    }
-                    if let Err(mpsc::error::SendError(task)) = self.task_sender.send(task).await {
-                        if let Some(credits) = &self.credits {
-                            drop(credits.give_back(&token));
-                        }
-                        // The engine counts this activation as claimed by this
-                        // worker. Handed back, it goes to the next poll
-                        // immediately. An engine that cannot take it back holds
-                        // it until its claim timeout, hence the warning.
-                        tracing::warn!(
+                    // Each activation spends one of the credits the poll was
+                    // made with; those left over go back when dropped.
+                    let mut in_hand = in_hand.into_iter();
+                    let mut tasks = tasks.into_iter();
+                    let mut stopped = false;
+                    while let Some(task) = tasks.next() {
+                        tracing::info!(
                             task_queue = %self.config.task_queue,
                             workflow_id = %task.execution.workflow_id,
                             run_id = %task.execution.run_id,
-                            "Workflow driver stopped before this activation could be handed to it; \
-                             handing it back to the engine"
+                            workflow_type = %task.workflow_type,
+                            "Received workflow execution task"
                         );
-                        self.release(task).await;
+                        let token = crate::worker::poll::completion::activation_token(
+                            task.task_token.clone(),
+                            task.stream_entry_id.as_deref(),
+                        );
+                        if let (Some(credits), Some(credit)) = (&self.credits, in_hand.next()) {
+                            credits.spend(credit, token.clone(), Some(ACTIVATION_CLAIM));
+                        }
+                        if let Err(mpsc::error::SendError(task)) = self.task_sender.send(task).await
+                        {
+                            if let Some(credits) = &self.credits {
+                                drop(credits.give_back(&token));
+                            }
+                            // The engine counts these activations as claimed
+                            // by this worker. Handed back, they go to the next
+                            // poll immediately. An engine that cannot take
+                            // them back holds them until their claim timeout,
+                            // hence the warning.
+                            for task in std::iter::once(task).chain(tasks.by_ref()) {
+                                tracing::warn!(
+                                    task_queue = %self.config.task_queue,
+                                    workflow_id = %task.execution.workflow_id,
+                                    run_id = %task.execution.run_id,
+                                    "Workflow driver stopped before this activation could be \
+                                     handed to it; handing it back to the engine"
+                                );
+                                self.release(task).await;
+                            }
+                            stopped = true;
+                        }
+                    }
+                    if stopped {
                         break;
                     }
                 }
-                Ok(None) => {
-                    drop(credit);
+                Ok(_) => {
+                    drop(in_hand);
                     // No work available - server timed out after long-poll
                     tracing::trace!("No workflow execution work available (timeout)");
                     // An empty answer is still an answer: the path works again.
@@ -645,7 +678,7 @@ impl WorkflowExecutionPoller {
                     self.pause(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
-                    drop(credit);
+                    drop(in_hand);
                     // Timeouts are normal during long polling; they are not warnings.
                     if e.is_normal_timeout() {
                         tracing::trace!(
@@ -798,6 +831,57 @@ impl WorkflowExecutionPoller {
     }
 
     /// Polls once for a workflow execution step.
+    /// Polls once for up to `max_items` activations, asking for several
+    /// only of an engine that hands them out.
+    async fn poll_inner(&mut self, max_items: usize) -> Result<Vec<WorkflowExecutionTask>> {
+        if max_items > 1 && self.batch_polls {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let mut request = tonic::Request::new(PollWorkflowExecutionsRequest {
+                poll: Some(self.poll_request_template.clone()),
+                max_items: u32::try_from(max_items).unwrap_or(u32::MAX),
+                ..Default::default()
+            });
+            request.set_timeout(Duration::from_secs(
+                self.config.poll_timeout_seconds as u64 + 10,
+            ));
+            stamp_poll(&mut request, &self.config);
+            match self.client.poll_workflow_executions(request).await {
+                Ok(response) => {
+                    return Ok(response
+                        .into_inner()
+                        .executions
+                        .into_iter()
+                        .filter(|execution| !execution.workflow_id.is_empty())
+                        .map(|execution| {
+                            crate::worker::record::activation(&execution);
+                            WorkflowExecutionTask::from(execution)
+                        })
+                        .collect());
+                }
+                Err(e) if e.code() == tonic::Code::Unimplemented => {
+                    tracing::info!(
+                        task_queue = %self.config.task_queue,
+                        "The engine hands out one activation per poll; polling for one at a time"
+                    );
+                    self.batch_polls = false;
+                }
+                Err(e) if e.code() == tonic::Code::DeadlineExceeded => {
+                    return Err(Error::timeout("poll workflow executions"));
+                }
+                Err(e) => {
+                    let e = crate::transport::clarify(e);
+                    tracing::warn!(
+                        error_code = ?e.code(),
+                        error_message = %e.message(),
+                        "Workflow poll gRPC error"
+                    );
+                    return Err(Error::GrpcStatus(e));
+                }
+            }
+        }
+        Ok(self.poll_once_inner().await?.into_iter().collect())
+    }
+
     async fn poll_once_inner(&mut self) -> Result<Option<WorkflowExecutionTask>> {
         // A short sleep, so no failure mode can turn the poll loop into a busy spin.
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -958,6 +1042,10 @@ pub struct TaskExecutionPoller {
     /// on the work it brings.
     credits: Option<Arc<Credits>>,
 
+    /// Whether to ask for several items in one poll. Cleared for good once
+    /// the engine answers that it hands out only one.
+    batch_polls: bool,
+
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 }
@@ -1039,6 +1127,7 @@ impl TaskExecutionPoller {
             poll_request_template,
             scaler: None,
             credits: None,
+            batch_polls: true,
             index: 0,
         };
 
@@ -1152,15 +1241,24 @@ impl TaskExecutionPoller {
             }
 
             // Only with room for what the poll brings: with every credit
-            // spent on work not yet reported, it waits.
-            let credit = match self.credits.clone() {
-                Some(credits) => match self.wait_for_credit(&credits).await {
-                    Some(credit) => Some(credit),
+            // spent on work not yet reported, it waits. Of an engine that
+            // hands out several items to a poll, it asks for as many as it
+            // has credits free.
+            let mut in_hand: Vec<Credit> = Vec::new();
+            if let Some(credits) = self.credits.clone() {
+                match self.wait_for_credit(&credits).await {
+                    Some(credit) => in_hand.push(credit),
                     // Told to stop: the check above ends the loop.
                     None => continue,
-                },
-                None => None,
-            };
+                }
+                while self.batch_polls && in_hand.len() < MAX_ITEMS_PER_POLL {
+                    match credits.try_acquire() {
+                        Some(credit) => in_hand.push(credit),
+                        None => break,
+                    }
+                }
+            }
+            let max_items = in_hand.len().max(1);
 
             // Poll for work; this waits up to `poll_timeout_seconds`.
             //
@@ -1170,7 +1268,7 @@ impl TaskExecutionPoller {
             // to the driver.
             let result = tokio::select! {
                 biased;
-                result = self.poll_once_inner() => result,
+                result = self.poll_inner(max_items) => result,
                 _ = driver_gone.closed() => {
                     tracing::info!(
                         task_queue = %self.config.task_queue,
@@ -1181,16 +1279,7 @@ impl TaskExecutionPoller {
             };
 
             match result {
-                Ok(Some(task)) => {
-                    tracing::info!(
-                        task_queue = %self.config.task_queue,
-                        workflow_id = %task.execution.workflow_id,
-                        run_id = %task.execution.run_id,
-                        task_id = %task.task_id,
-                        task_type = %task.task_type,
-                        "Received task execution task"
-                    );
-
+                Ok(tasks) if !tasks.is_empty() => {
                     // Work arrived: reset the idle and timeout counts, and let
                     // one more poller poll.
                     if let Some(scaler) = &self.scaler {
@@ -1199,30 +1288,51 @@ impl TaskExecutionPoller {
                     consecutive_idle_polls = 0;
                     consecutive_timeouts = 0;
 
-                    let token = task.task_token.clone();
-                    if let (Some(credits), Some(credit)) = (&self.credits, credit) {
-                        credits.spend(credit, token.clone(), task.start_to_close_timeout);
-                    }
-                    if let Err(mpsc::error::SendError(task)) = self.task_sender.send(task).await {
-                        if let Some(credits) = &self.credits {
-                            drop(credits.give_back(&token));
-                        }
-                        // The engine has started this task for this worker;
-                        // nothing gives it back, so it waits out its
-                        // start-to-close timeout. Logged as an error so the
-                        // loss is visible.
-                        tracing::error!(
+                    // Each task spends one of the credits the poll was made
+                    // with; those left over go back when dropped.
+                    let mut in_hand = in_hand.into_iter();
+                    let mut tasks = tasks.into_iter();
+                    let mut stopped = false;
+                    while let Some(task) = tasks.next() {
+                        tracing::info!(
                             task_queue = %self.config.task_queue,
-                            task_id = %task.task_id,
                             workflow_id = %task.execution.workflow_id,
-                            "Task driver stopped before this task could be handed to it; it \
-                             waits out its start-to-close timeout"
+                            run_id = %task.execution.run_id,
+                            task_id = %task.task_id,
+                            task_type = %task.task_type,
+                            "Received task execution task"
                         );
+                        let token = task.task_token.clone();
+                        if let (Some(credits), Some(credit)) = (&self.credits, in_hand.next()) {
+                            credits.spend(credit, token.clone(), task.start_to_close_timeout);
+                        }
+                        if let Err(mpsc::error::SendError(task)) = self.task_sender.send(task).await
+                        {
+                            if let Some(credits) = &self.credits {
+                                drop(credits.give_back(&token));
+                            }
+                            // The engine has started these tasks for this
+                            // worker; nothing gives them back, so each waits
+                            // out its start-to-close timeout. Logged as errors
+                            // so the loss is visible.
+                            for task in std::iter::once(task).chain(tasks.by_ref()) {
+                                tracing::error!(
+                                    task_queue = %self.config.task_queue,
+                                    task_id = %task.task_id,
+                                    workflow_id = %task.execution.workflow_id,
+                                    "Task driver stopped before this task could be handed to \
+                                     it; it waits out its start-to-close timeout"
+                                );
+                            }
+                            stopped = true;
+                        }
+                    }
+                    if stopped {
                         break;
                     }
                 }
-                Ok(None) => {
-                    drop(credit);
+                Ok(_) => {
+                    drop(in_hand);
                     // No work available - server timed out after long-poll
                     tracing::trace!("No task work available (timeout)");
 
@@ -1256,7 +1366,7 @@ impl TaskExecutionPoller {
                     self.pause(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
-                    drop(credit);
+                    drop(in_hand);
                     // Timeouts are normal during long polling; they are not warnings.
                     if e.is_normal_timeout() {
                         tracing::trace!(
@@ -1364,6 +1474,57 @@ impl TaskExecutionPoller {
     }
 
     /// Polls once for a task execution.
+    /// Polls once for up to `max_items` tasks, asking for several only of an
+    /// engine that hands them out.
+    async fn poll_inner(&mut self, max_items: usize) -> Result<Vec<TaskExecutionTask>> {
+        if max_items > 1 && self.batch_polls {
+            let mut request = tonic::Request::new(PollTaskExecutionsRequest {
+                poll: Some(self.poll_request_template.clone()),
+                max_items: u32::try_from(max_items).unwrap_or(u32::MAX),
+                ..Default::default()
+            });
+            request.set_timeout(Duration::from_secs(
+                self.config.poll_timeout_seconds as u64 + 10,
+            ));
+            stamp_poll(&mut request, &self.config);
+            // As for one task: a local timeout past the gRPC deadline keeps
+            // the poller from hanging.
+            let timeout_duration =
+                Duration::from_secs(self.config.poll_timeout_seconds as u64 + 12);
+            let answer =
+                tokio::time::timeout(timeout_duration, self.client.poll_task_executions(request))
+                    .await
+                    .map_err(|_elapsed| Error::timeout("poll task executions - tokio timeout"))?;
+            match answer {
+                Ok(response) => {
+                    return Ok(response
+                        .into_inner()
+                        .tasks
+                        .into_iter()
+                        .filter(|task| !task.task_id.is_empty())
+                        .map(TaskExecutionTask::from)
+                        .collect());
+                }
+                Err(e) if e.code() == tonic::Code::Unimplemented => {
+                    tracing::info!(
+                        task_queue = %self.config.task_queue,
+                        "The engine hands out one task per poll; polling for one at a time"
+                    );
+                    self.batch_polls = false;
+                }
+                Err(e) if e.code() == tonic::Code::DeadlineExceeded => {
+                    return Err(Error::timeout("poll task executions"));
+                }
+                Err(e) => {
+                    let e = crate::transport::clarify(e);
+                    tracing::warn!(error = %e, code = ?e.code(), "Task poll gRPC error");
+                    return Err(Error::GrpcStatus(e));
+                }
+            }
+        }
+        Ok(self.poll_once_inner().await?.into_iter().collect())
+    }
+
     async fn poll_once_inner(&mut self) -> Result<Option<TaskExecutionTask>> {
         // Clone the prebuilt request rather than building one for each poll.
         let request_body = self.poll_request_template.clone();
@@ -1443,7 +1604,14 @@ impl TaskExecutionPoller {
             "Received task execution"
         );
 
-        let task = TaskExecutionTask {
+        Ok(Some(TaskExecutionTask::from(poll_response)))
+    }
+}
+
+/// The task a poll handed out.
+impl From<PollTaskExecutionResponse> for TaskExecutionTask {
+    fn from(poll_response: PollTaskExecutionResponse) -> Self {
+        TaskExecutionTask {
             execution: WorkflowExecution::new(
                 poll_response.workflow_id,
                 poll_response.execution_id,
@@ -1460,10 +1628,24 @@ impl TaskExecutionPoller {
             heartbeat_timeout: poll_response
                 .heartbeat_timeout
                 .map(|d| Duration::new(d.seconds as u64, d.nanos as u32)),
-        };
-
-        Ok(Some(task))
+        }
     }
+}
+
+/// The headers every poll carries: the organization, the API key, and how
+/// much the poller can receive.
+fn stamp_poll<T>(request: &mut tonic::Request<T>, config: &PollerConfig) {
+    if let Some(ref org_id) = config.organization_id {
+        if let Ok(value) = org_id.parse() {
+            request.metadata_mut().insert("x-organization-id", value);
+        }
+    }
+    if let Some(ref key) = config.api_key {
+        if let Ok(value) = format!("Bearer {}", key).parse() {
+            request.metadata_mut().insert("authorization", value);
+        }
+    }
+    crate::transport::limits::state_receive_limit(request, config.max_message_bytes);
 }
 
 // ============================================================================
