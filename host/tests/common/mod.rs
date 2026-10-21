@@ -142,6 +142,14 @@ impl WorkerService for Engine {
 
 #[tonic::async_trait]
 impl ExecutionService for Engine {
+    async fn record_task_heartbeats(
+        &self,
+        _: Request<RecordTaskHeartbeatsRequest>,
+    ) -> std::result::Result<Response<RecordTaskHeartbeatsResponse>, Status> {
+        Err(Status::unimplemented(
+            "an engine that takes one heartbeat per call",
+        ))
+    }
     async fn poll_workflow_executions(
         &self,
         _: Request<PollWorkflowExecutionsRequest>,

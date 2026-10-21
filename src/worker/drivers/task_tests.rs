@@ -92,6 +92,11 @@ struct Script {
     serves_batches: bool,
     /// How many tasks each poll for several asked for, in order.
     batches_asked: Vec<u32>,
+    /// Take several heartbeats in one call; refuse such calls as
+    /// unimplemented otherwise, as an engine that predates them does.
+    takes_heartbeat_batches: bool,
+    /// How many heartbeats each call of several carried, in order.
+    heartbeat_batches: Vec<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -141,6 +146,47 @@ impl Engine {
 
 #[tonic::async_trait]
 impl ExecutionService for Engine {
+    /// Unimplemented unless the script takes batches: then each heartbeat as
+    /// a call of its own would be taken, the batch's size noted.
+    async fn record_task_heartbeats(
+        &self,
+        request: Request<RecordTaskHeartbeatsRequest>,
+    ) -> std::result::Result<Response<RecordTaskHeartbeatsResponse>, Status> {
+        let batch = request.into_inner();
+        if !self.script().takes_heartbeat_batches {
+            return Err(Status::unimplemented(
+                "an engine that takes one heartbeat per call",
+            ));
+        }
+        self.script().heartbeat_batches.push(batch.heartbeats.len());
+        let mut answers = Vec::new();
+        for heartbeat in batch.heartbeats {
+            let single = RecordTaskHeartbeatRequest {
+                task_token: heartbeat.task_token.clone(),
+                details: heartbeat.details,
+                ..Default::default()
+            };
+            answers.push(
+                match self.record_task_heartbeat(Request::new(single)).await {
+                    Ok(answer) => TaskHeartbeatAnswer {
+                        task_token: heartbeat.task_token,
+                        cancel_requested: answer.into_inner().cancel_requested,
+                        ..Default::default()
+                    },
+                    Err(status) => TaskHeartbeatAnswer {
+                        task_token: heartbeat.task_token,
+                        refused_code: status.code() as i32,
+                        refused_message: status.message().to_string(),
+                        ..Default::default()
+                    },
+                },
+            );
+        }
+        Ok(Response::new(RecordTaskHeartbeatsResponse {
+            answers,
+            ..Default::default()
+        }))
+    }
     async fn poll_workflow_executions(
         &self,
         _: Request<PollWorkflowExecutionsRequest>,
@@ -2224,6 +2270,82 @@ async fn a_driver_polls_for_one_task_at_a_time_of_an_engine_that_hands_out_one()
     }
     assert!(engine.script().batches_asked.is_empty());
 
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// Of an engine that takes several heartbeats in one call, the heartbeats of
+/// tasks running together go together, each task still at its own pace; and
+/// an answer asking a task to stop reaches each task it names.
+#[tokio::test]
+async fn heartbeats_due_together_go_in_one_call() {
+    let engine = Engine::default();
+    {
+        let mut script = engine.script();
+        script.takes_heartbeat_batches = true;
+        for n in 0..4 {
+            script.tasks.push_back(heartbeating_task(
+                &format!("t-{n}"),
+                &format!("tok-{n}"),
+                900,
+            ));
+        }
+    }
+    let mut parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            max_concurrent_executions: 4,
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let mut work = Vec::new();
+    for _ in 0..4 {
+        work.push(next_work(&mut parts.work_rx).await);
+    }
+    let handed_at = Instant::now();
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+
+    let batches = engine.script().heartbeat_batches.clone();
+    assert!(
+        batches.iter().any(|&size| size > 1),
+        "no call carried more than one heartbeat: {batches:?}"
+    );
+    for n in 0..4 {
+        let beats = engine.heartbeats(&format!("tok-{n}"));
+        assert!(
+            beats.len() >= 4,
+            "task {n} was heartbeated {} times",
+            beats.len()
+        );
+        let mut previous = handed_at;
+        for (at, _) in &beats {
+            assert!(
+                at.duration_since(previous) < Duration::from_millis(600),
+                "two heartbeats of task {n} {:?} apart, with a 900ms heartbeat timeout",
+                at.duration_since(previous)
+            );
+            previous = *at;
+        }
+    }
+
+    engine.script().cancel_requested = true;
+    for task in &work {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            task.heartbeat.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("a task named in a batch answer was not told to stop");
+    }
+
+    for task in &work {
+        parts.result_tx.send(succeeded(task)).await.unwrap();
+    }
     handle.shutdown();
     stops_within(running, GRACE + MARGIN).await;
 }
