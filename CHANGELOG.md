@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.0](https://github.com/orcher-io/sdk-core/compare/v0.18.0...v0.19.0) (2026-10-21)
+
+
+### Features
+
+* ask for as many items as there is room for in one poll ([#119](https://github.com/orcher-io/sdk-core/issues/119)) ([1518df2](https://github.com/orcher-io/sdk-core/commit/1518df2b6ceb1fa35b5f6c34769d0c7ac2addbca))
+* poll only with room to run what the poll brings ([#117](https://github.com/orcher-io/sdk-core/issues/117)) ([a15bf63](https://github.com/orcher-io/sdk-core/commit/a15bf63c2ae28d34933677468ddcee47abad0eb7))
+* send the heartbeats of tasks due together in one call ([#120](https://github.com/orcher-io/sdk-core/issues/120)) ([1746177](https://github.com/orcher-io/sdk-core/commit/17461778332645b0fe04748ad6294e569bce40c2))
+
+
+### Documentation
+
+* say a move to a newer orcher-proto is a minor release ([#121](https://github.com/orcher-io/sdk-core/issues/121)) ([59476e9](https://github.com/orcher-io/sdk-core/commit/59476e9407b400ad193bd856ab5f1c949a0b177f))
+
 ## [0.18.0](https://github.com/orcher-io/sdk-core/compare/v0.17.1...v0.18.0) (2026-10-20)
 
 
