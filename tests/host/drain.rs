@@ -2,14 +2,12 @@
 //! within the shutdown grace, what it did not finish is handed back where the
 //! engine can take it, and shutdown ends in bounded time.
 
-mod common;
-
 use std::time::{Duration, Instant};
 
-use common::{activation, task, Engine};
+use crate::common::{activation, task, Engine};
 use orcher_sdk_core::proto::host::v1::{task_outcome, TaskOutcome};
 use orcher_sdk_core::proto::kernel::v1::Payload;
-use orcher_sdk_host::{Host, HostConfig, Registrations};
+use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn worker(engine: &Engine, grace: Duration) -> Host {
     let addr = engine.serve().await;

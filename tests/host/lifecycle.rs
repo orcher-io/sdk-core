@@ -9,12 +9,12 @@ use orcher_sdk_core::proto::orcher::v1::worker_service_server::{
     WorkerService, WorkerServiceServer,
 };
 use orcher_sdk_core::proto::orcher::v1::*;
-use orcher_sdk_core::worker::{SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
-use orcher_sdk_host::config::{
+use orcher_sdk_core::worker::host::config::{
     ACTOR_POLL_TIMEOUT, TASK_HEARTBEAT_INTERVAL, TASK_POLL_TIMEOUT, WORKFLOW_CACHE_CAPACITY,
     WORKFLOW_POLL_TIMEOUT,
 };
-use orcher_sdk_host::{Host, HostConfig, Registrations};
+use orcher_sdk_core::worker::{SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
+use orcher_sdk_core::{Host, HostConfig, Registrations};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};

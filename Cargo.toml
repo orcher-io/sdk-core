@@ -11,7 +11,7 @@ keywords = ["orchestration", "workflow", "distributed", "sdk"]
 categories = ["asynchronous", "network-programming"]
 # Recorded runs for the replay tests: test data for this repository, not
 # part of the published crate.
-exclude = ["tests/fixtures/", "host/"]
+exclude = ["tests/fixtures/"]
 
 [dependencies]
 # Protocol definitions
@@ -85,10 +85,9 @@ workspace = true
 default = []
 test-utils = []
 
-# The worker host (orcher-sdk-host) is built and released with this crate:
-# one version, one tag, one changelog (see release-please-config.json).
+# The benchmark suite is built in this workspace and never published.
 [workspace]
-members = ["host", "bench"]
+members = ["bench"]
 resolver = "2"
 
 [workspace.lints.clippy]

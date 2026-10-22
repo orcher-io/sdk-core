@@ -2,15 +2,13 @@
 //! operations handed over by pull and reported with their failure types,
 //! state read and written, every call with the worker's credentials.
 
-mod common;
-
 use std::time::Duration;
 
-use common::Engine;
+use crate::common::Engine;
 use orcher_sdk_core::proto::host::v1::{actor_result, ActorMode, ActorResult};
 use orcher_sdk_core::proto::kernel::v1::{Failure, Payload};
 use orcher_sdk_core::proto::orcher::v1::{ActorOperation, OperationMode};
-use orcher_sdk_host::{ActorHandler, Host, HostConfig, Registrations, StateScope};
+use orcher_sdk_core::{ActorHandler, Host, HostConfig, Registrations, StateScope};
 
 fn handlers() -> Registrations {
     Registrations::default().with_actor_handlers([

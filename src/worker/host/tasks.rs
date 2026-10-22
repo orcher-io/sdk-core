@@ -5,22 +5,20 @@
 //! keeps a registry of the tasks the language holds, so a heartbeat or a
 //! cancellation wait finds its task, and a task the language reported stops
 //! being heartbeated for. The built-in session tasks are run by the host
-//! ([`crate::sessions`]) and never handed over.
+//! ([`crate::worker::host::sessions`]) and never handed over.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use orcher_sdk_core::proto::host::v1::{
-    task_outcome, HeartbeatAnswer, TaskAssignment, TaskOutcome,
-};
-use orcher_sdk_core::proto::kernel::v1::{Payload, RunRef};
-use orcher_sdk_core::proto::prost_types;
-use orcher_sdk_core::worker::poll::polling::TaskExecutionTask;
-use orcher_sdk_core::worker::{CancellationToken, TaskHeartbeat, TaskWork, TaskWorkResult};
-use orcher_sdk_core::{Error, Result, TaskFailure};
+use crate::proto::host::v1::{task_outcome, HeartbeatAnswer, TaskAssignment, TaskOutcome};
+use crate::proto::kernel::v1::{Payload, RunRef};
+use crate::proto::prost_types;
+use crate::worker::poll::polling::TaskExecutionTask;
+use crate::worker::{CancellationToken, TaskHeartbeat, TaskWork, TaskWorkResult};
+use crate::{Error, Result, TaskFailure};
 use tokio::sync::mpsc;
 
-use crate::sessions::Sessions;
+use crate::worker::host::sessions::Sessions;
 
 /// A task the language holds.
 struct Running {

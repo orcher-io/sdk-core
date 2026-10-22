@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use orcher_sdk_core::transport::TlsConfig;
-use orcher_sdk_core::worker::drivers::actor::ActorDriverConfig;
-use orcher_sdk_core::worker::drivers::registration::WorkerRegistrationConfig;
-use orcher_sdk_core::worker::drivers::task::TaskDriverConfig;
-use orcher_sdk_core::worker::drivers::workflow::WorkflowDriverConfig;
-use orcher_sdk_core::worker::{CompletionRetryConfig, BUILT_IN_TASK_TYPES};
+use crate::transport::TlsConfig;
+use crate::worker::drivers::actor::ActorDriverConfig;
+use crate::worker::drivers::registration::WorkerRegistrationConfig;
+use crate::worker::drivers::task::TaskDriverConfig;
+use crate::worker::drivers::workflow::WorkflowDriverConfig;
+use crate::worker::{CompletionRetryConfig, BUILT_IN_TASK_TYPES};
 
 /// How long a workflow poll waits for work.
 pub const WORKFLOW_POLL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -92,10 +92,10 @@ pub struct HostConfig {
     /// The SDK's version.
     pub sdk_version: String,
     /// The worker protocol version the worker reports, numbered as in
-    /// [`orcher_sdk_core::worker_protocol`]. What a version promises covers
+    /// [`crate::worker_protocol`]. What a version promises covers
     /// the language SDK too, so the SDK raises it once it does what the
     /// version says. Default:
-    /// [`CANCEL_REQUEST`](orcher_sdk_core::worker_protocol::CANCEL_REQUEST).
+    /// [`CANCEL_REQUEST`](crate::worker_protocol::CANCEL_REQUEST).
     pub protocol_version: u32,
 }
 
@@ -124,7 +124,7 @@ impl HostConfig {
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
             sdk_name: String::new(),
             sdk_version: String::new(),
-            protocol_version: orcher_sdk_core::worker_protocol::CANCEL_REQUEST,
+            protocol_version: crate::worker_protocol::CANCEL_REQUEST,
         }
     }
 
@@ -217,7 +217,7 @@ impl HostConfig {
     }
 
     /// Reports worker protocol version `version`
-    /// ([`orcher_sdk_core::worker_protocol`]): set by a language SDK that does
+    /// ([`crate::worker_protocol`]): set by a language SDK that does
     /// what the version promises.
     pub fn with_protocol_version(mut self, version: u32) -> Self {
         self.protocol_version = version;
@@ -226,68 +226,74 @@ impl HostConfig {
 
     /// The workflow driver's configuration.
     pub fn workflow_driver(&self) -> WorkflowDriverConfig {
-        let mut config = WorkflowDriverConfig::default();
-        config.server_url = self.server_url.clone();
-        config.namespace = self.namespace.clone();
-        config.task_queue = self.task_queue.clone();
-        config.max_concurrent_executions = self.max_concurrent_workflows as usize;
-        config.identity = self.identity.clone();
-        config.poll_timeout = WORKFLOW_POLL_TIMEOUT;
-        config.cache_capacity = WORKFLOW_CACHE_CAPACITY;
-        config.strict_determinism = false;
-        config.poller_count = self.workflow_pollers.max(1);
-        config.organization_id = self.organization_id.clone();
-        config.api_key = self.api_key.clone();
-        config.tls_config = self.tls.clone();
-        config.version_id = self.version_id.clone();
-        config.protocol_version = self.protocol_version;
-        config
+        WorkflowDriverConfig {
+            server_url: self.server_url.clone(),
+            namespace: self.namespace.clone(),
+            task_queue: self.task_queue.clone(),
+            max_concurrent_executions: self.max_concurrent_workflows as usize,
+            identity: self.identity.clone(),
+            poll_timeout: WORKFLOW_POLL_TIMEOUT,
+            cache_capacity: WORKFLOW_CACHE_CAPACITY,
+            strict_determinism: false,
+            poller_count: self.workflow_pollers.max(1),
+            organization_id: self.organization_id.clone(),
+            api_key: self.api_key.clone(),
+            tls_config: self.tls.clone(),
+            version_id: self.version_id.clone(),
+            protocol_version: self.protocol_version,
+            ..WorkflowDriverConfig::default()
+        }
     }
 
     /// The task driver's configuration.
     pub fn task_driver(&self) -> TaskDriverConfig {
-        let mut config = TaskDriverConfig::default();
-        config.server_url = self.server_url.clone();
-        config.namespace = self.namespace.clone();
-        config.task_queue = self.task_queue.clone();
-        config.max_concurrent_executions = self.max_concurrent_tasks as usize;
-        config.identity = self.identity.clone();
-        config.poll_timeout = TASK_POLL_TIMEOUT;
-        config.enable_heartbeat = true;
-        config.heartbeat_interval = TASK_HEARTBEAT_INTERVAL;
-        config.poller_count = self.task_pollers.max(1);
-        config.organization_id = self.organization_id.clone();
-        config.api_key = self.api_key.clone();
-        config.tls_config = self.tls.clone();
-        config.version_id = self.version_id.clone();
-        config.auto_heartbeat = true;
-        config
+        TaskDriverConfig {
+            server_url: self.server_url.clone(),
+            namespace: self.namespace.clone(),
+            task_queue: self.task_queue.clone(),
+            max_concurrent_executions: self.max_concurrent_tasks as usize,
+            identity: self.identity.clone(),
+            poll_timeout: TASK_POLL_TIMEOUT,
+            enable_heartbeat: true,
+            heartbeat_interval: TASK_HEARTBEAT_INTERVAL,
+            poller_count: self.task_pollers.max(1),
+            organization_id: self.organization_id.clone(),
+            api_key: self.api_key.clone(),
+            tls_config: self.tls.clone(),
+            version_id: self.version_id.clone(),
+            auto_heartbeat: true,
+            ..TaskDriverConfig::default()
+        }
     }
 
     /// The actor driver's configuration, for the registration the actor
     /// service gave the worker's handlers.
     pub fn actor_driver(&self, registration_id: Option<String>) -> ActorDriverConfig {
-        let mut config = ActorDriverConfig::default();
-        config.server_url = self.server_url.clone();
-        config.namespace = self.namespace.clone();
-        config.service_id = self.identity.clone();
-        config.max_concurrent_executions = self.max_concurrent_actor_operations as usize;
-        config.identity = self.identity.clone();
-        config.poll_timeout = ACTOR_POLL_TIMEOUT;
-        config.poller_count = self.actor_pollers.max(1);
-        config.organization_id = self.organization_id.clone();
-        config.api_key = self.api_key.clone();
-        config.enable_heartbeat = true;
-        config.heartbeat_interval = self.heartbeat_interval;
-        config.registration_id = registration_id;
-        config.tls_config = self.tls.clone();
-        config
+        ActorDriverConfig {
+            server_url: self.server_url.clone(),
+            namespace: self.namespace.clone(),
+            service_id: self.identity.clone(),
+            max_concurrent_executions: self.max_concurrent_actor_operations as usize,
+            identity: self.identity.clone(),
+            poll_timeout: ACTOR_POLL_TIMEOUT,
+            poller_count: self.actor_pollers.max(1),
+            organization_id: self.organization_id.clone(),
+            api_key: self.api_key.clone(),
+            enable_heartbeat: true,
+            heartbeat_interval: self.heartbeat_interval,
+            registration_id,
+            tls_config: self.tls.clone(),
+            ..ActorDriverConfig::default()
+        }
     }
 
     /// The worker registration's configuration, advertising what the worker
     /// registered. The built-in session tasks are advertised whenever the
     /// worker runs tasks, since it handles them.
-    pub fn registration(&self, registrations: &crate::Registrations) -> WorkerRegistrationConfig {
+    pub fn registration(
+        &self,
+        registrations: &crate::worker::host::Registrations,
+    ) -> WorkerRegistrationConfig {
         let runs_tasks = !registrations.task_types.is_empty();
         let task_types = registrations
             .task_types
@@ -311,23 +317,24 @@ impl HostConfig {
             "host_version".to_string(),
             env!("CARGO_PKG_VERSION").to_string(),
         );
-        let mut config = WorkerRegistrationConfig::default();
-        config.server_url = self.server_url.clone();
-        config.service_id = self.identity.clone();
-        config.identity = self.identity.clone();
-        config.task_queue = self.task_queue.clone();
-        config.namespace = self.namespace.clone();
-        config.workflow_types = registrations.workflow_types.clone();
-        config.task_types = task_types;
-        config.max_concurrent_workflows = self.max_concurrent_workflows;
-        config.max_concurrent_tasks = self.max_concurrent_tasks;
-        config.heartbeat_interval = self.heartbeat_interval;
-        config.metadata = metadata;
-        config.version_id = self.version_id.clone();
-        config.tls_config = self.tls.clone();
-        config.api_key = self.api_key.clone();
-        config.organization_id = self.organization_id.clone();
-        config.protocol_version = self.protocol_version;
-        config
+        WorkerRegistrationConfig {
+            server_url: self.server_url.clone(),
+            service_id: self.identity.clone(),
+            identity: self.identity.clone(),
+            task_queue: self.task_queue.clone(),
+            namespace: self.namespace.clone(),
+            workflow_types: registrations.workflow_types.clone(),
+            task_types,
+            max_concurrent_workflows: self.max_concurrent_workflows,
+            max_concurrent_tasks: self.max_concurrent_tasks,
+            heartbeat_interval: self.heartbeat_interval,
+            metadata,
+            version_id: self.version_id.clone(),
+            tls_config: self.tls.clone(),
+            api_key: self.api_key.clone(),
+            organization_id: self.organization_id.clone(),
+            protocol_version: self.protocol_version,
+            ..WorkerRegistrationConfig::default()
+        }
     }
 }

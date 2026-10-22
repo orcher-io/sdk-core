@@ -6,7 +6,7 @@
 //! - State machines for workflows and tasks
 //! - Deterministic replay
 //! - Workflow state caching
-//! - Drivers that hand polled work to a language SDK
+//! - The worker host ([`Host`]), which every language SDK runs its worker on
 //!
 //! ## Terminology
 //!
@@ -64,7 +64,8 @@
 //!   state/       state machines, the replayer and determinism checks, the workflow cache
 //!   protocol/    activations in (ExecutionRequest), commands out (ExecutionResult)
 //!   worker/
-//!     drivers/   workflow, task, actor and registration drivers: the API for language SDKs
+//!     host/      the Host: one worker's plumbing, the API every language SDK runs a worker on
+//!     drivers/   workflow, task, actor and registration drivers, which the host runs
 //!     poll/      long-polling, and reporting results (eager tasks included)
 //!     governor/  each driver's slots, and the reports it still has in flight
 //!     heartbeat, lifecycle, metrics
@@ -76,7 +77,7 @@
 //!
 //! - **state** - State machines, deterministic replay and determinism checks.
 //! - **protocol** - The request/result types exchanged with language SDKs.
-//! - **worker** - Drivers and polling; the main API for language SDKs.
+//! - **worker** - The [`Host`], the API language SDKs run a worker on, and the drivers and polling under it.
 //! - **transport** - The connection to the engine.
 //! - **client** - Start, query and manage workflows, namespaces and actors.
 //! - **payload** - Payloads, their conversion from values ([`payload::converter`])
@@ -135,6 +136,7 @@ pub mod state;
 pub mod transport;
 pub mod types;
 pub mod worker;
+pub use worker::host::{ActorHandler, Host, HostConfig, Registrations, StateScope, StateValue};
 
 // The paths these modules had before the sources were organised by role.
 mod compat;

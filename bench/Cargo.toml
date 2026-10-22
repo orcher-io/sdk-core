@@ -12,10 +12,9 @@ publish = false
 workspace = true
 
 [dependencies]
-# The worker under test is this checkout's core and host, so a change to
-# either is what the suite measures.
+# The worker under test is this checkout's core, so a change to it is what
+# the suite measures.
 orcher-sdk-core = { path = ".." }
-orcher-sdk-host = { path = "../host" }
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"

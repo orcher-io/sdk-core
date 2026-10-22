@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orcher_sdk_core::proto::host::v1::{task_outcome, TaskAssignment, TaskOutcome};
-use orcher_sdk_host::{Host, HostConfig, Registrations};
+use orcher_sdk_core::{Host, HostConfig, Registrations};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 

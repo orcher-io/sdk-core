@@ -1,17 +1,15 @@
 //! Workflow activations handed to the language as the kernel protocol's
 //! messages, against a fake engine.
 
-mod common;
-
 use std::time::Duration;
 
-use common::{activation, Engine};
+use crate::common::{activation, Engine};
 use orcher_sdk_core::proto::kernel::v1::{
     command, resolution, run_activation_result, Command, Commands, Failure, ProtocolError,
     RunActivationResult, RunTask,
 };
 use orcher_sdk_core::proto::orcher::v1::command::Attributes;
-use orcher_sdk_host::{Host, HostConfig, Registrations};
+use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn workflow_worker(engine: &Engine) -> Host {
     let addr = engine.serve().await;

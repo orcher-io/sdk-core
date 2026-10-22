@@ -4,17 +4,17 @@
 //! The language asks for its next activation, runs the workflow's code
 //! against the resolved history it carries, and answers with every durable
 //! call the code made. The kernel resolves the history on the way out
-//! ([`orcher_sdk_core::kernel::resolve`]) and turns the answer back into
-//! commands on the way in ([`orcher_sdk_core::kernel::execution_result`]).
+//! ([`crate::kernel::resolve`]) and turns the answer back into
+//! commands on the way in ([`crate::kernel::execution_result`]).
 //! The language never sees the journal.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use orcher_sdk_core::kernel;
-use orcher_sdk_core::proto::kernel::v1::{RunActivation, RunActivationResult};
-use orcher_sdk_core::worker::{WorkflowWork, WorkflowWorkResult};
-use orcher_sdk_core::{Error, Result};
+use crate::kernel;
+use crate::proto::kernel::v1::{RunActivation, RunActivationResult};
+use crate::worker::{WorkflowWork, WorkflowWorkResult};
+use crate::{Error, Result};
 use tokio::sync::mpsc;
 
 /// An activation the language holds, and what its answer is sent with.

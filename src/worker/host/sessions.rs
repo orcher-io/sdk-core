@@ -16,11 +16,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use orcher_sdk_core::worker::{
+use crate::worker::{
     CancellationToken, SessionQueueChange, TaskWork, TaskWorkResult, SESSION_COMPLETE_TASK,
     SESSION_CREATE_TASK,
 };
-use orcher_sdk_core::TaskFailure;
+use crate::TaskFailure;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Semaphore};
 
