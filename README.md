@@ -50,14 +50,17 @@ serde_json = "1"
 Start a workflow and wait for its result:
 
 ```rust
-use orcher_sdk_core::WorkflowClient;
+use orcher_sdk_core::{ConnectOptions, Connection};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = WorkflowClient::connect("http://localhost:50051")
-        .await?
-        .with_api_key("my-api-key")
-        .with_namespace("default");
+    let connection = Connection::connect(
+        ConnectOptions::new("http://localhost:50051")
+            .with_api_key("my-api-key")
+            .with_namespace("default"),
+    )
+    .await?;
+    let client = connection.workflow_client();
 
     let handle = client
         .start_workflow(
@@ -74,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-A language SDK builds on the drivers instead: `WorkflowDriver`, `TaskDriver` and `ActorDriver` poll the engine and pass each piece of work to the SDK as a request, and the SDK answers with a result that the driver reports back. The drivers live in the `worker` module and the request and result types in the `protocol` module; see [docs.rs](https://docs.rs/orcher-sdk-core) for the full API.
+A language SDK runs its worker on `Host` instead: the host polls the engine, resolves each workflow activation's history in the kernel, and hands the SDK activations, tasks and actor operations as kernel and host protocol messages, typed or encoded (`Host::encoded`), checking every answer before it reports it. The same `ConnectOptions` configure the host (`HostConfig`) and the clients. See [docs/worker-host.md](docs/worker-host.md) and [docs.rs](https://docs.rs/orcher-sdk-core) for the full API, and [UPGRADING.md](UPGRADING.md) when moving between minor releases.
 
 <br />
 
