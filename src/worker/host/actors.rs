@@ -18,7 +18,7 @@ use crate::proto::orcher::v1::{
     self as engine, DeleteStateRequest, GetStateRequest, ListStateKeysRequest,
     RegisterHandlersRequest, SetStateRequest,
 };
-use crate::transport::{credentialed_request, limits};
+use crate::transport::credentialed_request;
 use crate::worker::{ActorWork, ActorWorkResult, RegistrationHandle};
 use crate::{Error, Result, TaskFailure};
 use tokio::sync::mpsc;
@@ -119,18 +119,19 @@ impl ActorService {
         wire: &std::sync::Arc<crate::observability::WireMetrics>,
     ) -> Result<Self> {
         let channel = crate::transport::channel::connect_channel(
-            &config.server_url,
-            config.tls.as_ref(),
+            &config.connection.url,
+            config.connection.tls.as_ref(),
+            config.connection.connect_timeout,
             wire,
         )
         .await?;
-        let max = limits::default_max_message_bytes();
+        let max = config.connection.max_message_bytes;
         Ok(Self {
             client: ActorServiceClient::new(channel)
                 .max_decoding_message_size(max)
                 .max_encoding_message_size(max),
-            api_key: config.api_key.clone(),
-            organization_id: config.organization_id.clone(),
+            api_key: config.connection.api_key.clone(),
+            organization_id: config.connection.organization_id.clone(),
         })
     }
 
@@ -276,7 +277,7 @@ impl ActorService {
 /// What the actor service is told about the worker when it registers.
 pub(crate) fn registration_metadata(config: &HostConfig) -> HashMap<String, String> {
     let mut metadata = HashMap::from([
-        ("namespace".to_string(), config.namespace.clone()),
+        ("namespace".to_string(), config.connection.namespace.clone()),
         ("task_queue".to_string(), config.task_queue.clone()),
         (
             "host_version".to_string(),

@@ -67,6 +67,9 @@ pub struct WorkerRegistrationConfig {
     /// TLS configuration; `None` connects without TLS.
     pub tls_config: Option<crate::transport::TlsConfig>,
 
+    /// How long a connect may take.
+    pub connect_timeout: std::time::Duration,
+
     /// API key sent as `authorization: Bearer <key>` on registration,
     /// heartbeat and deregistration.
     ///
@@ -109,6 +112,7 @@ impl std::fmt::Debug for WorkerRegistrationConfig {
             metadata,
             version_id,
             tls_config,
+            connect_timeout,
             api_key,
             organization_id,
             protocol_version,
@@ -128,6 +132,7 @@ impl std::fmt::Debug for WorkerRegistrationConfig {
             .field("metadata", metadata)
             .field("version_id", version_id)
             .field("tls_config", tls_config)
+            .field("connect_timeout", connect_timeout)
             .field("api_key", &crate::transport::credentials::redacted(api_key))
             .field("organization_id", organization_id)
             .field("protocol_version", protocol_version)
@@ -155,6 +160,7 @@ impl Default for WorkerRegistrationConfig {
             heartbeat_interval: Duration::from_secs(10),
             metadata: HashMap::new(),
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             version_id: None,
             api_key: None,
             organization_id: None,
@@ -214,6 +220,7 @@ impl WorkerRegistrationDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_connect_timeout(config.connect_timeout)
         .with_wire_metrics(std::sync::Arc::clone(&config.wire));
         let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
 

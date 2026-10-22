@@ -52,10 +52,11 @@
 //!     host/      the Host: the one way a language SDK runs a worker
 //!     record     recorded runs, for replay tools
 //!     …          drivers, polling, the governor, heartbeats (private)
-//!   client/      start, query and manage workflows, namespaces and actors
+//!   client/      the connection to the engine, and the clients that start,
+//!                query and manage workflows, namespaces and actors on it
 //!   protocol/    what workflow code produces: commands, in an ExecutionResult
 //!   state/       the journal checks every activation goes through (private)
-//!   transport/   the connection to the engine
+//!   transport/   channels, credentials and message limits (private)
 //!   payload/     the Payload type, converters and codecs
 //!   error, types, interceptor, observability
 //! ```
@@ -68,12 +69,13 @@
 //! ### Client Usage (Starting Workflows)
 //!
 //! ```rust,no_run
-//! use orcher_sdk_core::client::WorkflowClient;
+//! use orcher_sdk_core::{ConnectOptions, Connection};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Connect to an ORCHER server.
-//!     let client = WorkflowClient::connect("http://localhost:50051").await?;
+//!     let connection = Connection::connect(ConnectOptions::new("http://localhost:50051")).await?;
+//!     let client = connection.workflow_client();
 //!
 //!     // Start a workflow.
 //!     let handle = client.start_workflow(
@@ -103,7 +105,7 @@ pub mod observability;
 pub mod payload;
 pub mod protocol;
 pub(crate) mod state;
-pub mod transport;
+pub(crate) mod transport;
 pub mod types;
 mod wire;
 pub mod worker;
@@ -114,8 +116,12 @@ pub use worker::host::{
 };
 pub use worker::{TaskExecutionTask, WorkflowExecutionTask};
 
-// Clients for workflows, namespaces and actors.
-pub use client::{NamespaceClient, WorkflowClient, WorkflowHandle};
+// The connection to the engine, and the clients for workflows, namespaces
+// and actors that share it.
+pub use client::{
+    ActorClient, ConnectOptions, Connection, NamespaceClient, WorkflowClient, WorkflowHandle,
+};
+pub use transport::TlsConfig;
 
 // Errors.
 pub use error::{Error, Result, TaskFailure};
@@ -126,9 +132,8 @@ pub use payload::{Payload, Payloads};
 
 // Shared vocabulary.
 pub use types::{
-    ListWorkflowsOptions, ListWorkflowsSortOrder, OrganizationContext, SearchWorkflowsOptions,
-    WorkflowExecution, WorkflowExecutionDescription, WorkflowExecutionInfo, WorkflowListPage,
-    WorkflowStatus,
+    ListWorkflowsOptions, ListWorkflowsSortOrder, SearchWorkflowsOptions, WorkflowExecution,
+    WorkflowExecutionDescription, WorkflowExecutionInfo, WorkflowListPage, WorkflowStatus,
 };
 
 // What workflow code produces, as the kernel hands it to the worker.

@@ -192,9 +192,11 @@ mod tests {
             (200, Code::Internal, false),
         ] {
             let addr = serve_page(http).await;
-            let client = crate::client::WorkflowClient::connect(format!("http://{addr}"))
-                .await
-                .unwrap();
+            let client = crate::client::Connection::lazy(crate::client::ConnectOptions::new(
+                format!("http://{addr}"),
+            ))
+            .unwrap()
+            .workflow_client();
             let error = client.get_workflow_status("wf", None).await.unwrap_err();
             let crate::error::Error::Status(status) = &error else {
                 panic!("{error:?}");

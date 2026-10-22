@@ -88,6 +88,9 @@ pub struct PollerConfig {
     /// fail at the handshake, while the driver reports itself connected.
     pub tls_config: Option<crate::transport::TlsConfig>,
 
+    /// How long a connect may take.
+    pub connect_timeout: std::time::Duration,
+
     /// The code release this worker is running, if declared.
     ///
     /// An opaque label — a git sha, an image digest, a release tag. The server
@@ -133,6 +136,7 @@ impl std::fmt::Debug for PollerConfig {
             organization_id,
             api_key,
             tls_config,
+            connect_timeout,
             version_id,
             auto_heartbeat,
             max_message_bytes,
@@ -147,6 +151,7 @@ impl std::fmt::Debug for PollerConfig {
             .field("organization_id", organization_id)
             .field("api_key", &crate::transport::credentials::redacted(api_key))
             .field("tls_config", tls_config)
+            .field("connect_timeout", connect_timeout)
             .field("version_id", version_id)
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
@@ -170,6 +175,7 @@ impl Default for PollerConfig {
             api_key: None,
             version_id: None,
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             auto_heartbeat: false,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             wire: crate::observability::WireMetrics::new(),
@@ -349,6 +355,7 @@ impl WorkflowExecutionPoller {
         let channel = crate::transport::channel::connect_channel(
             &address,
             config.tls_config.as_ref(),
+            config.connect_timeout,
             &config.wire,
         )
         .await?;
@@ -496,6 +503,7 @@ impl WorkflowExecutionPoller {
                 let channel = crate::transport::channel::connect_channel(
                     &self.server_url,
                     self.config.tls_config.as_ref(),
+                    self.config.connect_timeout,
                     &self.config.wire,
                 )
                 .await
@@ -1016,6 +1024,7 @@ impl TaskExecutionPoller {
         let channel = crate::transport::channel::connect_channel(
             &address,
             config.tls_config.as_ref(),
+            config.connect_timeout,
             &config.wire,
         )
         .await?;
@@ -1585,6 +1594,9 @@ pub struct ActorPollerConfig {
     /// TLS for the poller's own connection; see `PollerConfig::tls_config`.
     pub tls_config: Option<crate::transport::TlsConfig>,
 
+    /// How long a connect may take.
+    pub connect_timeout: std::time::Duration,
+
     /// The largest message the poller receives; see
     /// `PollerConfig::max_message_bytes`.
     pub max_message_bytes: usize,
@@ -1606,6 +1618,7 @@ impl std::fmt::Debug for ActorPollerConfig {
             organization_id,
             api_key,
             tls_config,
+            connect_timeout,
             max_message_bytes,
             wire: _,
         } = self;
@@ -1617,6 +1630,7 @@ impl std::fmt::Debug for ActorPollerConfig {
             .field("organization_id", organization_id)
             .field("api_key", &crate::transport::credentials::redacted(api_key))
             .field("tls_config", tls_config)
+            .field("connect_timeout", connect_timeout)
             .field("max_message_bytes", max_message_bytes)
             .finish()
     }
@@ -1632,6 +1646,7 @@ impl Default for ActorPollerConfig {
             organization_id: None,
             api_key: None,
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             wire: crate::observability::WireMetrics::new(),
         }
@@ -1704,6 +1719,7 @@ impl ActorOperationPoller {
         let channel = crate::transport::channel::connect_channel(
             &address,
             config.tls_config.as_ref(),
+            config.connect_timeout,
             &config.wire,
         )
         .await?;
@@ -1813,6 +1829,7 @@ impl ActorOperationPoller {
                 let channel = crate::transport::channel::connect_channel(
                     &self.server_url,
                     self.config.tls_config.as_ref(),
+                    self.config.connect_timeout,
                     &self.config.wire,
                 )
                 .await
@@ -2052,6 +2069,7 @@ mod tests {
             version_id: None,
             api_key: None,
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             auto_heartbeat: false,
             max_message_bytes: 1024,
             wire: crate::observability::WireMetrics::new(),

@@ -64,6 +64,9 @@ pub struct WorkflowDriverConfig {
     /// TLS configuration for secure connections (optional).
     pub tls_config: Option<crate::transport::TlsConfig>,
 
+    /// How long a connect may take.
+    pub connect_timeout: std::time::Duration,
+
     /// The code release this worker is running (optional).
     ///
     /// Sent on every poll. The server records it on a workflow execution the
@@ -128,6 +131,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             organization_id,
             api_key,
             tls_config,
+            connect_timeout,
             version_id,
             max_message_bytes,
             non_determinism_retry,
@@ -147,6 +151,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             .field("organization_id", organization_id)
             .field("api_key", &crate::transport::credentials::redacted(api_key))
             .field("tls_config", tls_config)
+            .field("connect_timeout", connect_timeout)
             .field("version_id", version_id)
             .field("max_message_bytes", max_message_bytes)
             .field("non_determinism_retry", non_determinism_retry)
@@ -170,6 +175,7 @@ impl Default for WorkflowDriverConfig {
             organization_id: None,
             api_key: None,
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             version_id: None,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             non_determinism_retry: Duration::from_secs(2),
@@ -312,6 +318,7 @@ impl WorkflowDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_connect_timeout(config.connect_timeout)
         .with_wire_metrics(std::sync::Arc::clone(&config.wire))
         .with_max_message_bytes(config.max_message_bytes);
         let _channel = channel_manager
@@ -354,6 +361,7 @@ impl WorkflowDriver {
                 version_id: config.version_id.clone(),
                 auto_heartbeat: false,
                 tls_config: config.tls_config.clone(),
+                connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
                 wire: std::sync::Arc::clone(&config.wire),
             };

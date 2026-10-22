@@ -7,11 +7,10 @@
 use std::time::Duration;
 
 use orcher_sdk_core::client::workflow::{CancelWorkflowOpts, StartWorkflowOpts};
-use orcher_sdk_core::transport::TlsConfig;
 use orcher_sdk_core::types::RetryPolicy;
 use orcher_sdk_core::{
-    Error, HostConfig, ListWorkflowsOptions, ListWorkflowsSortOrder, Registrations,
-    SearchWorkflowsOptions, WorkflowStatus,
+    ConnectOptions, Error, HostConfig, ListWorkflowsOptions, ListWorkflowsSortOrder, Registrations,
+    SearchWorkflowsOptions, TlsConfig, WorkflowStatus,
 };
 
 #[test]
@@ -59,8 +58,20 @@ fn a_host_configuration_and_its_registrations_build_from_outside() {
         .with_tls(TlsConfig::new())
         .with_protocol_version(orcher_sdk_core::worker_protocol::CANCEL_REQUEST);
     assert_eq!(config.task_queue, "orders");
-    assert_eq!(config.namespace, "shop");
-    assert!(config.tls.is_some());
+    assert_eq!(config.connection.namespace, "shop");
+    assert!(config.connection.tls.is_some());
+
+    let options = ConnectOptions::new("https://engine.example")
+        .with_namespace("shop")
+        .with_api_key("key")
+        .with_organization_id("org-1")
+        .with_tls(TlsConfig::new())
+        .with_connect_timeout(Duration::from_secs(2))
+        .with_max_message_bytes(1 << 20);
+    let config = HostConfig::new(options.clone(), "orders");
+    assert_eq!(config.connection.url, "https://engine.example");
+    assert_eq!(config.connection.connect_timeout, Duration::from_secs(2));
+    assert!(!format!("{options:?}").contains("\"key\""), "{options:?}");
 
     let registrations = Registrations::new(["checkout"], ["charge"], Vec::<String>::new());
     assert_eq!(registrations.task_types, vec!["charge".to_string()]);

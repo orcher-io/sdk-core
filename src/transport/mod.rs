@@ -9,7 +9,7 @@ pub mod limits;
 pub mod non_grpc;
 
 // Channel manager and TLS config.
-pub use channel::{ChannelManager, TlsConfig};
+pub use channel::TlsConfig;
 
 // The credential helper every worker-originated call uses.
 pub use credentials::credentialed_request;

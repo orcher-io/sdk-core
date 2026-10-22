@@ -271,38 +271,6 @@ pub struct Annotations {
     pub fields: HashMap<String, String>,
 }
 
-/// Organization context for multi-tenancy.
-///
-/// The organization is the unit for quotas, billing attribution, and
-/// isolation. On the wire its ID travels in the `x-organization-id` header,
-/// which a client sends once configured with
-/// [`WorkflowClient::with_organization_id`](crate::client::WorkflowClient::with_organization_id).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct OrganizationContext {
-    /// Organization ID (UUID string)
-    pub organization_id: Option<String>,
-}
-
-impl OrganizationContext {
-    /// Creates a context for the given organization ID.
-    pub fn new(organization_id: impl Into<String>) -> Self {
-        Self {
-            organization_id: Some(organization_id.into()),
-        }
-    }
-
-    /// Returns whether an organization ID is set.
-    pub fn is_set(&self) -> bool {
-        self.organization_id.is_some()
-    }
-
-    /// Returns the organization ID, if set.
-    pub fn id(&self) -> Option<&str> {
-        self.organization_id.as_deref()
-    }
-}
-
 impl Annotations {
     /// Creates an empty annotations map.
     pub fn new() -> Self {
@@ -661,27 +629,5 @@ mod tests {
         assert!(annotations.get("name").is_some());
         assert_eq!(annotations.get("count").unwrap(), "42");
         assert_eq!(annotations.get("name").unwrap(), "test");
-    }
-
-    #[test]
-    fn test_organization_context() {
-        let ctx = OrganizationContext::default();
-        assert!(!ctx.is_set());
-        assert!(ctx.id().is_none());
-
-        let ctx = OrganizationContext::new("org_abc123");
-        assert!(ctx.is_set());
-        assert_eq!(ctx.id(), Some("org_abc123"));
-        assert_eq!(ctx.organization_id, Some("org_abc123".to_string()));
-    }
-
-    #[test]
-    fn test_organization_context_serialization() {
-        let ctx = OrganizationContext::new("org_test");
-        let json = serde_json::to_string(&ctx).unwrap();
-        assert!(json.contains("org_test"));
-
-        let decoded: OrganizationContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.id(), Some("org_test"));
     }
 }

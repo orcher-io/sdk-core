@@ -185,8 +185,8 @@ impl ChannelManager {
                 last_attempt_at: None,
             }),
             connecting: tokio::sync::Mutex::new(()),
-            connect_timeout: Duration::from_secs(5),
-            default_rpc_timeout: Duration::from_secs(70),
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
+            default_rpc_timeout: Self::DEFAULT_RPC_TIMEOUT,
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
             jitter_ms: 250,
@@ -194,6 +194,12 @@ impl ChannelManager {
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             wire: WireMetrics::new(),
         }
+    }
+
+    /// Gives each connect `timeout` to finish.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
     }
 
     /// Records the calls on this manager's channel in `wire`, shared with the
@@ -231,7 +237,8 @@ impl ChannelManager {
     }
 
     /// Returns whether the circuit is open, so no reconnect is attempted yet.
-    pub fn is_cooling_off(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_cooling_off(&self) -> bool {
         !self.cooling_off_duration().is_zero()
     }
 
@@ -281,26 +288,6 @@ impl ChannelManager {
         }
     }
 
-    /// Resets the failure count and cool-off, closing the circuit.
-    ///
-    /// Call this after a successful RPC so the next connect can happen at once.
-    pub fn reset(&mut self) {
-        let mut state = self.state.lock();
-        state.fail_count = 0;
-        state.next_retry_at = None;
-    }
-
-    /// Drops the cached channel without touching backoff state.
-    ///
-    /// Use this for transient stream-level errors (for example h2 `RST_STREAM`
-    /// or gRPC `Cancelled`), where the server is still reachable but one HTTP/2
-    /// stream was reset. Unlike `record_failure()`, this neither increments
-    /// `fail_count` nor starts a cool-off, so the next `get()` reconnects
-    /// immediately.
-    pub fn reset_channel(&mut self) {
-        self.state.lock().channel = None;
-    }
-
     /// Whether a connection is held.
     #[cfg(test)]
     pub(crate) fn is_connected(&self) -> bool {
@@ -308,15 +295,14 @@ impl ChannelManager {
     }
 
     /// Returns how long until the current cool-off ends, or zero if there is none.
-    pub fn cooling_off_duration(&self) -> std::time::Duration {
+    #[cfg(test)]
+    pub(crate) fn cooling_off_duration(&self) -> std::time::Duration {
         match self.state.lock().next_retry_at {
             Some(t) => t.saturating_duration_since(Instant::now()),
             None => std::time::Duration::ZERO,
         }
     }
 
-    /// Connect timeout used when nothing else is configured.
-    pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
     /// Per-RPC timeout used when nothing else is configured.
     pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(70);
 
@@ -572,19 +558,24 @@ fn is_https(endpoint: &Endpoint) -> bool {
 pub async fn connect_channel(
     server_url: &str,
     tls: Option<&TlsConfig>,
+    connect_timeout: Duration,
     wire: &Arc<WireMetrics>,
 ) -> Result<WireChannel> {
-    connect_raw_channel(server_url, tls)
+    connect_raw_channel(server_url, tls, connect_timeout)
         .await
         .map(|channel| Instrumented::new(channel, Arc::clone(wire)))
 }
 
 /// [`connect_channel`], before its calls are measured.
-async fn connect_raw_channel(server_url: &str, tls: Option<&TlsConfig>) -> Result<Channel> {
+async fn connect_raw_channel(
+    server_url: &str,
+    tls: Option<&TlsConfig>,
+    connect_timeout: Duration,
+) -> Result<Channel> {
     build_endpoint(
         server_url,
         tls,
-        ChannelManager::DEFAULT_CONNECT_TIMEOUT,
+        connect_timeout,
         ChannelManager::DEFAULT_RPC_TIMEOUT,
     )?
     .connect()
@@ -694,6 +685,7 @@ mod connect_tests {
         let err = connect_channel(
             &format!("https://localhost:{port}"),
             None,
+            Duration::from_secs(5),
             &WireMetrics::new(),
         )
         .await
@@ -711,7 +703,7 @@ mod connect_tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let url = format!("http://127.0.0.1:{port}");
-        let err = connect_channel(&url, None, &WireMetrics::new())
+        let err = connect_channel(&url, None, Duration::from_secs(5), &WireMetrics::new())
             .await
             .expect_err("must fail");
         assert!(err.to_string().contains(&url), "{err}");
@@ -799,14 +791,5 @@ mod tests {
         drop(connecting);
 
         assert!(waiting.await.unwrap(), "told a working connect had failed");
-    }
-
-    #[tokio::test]
-    async fn reset_closes_circuit() {
-        let mut mgr = ChannelManager::new("http://localhost:50051");
-        mgr.record_failure();
-        assert!(mgr.is_cooling_off());
-        mgr.reset();
-        assert!(!mgr.is_cooling_off());
     }
 }
