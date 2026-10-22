@@ -1,11 +1,8 @@
 //! gRPC client for invoking operations on virtual actors through the Orcher
 //! server.
 
+use crate::client::connection::{ClientChannel, Connection};
 use std::collections::HashMap;
-use tonic::service::interceptor::InterceptedService;
-use tonic::transport::Channel;
-
-use crate::client::workflow::AuthInterceptor;
 
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
@@ -18,33 +15,19 @@ use crate::proto::orcher::v1::{
 /// clients (such as `ActorInvocationClient`) on top of this one and handle
 /// serialization themselves.
 #[derive(Clone)]
-pub struct CoreActorClient {
-    client: ActorServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+pub struct ActorClient {
+    client: ActorServiceClient<ClientChannel>,
 }
 
-impl CoreActorClient {
-    /// Creates an actor client on an existing gRPC channel that sends no
-    /// credentials.
-    ///
-    /// Use [`CoreActorClient::with_auth`] against a server that requires them.
-    pub fn new(channel: Channel) -> Self {
-        Self::with_auth(channel, AuthInterceptor::default())
-    }
-
-    /// Creates an actor client that sends the given credentials on every call.
-    ///
-    /// Pass the workflow client's own
-    /// [`WorkflowClient::auth`](crate::client::workflow::WorkflowClient::auth)
-    /// so actor and workflow calls share one set of credentials. An actor
-    /// client built without them is refused as unauthenticated by a server
-    /// that requires an API key, even while workflow calls succeed.
-    pub fn with_auth(channel: Channel, auth: AuthInterceptor) -> Self {
+impl ActorClient {
+    /// A client on `connection`.
+    pub(crate) fn new(connection: &Connection) -> Self {
         Self {
-            // Operation payloads and results up to the configured message
+            // Operation payloads and results up to the connection's message
             // limit, not tonic's 4 MiB default.
             client: crate::transport::limits::sized!(
-                ActorServiceClient::with_interceptor(channel, auth),
-                crate::transport::limits::default_max_message_bytes()
+                ActorServiceClient::new(connection.authenticated()),
+                connection.options().max_message_bytes
             ),
         }
     }
@@ -135,7 +118,7 @@ impl CoreActorClient {
 
     /// Invokes an actor operation and discards its result.
     ///
-    /// This makes the same RPC as [`CoreActorClient::invoke_operation`], so it
+    /// This makes the same RPC as [`ActorClient::invoke_operation`], so it
     /// still waits for the operation to finish and still returns its errors.
     /// The server has no dispatch-only mode.
     pub async fn invoke_operation_no_wait(

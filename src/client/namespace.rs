@@ -1,10 +1,6 @@
 //! Client for creating, listing, updating, and deleting ORCHER namespaces.
 
-use std::time::Duration;
-use tonic::service::interceptor::InterceptedService;
-use tonic::transport::Channel;
-
-use crate::client::workflow::AuthInterceptor;
+use crate::client::connection::{ClientChannel, Connection};
 
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
@@ -20,47 +16,14 @@ use crate::proto::orcher::v1::{
 /// namespace.
 #[derive(Clone)]
 pub struct NamespaceClient {
-    client: NamespaceServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-    #[allow(dead_code)]
-    timeout: Duration,
+    client: NamespaceServiceClient<ClientChannel>,
 }
 
 impl NamespaceClient {
-    /// Creates a client for the server at `address`, sending no credentials.
-    ///
-    /// The connection is lazy: it is opened on the first call, with a 5 second
-    /// connect timeout and a 30 second per-request timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns a configuration error if `address` is not a valid URI.
-    pub async fn connect(address: impl Into<String>) -> Result<Self> {
-        let address = address.into();
-
-        let channel = Channel::from_shared(address.clone())
-            .map_err(|e| Error::configuration(format!("Invalid server address: {}", e)))?
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .connect_lazy();
-
-        Ok(Self::from_channel(channel))
-    }
-
-    /// Creates a client on a pre-built gRPC channel that sends no credentials.
-    ///
-    /// Use [`NamespaceClient::with_auth`] against a server that requires them.
-    pub fn from_channel(channel: Channel) -> Self {
-        Self::with_auth(channel, AuthInterceptor::default())
-    }
-
-    /// Creates a client that sends the given credentials on every call.
-    ///
-    /// A server that requires an API key refuses unauthenticated namespace
-    /// calls, so pass the same credentials the workflow client uses.
-    pub fn with_auth(channel: Channel, auth: AuthInterceptor) -> Self {
+    /// A client on `connection`.
+    pub(crate) fn new(connection: &Connection) -> Self {
         Self {
-            client: NamespaceServiceClient::with_interceptor(channel, auth),
-            timeout: Duration::from_secs(30),
+            client: NamespaceServiceClient::new(connection.authenticated()),
         }
     }
 

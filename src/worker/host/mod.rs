@@ -183,7 +183,7 @@ impl Host {
             let sessions =
                 sessions::Sessions::new(config.max_sessions, queue_changes, results.clone());
             Some(tasks::Tasks::new(
-                config.namespace.clone(),
+                config.connection.namespace.clone(),
                 work,
                 results,
                 sessions,
@@ -214,7 +214,7 @@ impl Host {
             });
             stops.drivers.push(("workflow", stop, running));
             Some(workflows::Workflows::new(
-                config.namespace.clone(),
+                config.connection.namespace.clone(),
                 work,
                 results,
             ))

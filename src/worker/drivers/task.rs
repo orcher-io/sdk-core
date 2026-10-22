@@ -110,6 +110,9 @@ pub struct TaskDriverConfig {
     /// TLS configuration for secure connections (optional).
     pub tls_config: Option<crate::transport::TlsConfig>,
 
+    /// How long a connect may take.
+    pub connect_timeout: std::time::Duration,
+
     /// The code release this worker is running (optional).
     ///
     /// Sent on every poll; see [`WorkflowDriverConfig::version_id`](super::WorkflowDriverConfig::version_id).
@@ -155,6 +158,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             organization_id,
             api_key,
             tls_config,
+            connect_timeout,
             version_id,
             auto_heartbeat,
             max_message_bytes,
@@ -173,6 +177,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             .field("organization_id", organization_id)
             .field("api_key", &crate::transport::credentials::redacted(api_key))
             .field("tls_config", tls_config)
+            .field("connect_timeout", connect_timeout)
             .field("version_id", version_id)
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
@@ -195,6 +200,7 @@ impl Default for TaskDriverConfig {
             organization_id: None,
             api_key: None,
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             version_id: None,
             auto_heartbeat: true,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
@@ -384,6 +390,7 @@ impl TaskDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_connect_timeout(config.connect_timeout)
         .with_wire_metrics(std::sync::Arc::clone(&config.wire))
         .with_max_message_bytes(config.max_message_bytes);
 
@@ -431,6 +438,7 @@ impl TaskDriver {
                 version_id: config.version_id.clone(),
                 auto_heartbeat: config.auto_heartbeat,
                 tls_config: config.tls_config.clone(),
+                connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
                 wire: std::sync::Arc::clone(&config.wire),
             };
@@ -1016,6 +1024,7 @@ async fn session_poller(
         version_id: config.version_id.clone(),
         auto_heartbeat: config.auto_heartbeat,
         tls_config: config.tls_config.clone(),
+        connect_timeout: config.connect_timeout,
         max_message_bytes: config.max_message_bytes,
         wire: std::sync::Arc::clone(&config.wire),
     };

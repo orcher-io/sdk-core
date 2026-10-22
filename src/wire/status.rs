@@ -5,7 +5,8 @@ use std::sync::Arc;
 use crate::error::{Code, Error, Status, EXECUTION_ID_METADATA_KEY, WORKFLOW_ID_METADATA_KEY};
 
 /// The error for a call the engine refused, its status restated by what
-/// actually happened (see [`crate::transport::clarify`]).
+/// actually happened: a message over a size limit, or an answer from
+/// something other than the engine.
 pub(crate) fn error(status: tonic::Status) -> Error {
     Error::Status(self::status(crate::transport::clarify(status)))
 }

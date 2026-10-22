@@ -1,25 +1,23 @@
-//! Checks that every client built over a connection sends that connection's
+//! Checks that every client taken from a connection sends that connection's
 //! credentials.
 //!
-//! An actor or namespace client built from the bare channel sends no
-//! credentials, so a server that requires an API key refuses its calls as
-//! unauthenticated while workflow calls from the same application succeed. A
-//! unit test of the interceptor cannot catch that: the interceptor can be
-//! correct and simply not attached. So these tests make real calls to a real
+//! A client that sent none would be refused as unauthenticated by a server
+//! that requires an API key, while calls from the application's other clients
+//! succeed. A unit test of the credentials cannot catch that: they can be
+//! right and simply not attached. So these tests make real calls to a real
 //! server and read the headers that arrived.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use orcher_sdk_core::client::workflow::AuthInterceptor;
-use orcher_sdk_core::client::{CoreActorClient, NamespaceClient};
 use orcher_sdk_core::proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
 use orcher_sdk_core::proto::orcher::v1::namespace_service_server::{
     NamespaceService, NamespaceServiceServer,
 };
 use orcher_sdk_core::proto::orcher::v1::*;
+use orcher_sdk_core::{ConnectOptions, Connection};
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::{Channel, Server};
+use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
 /// What each call carried: (authorization, x-organization-id).
@@ -102,23 +100,19 @@ async fn recording_server() -> (SocketAddr, Seen) {
     (addr, seen)
 }
 
-fn channel(addr: SocketAddr) -> Channel {
-    Channel::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect_lazy()
-}
-
-fn credentials() -> AuthInterceptor {
-    AuthInterceptor {
-        api_key: Some("orch_test_key".into()),
-        organization_id: Some("org-alpha".into()),
-    }
+fn connection(addr: SocketAddr) -> Connection {
+    Connection::lazy(
+        ConnectOptions::new(format!("http://{addr}"))
+            .with_api_key("orch_test_key")
+            .with_organization_id("org-alpha"),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
 async fn actor_calls_carry_the_credentials() {
     let (addr, seen) = recording_server().await;
-    let client = CoreActorClient::with_auth(channel(addr), credentials());
+    let client = connection(addr).actor_client();
 
     let _ = client
         .invoke_operation("Cart".into(), "k".into(), "op".into(), vec![], None, None)
@@ -137,7 +131,7 @@ async fn actor_calls_carry_the_credentials() {
 #[tokio::test]
 async fn namespace_calls_carry_the_credentials() {
     let (addr, seen) = recording_server().await;
-    let client = NamespaceClient::with_auth(channel(addr), credentials());
+    let client = connection(addr).namespace_client();
 
     let _ = client.list_namespaces(10, 0).await;
 
@@ -151,17 +145,18 @@ async fn namespace_calls_carry_the_credentials() {
     );
 }
 
-/// The constructors that take no credentials send none, and do not fail.
+/// A connection without credentials sends none, and its calls do not fail
+/// for it.
 #[tokio::test]
-async fn the_credential_free_constructors_still_send_none() {
+async fn a_connection_without_credentials_sends_none() {
     let (addr, seen) = recording_server().await;
+    let connection = Connection::lazy(ConnectOptions::new(format!("http://{addr}"))).unwrap();
 
-    let _ = CoreActorClient::new(channel(addr))
+    let _ = connection
+        .actor_client()
         .invoke_operation("Cart".into(), "k".into(), "op".into(), vec![], None, None)
         .await;
-    let _ = NamespaceClient::from_channel(channel(addr))
-        .list_namespaces(10, 0)
-        .await;
+    let _ = connection.namespace_client().list_namespaces(10, 0).await;
 
     assert_eq!(
         seen.lock().unwrap().as_slice(),

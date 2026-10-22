@@ -8,9 +8,11 @@
 //! - **Event**: an external message delivered to a running workflow.
 
 pub mod actor;
+pub mod connection;
 pub mod namespace;
 pub mod workflow;
 
-pub use actor::CoreActorClient;
+pub use actor::ActorClient;
+pub use connection::{ConnectOptions, Connection};
 pub use namespace::NamespaceClient;
 pub use workflow::{CancelWorkflowOpts, StartWorkflowOpts, WorkflowClient, WorkflowHandle};

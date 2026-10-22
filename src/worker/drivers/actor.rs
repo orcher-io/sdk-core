@@ -88,6 +88,9 @@ pub struct ActorDriverConfig {
     /// TLS configuration for secure connections (optional).
     pub tls_config: Option<crate::transport::TlsConfig>,
 
+    /// How long a connect may take.
+    pub connect_timeout: std::time::Duration,
+
     /// The largest gRPC message the driver sends or receives, and tells the
     /// engine it can receive. [`crate::transport::limits::default_max_message_bytes`]
     /// unless set: `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's
@@ -118,6 +121,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             heartbeat_interval,
             registration_id,
             tls_config,
+            connect_timeout,
             max_message_bytes,
             wire: _,
         } = self;
@@ -135,6 +139,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             .field("heartbeat_interval", heartbeat_interval)
             .field("registration_id", registration_id)
             .field("tls_config", tls_config)
+            .field("connect_timeout", connect_timeout)
             .field("max_message_bytes", max_message_bytes)
             .finish()
     }
@@ -156,6 +161,7 @@ impl Default for ActorDriverConfig {
             heartbeat_interval: Duration::from_secs(10),
             registration_id: None,
             tls_config: None,
+            connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             wire: crate::observability::WireMetrics::new(),
         }
@@ -256,6 +262,7 @@ impl ActorDriver {
             Some(ref tls) => ChannelManager::with_tls(config.server_url.clone(), tls.clone()),
             None => ChannelManager::new(config.server_url.clone()),
         }
+        .with_connect_timeout(config.connect_timeout)
         .with_wire_metrics(std::sync::Arc::clone(&config.wire))
         .with_max_message_bytes(config.max_message_bytes);
 
@@ -290,6 +297,7 @@ impl ActorDriver {
                 organization_id: config.organization_id.clone(),
                 api_key: config.api_key.clone(),
                 tls_config: config.tls_config.clone(),
+                connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
                 wire: std::sync::Arc::clone(&config.wire),
             };

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::client::ConnectOptions;
 use crate::transport::TlsConfig;
 use crate::worker::drivers::actor::ActorDriverConfig;
 use crate::worker::drivers::registration::WorkerRegistrationConfig;
@@ -43,21 +44,16 @@ pub const DEFAULT_MAX_SESSIONS: usize = 10;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HostConfig {
-    /// The engine's gRPC address, for example `http://localhost:50051`.
-    pub server_url: String,
-    /// The namespace the worker serves.
-    pub namespace: String,
+    /// How every connection the worker opens reaches the engine: its
+    /// address, the namespace the worker serves, the credentials and TLS
+    /// settings, the connect timeout and the message limit. The same options
+    /// a client is connected with ([`crate::Connection`]).
+    pub connection: ConnectOptions,
     /// The task queue the worker polls.
     pub task_queue: String,
     /// The worker's identity, the same for every driver and every
     /// registration for the worker's whole life.
     pub identity: String,
-    /// The API key every connection the worker opens sends.
-    pub api_key: Option<String>,
-    /// The organization every connection the worker opens names.
-    pub organization_id: Option<String>,
-    /// TLS for every connection the worker opens.
-    pub tls: Option<TlsConfig>,
     /// The release the worker runs; runs are bound to it on first claim.
     pub version_id: Option<String>,
     /// Workflow activations run at once.
@@ -98,18 +94,15 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
-    /// A worker on `task_queue` of the engine at `server_url`, in the
-    /// `default` namespace, with every other setting at its default. Its
-    /// identity is generated here, once.
-    pub fn new(server_url: impl Into<String>, task_queue: impl Into<String>) -> Self {
+    /// A worker on `task_queue`, connected as `connection` says (an
+    /// address alone is the engine there, in the `default` namespace), with
+    /// every other setting at its default. Its identity is generated here,
+    /// once.
+    pub fn new(connection: impl Into<ConnectOptions>, task_queue: impl Into<String>) -> Self {
         Self {
-            server_url: server_url.into(),
-            namespace: "default".to_string(),
+            connection: connection.into(),
             task_queue: task_queue.into(),
             identity: format!("orcher-worker-{}", uuid::Uuid::new_v4()),
-            api_key: None,
-            organization_id: None,
-            tls: None,
             version_id: None,
             max_concurrent_workflows: DEFAULT_CONCURRENCY,
             max_concurrent_tasks: DEFAULT_CONCURRENCY,
@@ -128,7 +121,7 @@ impl HostConfig {
 
     /// Serves `namespace`.
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.namespace = namespace.into();
+        self.connection.namespace = namespace.into();
         self
     }
 
@@ -143,19 +136,19 @@ impl HostConfig {
 
     /// Sends `api_key` on every connection.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
+        self.connection.api_key = Some(api_key.into());
         self
     }
 
     /// Names `organization_id` on every connection.
     pub fn with_organization_id(mut self, organization_id: impl Into<String>) -> Self {
-        self.organization_id = Some(organization_id.into());
+        self.connection.organization_id = Some(organization_id.into());
         self
     }
 
     /// Uses `tls` for every connection.
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
-        self.tls = Some(tls);
+        self.connection.tls = Some(tls);
         self
     }
 
@@ -225,19 +218,21 @@ impl HostConfig {
     /// The workflow driver's configuration.
     pub(crate) fn workflow_driver(&self) -> WorkflowDriverConfig {
         WorkflowDriverConfig {
-            server_url: self.server_url.clone(),
-            namespace: self.namespace.clone(),
+            server_url: self.connection.url.clone(),
+            namespace: self.connection.namespace.clone(),
             task_queue: self.task_queue.clone(),
             max_concurrent_executions: self.max_concurrent_workflows as usize,
             identity: self.identity.clone(),
             poll_timeout: WORKFLOW_POLL_TIMEOUT,
             strict_determinism: false,
             poller_count: self.workflow_pollers.max(1),
-            organization_id: self.organization_id.clone(),
-            api_key: self.api_key.clone(),
-            tls_config: self.tls.clone(),
+            organization_id: self.connection.organization_id.clone(),
+            api_key: self.connection.api_key.clone(),
+            tls_config: self.connection.tls.clone(),
+            connect_timeout: self.connection.connect_timeout,
             version_id: self.version_id.clone(),
             protocol_version: self.protocol_version,
+            max_message_bytes: self.connection.max_message_bytes,
             ..WorkflowDriverConfig::default()
         }
     }
@@ -245,8 +240,8 @@ impl HostConfig {
     /// The task driver's configuration.
     pub(crate) fn task_driver(&self) -> TaskDriverConfig {
         TaskDriverConfig {
-            server_url: self.server_url.clone(),
-            namespace: self.namespace.clone(),
+            server_url: self.connection.url.clone(),
+            namespace: self.connection.namespace.clone(),
             task_queue: self.task_queue.clone(),
             max_concurrent_executions: self.max_concurrent_tasks as usize,
             identity: self.identity.clone(),
@@ -254,11 +249,13 @@ impl HostConfig {
             enable_heartbeat: true,
             heartbeat_interval: TASK_HEARTBEAT_INTERVAL,
             poller_count: self.task_pollers.max(1),
-            organization_id: self.organization_id.clone(),
-            api_key: self.api_key.clone(),
-            tls_config: self.tls.clone(),
+            organization_id: self.connection.organization_id.clone(),
+            api_key: self.connection.api_key.clone(),
+            tls_config: self.connection.tls.clone(),
+            connect_timeout: self.connection.connect_timeout,
             version_id: self.version_id.clone(),
             auto_heartbeat: true,
+            max_message_bytes: self.connection.max_message_bytes,
             ..TaskDriverConfig::default()
         }
     }
@@ -267,19 +264,21 @@ impl HostConfig {
     /// service gave the worker's handlers.
     pub(crate) fn actor_driver(&self, registration_id: Option<String>) -> ActorDriverConfig {
         ActorDriverConfig {
-            server_url: self.server_url.clone(),
-            namespace: self.namespace.clone(),
+            server_url: self.connection.url.clone(),
+            namespace: self.connection.namespace.clone(),
             service_id: self.identity.clone(),
             max_concurrent_executions: self.max_concurrent_actor_operations as usize,
             identity: self.identity.clone(),
             poll_timeout: ACTOR_POLL_TIMEOUT,
             poller_count: self.actor_pollers.max(1),
-            organization_id: self.organization_id.clone(),
-            api_key: self.api_key.clone(),
+            organization_id: self.connection.organization_id.clone(),
+            api_key: self.connection.api_key.clone(),
             enable_heartbeat: true,
             heartbeat_interval: self.heartbeat_interval,
             registration_id,
-            tls_config: self.tls.clone(),
+            tls_config: self.connection.tls.clone(),
+            connect_timeout: self.connection.connect_timeout,
+            max_message_bytes: self.connection.max_message_bytes,
             ..ActorDriverConfig::default()
         }
     }
@@ -315,11 +314,11 @@ impl HostConfig {
             env!("CARGO_PKG_VERSION").to_string(),
         );
         WorkerRegistrationConfig {
-            server_url: self.server_url.clone(),
+            server_url: self.connection.url.clone(),
             service_id: self.identity.clone(),
             identity: self.identity.clone(),
             task_queue: self.task_queue.clone(),
-            namespace: self.namespace.clone(),
+            namespace: self.connection.namespace.clone(),
             workflow_types: registrations.workflow_types.clone(),
             task_types,
             max_concurrent_workflows: self.max_concurrent_workflows,
@@ -327,9 +326,10 @@ impl HostConfig {
             heartbeat_interval: self.heartbeat_interval,
             metadata,
             version_id: self.version_id.clone(),
-            tls_config: self.tls.clone(),
-            api_key: self.api_key.clone(),
-            organization_id: self.organization_id.clone(),
+            tls_config: self.connection.tls.clone(),
+            connect_timeout: self.connection.connect_timeout,
+            api_key: self.connection.api_key.clone(),
+            organization_id: self.connection.organization_id.clone(),
             protocol_version: self.protocol_version,
             ..WorkerRegistrationConfig::default()
         }
@@ -372,6 +372,13 @@ mod tests {
             .with_api_key("key")
             .with_organization_id("org-1")
             .with_version_id("release-7");
+        let config = HostConfig {
+            connection: config
+                .connection
+                .with_connect_timeout(std::time::Duration::from_secs(2))
+                .with_max_message_bytes(1 << 20),
+            ..config
+        };
 
         let workflow = config.workflow_driver();
         let task = config.task_driver();
@@ -407,6 +414,21 @@ mod tests {
             &registration.organization_id,
         ] {
             assert_eq!(org.as_deref(), Some("org-1"));
+        }
+        for connect_timeout in [
+            workflow.connect_timeout,
+            task.connect_timeout,
+            actor.connect_timeout,
+            registration.connect_timeout,
+        ] {
+            assert_eq!(connect_timeout, std::time::Duration::from_secs(2));
+        }
+        for max_message_bytes in [
+            workflow.max_message_bytes,
+            task.max_message_bytes,
+            actor.max_message_bytes,
+        ] {
+            assert_eq!(max_message_bytes, 1 << 20);
         }
         assert_eq!(workflow.version_id.as_deref(), Some("release-7"));
         assert_eq!(task.version_id.as_deref(), Some("release-7"));

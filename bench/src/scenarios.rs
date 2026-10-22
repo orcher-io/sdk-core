@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use orcher_sdk_core::client::WorkflowClient;
+use orcher_sdk_core::client::{ConnectOptions, Connection, WorkflowClient};
 use orcher_sdk_core::Error;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -374,10 +374,12 @@ impl Bench {
         worker: &Worker,
         result: &mut ScenarioResult,
     ) -> Result<(), String> {
-        let client = WorkflowClient::connect(format!("http://{}", self.engine))
-            .await
-            .map_err(|e| format!("the client did not connect: {e}"))?
-            .with_max_message_bytes(64 << 20);
+        let client = Connection::connect(
+            ConnectOptions::new(format!("http://{}", self.engine)).with_max_message_bytes(64 << 20),
+        )
+        .await
+        .map_err(|e| format!("the client did not connect: {e}"))?
+        .workflow_client();
 
         // Let registration and the first polls settle, then start counting.
         tokio::time::sleep(Duration::from_secs(1)).await;

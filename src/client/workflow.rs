@@ -8,9 +8,8 @@
 //! - **Event**: an external message delivered to a running workflow.
 
 use std::time::Duration;
-use tonic::service::interceptor::InterceptedService;
-use tonic::transport::Channel;
 
+use crate::client::connection::{ClientChannel, Connection};
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
     query_service_client::QueryServiceClient, update_workflow_response,
@@ -23,48 +22,8 @@ use crate::types::{
     ListWorkflowsOptions, SearchWorkflowsOptions, WorkflowExecution, WorkflowExecutionDescription,
     WorkflowListPage, WorkflowStatus,
 };
-use crate::DEFAULT_NAMESPACE;
 use std::collections::HashMap;
 use tracing::debug;
-
-/// Attaches credentials to every outgoing client RPC.
-///
-/// The interceptor is bound when a gRPC client is built, so every call made
-/// through that client carries the headers and no call site can forget them.
-/// The headers match the ones the worker sends on its own requests.
-#[derive(Clone, Default)]
-pub struct AuthInterceptor {
-    /// Sent as `authorization: Bearer <key>`.
-    pub api_key: Option<String>,
-    /// Sent as `x-organization-id`, matching the worker's poll requests.
-    pub organization_id: Option<String>,
-}
-
-impl tonic::service::Interceptor for AuthInterceptor {
-    fn call(
-        &mut self,
-        mut request: tonic::Request<()>,
-    ) -> std::result::Result<tonic::Request<()>, tonic::Status> {
-        if let Some(ref key) = self.api_key {
-            match format!("Bearer {}", key).parse() {
-                Ok(value) => {
-                    request.metadata_mut().insert("authorization", value);
-                }
-                // A key that cannot be encoded as a header is a configuration
-                // error; surface it instead of sending the request unauthenticated.
-                Err(_) => return Err(tonic::Status::invalid_argument(
-                    "api_key contains characters that cannot be sent in the authorization header",
-                )),
-            }
-        }
-        if let Some(ref org) = self.organization_id {
-            if let Ok(value) = org.parse() {
-                request.metadata_mut().insert("x-organization-id", value);
-            }
-        }
-        Ok(request)
-    }
-}
 
 /// How long the server is asked to hold each result long-poll.
 ///
@@ -238,17 +197,19 @@ fn to_proto_duration(d: Duration) -> prost_types::Duration {
 
 /// Client for starting and managing ORCHER workflows.
 ///
-/// Cloning is cheap: clones share the underlying channel.
+/// Taken from a [`Connection`]. Cloning is cheap: clones share the
+/// connection.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use orcher_sdk_core::client::WorkflowClient;
+/// use orcher_sdk_core::{ConnectOptions, Connection};
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     // Connect to ORCHER server
-///     let client = WorkflowClient::connect("http://localhost:50051").await?;
+///     let connection = Connection::connect(ConnectOptions::new("http://localhost:50051")).await?;
+///     let client = connection.workflow_client();
 ///
 ///     // Start a workflow
 ///     let handle = client.start_workflow(
@@ -267,131 +228,30 @@ fn to_proto_duration(d: Duration) -> prost_types::Duration {
 /// ```
 #[derive(Clone)]
 pub struct WorkflowClient {
-    client: WorkflowServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+    client: WorkflowServiceClient<ClientChannel>,
     /// Shares the channel with `client`.
-    query_client: QueryServiceClient<InterceptedService<Channel, AuthInterceptor>>,
-    /// Kept so the gRPC clients can be rebuilt when credentials change.
-    channel: Channel,
-    /// Credentials attached to every request.
-    auth: AuthInterceptor,
+    query_client: QueryServiceClient<ClientChannel>,
     /// Namespace every operation targets.
     namespace: String,
     timeout: Duration,
-    /// The largest message sent or received.
-    max_message_bytes: usize,
 }
 
 impl WorkflowClient {
-    /// Creates a client for the server at `address`, sending no credentials.
-    ///
-    /// The connection is lazy: it opens on first use and reconnects on its
-    /// own if the server goes away and comes back. The connect timeout is 5
-    /// seconds and the per-request timeout 180 seconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a configuration error if `address` is not a valid URI.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - Server address (e.g., "http://localhost:50051")
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use orcher_sdk_core::client::WorkflowClient;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = WorkflowClient::connect("http://localhost:50051").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn connect(address: impl Into<String>) -> Result<Self> {
-        let address = address.into();
-
-        let channel = Channel::from_shared(address.clone())
-            .map_err(|e| Error::configuration(format!("Invalid server address: {}", e)))?
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(180))
-            .connect_lazy();
-
-        Ok(Self::from_channel(channel))
-    }
-
-    /// Creates a client on a pre-built gRPC channel, sending no credentials.
-    ///
-    /// Use this to configure TLS or other channel-level settings yourself.
-    /// Add credentials with [`WorkflowClient::with_api_key`] and
-    /// [`WorkflowClient::with_organization_id`].
-    pub fn from_channel(channel: Channel) -> Self {
-        let auth = AuthInterceptor::default();
-        let max_message_bytes = crate::transport::limits::default_max_message_bytes();
+    /// A client on `connection`, in its namespace.
+    pub(crate) fn new(connection: &Connection) -> Self {
+        let max_message_bytes = connection.options().max_message_bytes;
         Self {
             client: crate::transport::limits::sized!(
-                WorkflowServiceClient::with_interceptor(channel.clone(), auth.clone()),
+                WorkflowServiceClient::new(connection.authenticated()),
                 max_message_bytes
             ),
             query_client: crate::transport::limits::sized!(
-                QueryServiceClient::with_interceptor(channel.clone(), auth.clone()),
+                QueryServiceClient::new(connection.authenticated()),
                 max_message_bytes
             ),
-            channel,
-            auth,
-            namespace: DEFAULT_NAMESPACE.to_string(),
+            namespace: connection.options().namespace.clone(),
             timeout: Duration::from_secs(180),
-            max_message_bytes,
         }
-    }
-
-    /// Sends and receives messages of up to `max_message_bytes`: a workflow's
-    /// input, its result, an event's payload.
-    ///
-    /// [`crate::transport::limits::default_max_message_bytes`] unless set:
-    /// `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's default. A message
-    /// over the limit on either side fails with an OUT_OF_RANGE status that
-    /// says which limit to raise.
-    pub fn with_max_message_bytes(mut self, max_message_bytes: usize) -> Self {
-        self.max_message_bytes = max_message_bytes;
-        self.rebuild_clients();
-        self
-    }
-
-    /// Returns the credentials this client sends.
-    ///
-    /// An application usually runs three gRPC clients over one channel:
-    /// workflow, actor, and namespace. Build the other two with this same
-    /// interceptor so an API key or organization set here is not silently
-    /// missing from their calls.
-    pub fn auth(&self) -> &AuthInterceptor {
-        &self.auth
-    }
-
-    /// Rebuilds the gRPC clients so a credential change takes effect.
-    ///
-    /// The interceptor is bound when the clients are constructed, so changing
-    /// `auth` alone would leave the existing clients sending the old headers.
-    fn rebuild_clients(&mut self) {
-        self.client = crate::transport::limits::sized!(
-            WorkflowServiceClient::with_interceptor(self.channel.clone(), self.auth.clone()),
-            self.max_message_bytes
-        );
-        self.query_client = crate::transport::limits::sized!(
-            QueryServiceClient::with_interceptor(self.channel.clone(), self.auth.clone()),
-            self.max_message_bytes
-        );
-    }
-
-    /// Sends `authorization: Bearer <key>` on every request from this client.
-    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.auth.api_key = Some(api_key.into());
-        self.rebuild_clients();
-        self
-    }
-
-    /// Sends `x-organization-id` on every request from this client.
-    pub fn with_organization_id(mut self, organization_id: impl Into<String>) -> Self {
-        self.auth.organization_id = Some(organization_id.into());
-        self.rebuild_clients();
-        self
     }
 
     /// Sets the namespace every operation from this client targets.
@@ -1220,10 +1080,11 @@ impl WorkflowHandle {
     /// # Examples
     ///
     /// ```no_run
-    /// # use orcher_sdk_core::client::{WorkflowClient, WorkflowHandle};
+    /// # use orcher_sdk_core::client::WorkflowHandle;
     /// # use orcher_sdk_core::types::WorkflowExecution;
+    /// # use orcher_sdk_core::{ConnectOptions, Connection};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = WorkflowClient::connect("http://localhost:50051").await?;
+    /// let client = Connection::lazy(ConnectOptions::new("http://localhost:50051"))?.workflow_client();
     /// let execution = WorkflowExecution::new("workflow-123", "run-456");
     /// let handle = WorkflowHandle::new(client, execution);
     /// # Ok(())
@@ -1546,56 +1407,6 @@ mod tests {
     }
 
     use super::*;
-
-    use tonic::service::Interceptor;
-
-    #[test]
-    fn auth_interceptor_sends_bearer_token() {
-        let mut auth = AuthInterceptor {
-            api_key: Some("secret-key".into()),
-            organization_id: None,
-        };
-        let req = auth
-            .call(tonic::Request::new(()))
-            .expect("interceptor failed");
-        assert_eq!(
-            req.metadata().get("authorization").unwrap(),
-            "Bearer secret-key"
-        );
-    }
-
-    #[test]
-    fn auth_interceptor_sends_organization_id() {
-        let mut auth = AuthInterceptor {
-            api_key: None,
-            organization_id: Some("org-123".into()),
-        };
-        let req = auth
-            .call(tonic::Request::new(()))
-            .expect("interceptor failed");
-        assert_eq!(req.metadata().get("x-organization-id").unwrap(), "org-123");
-    }
-
-    #[test]
-    fn auth_interceptor_is_inert_without_credentials() {
-        let mut auth = AuthInterceptor::default();
-        let req = auth
-            .call(tonic::Request::new(()))
-            .expect("interceptor failed");
-        assert!(req.metadata().get("authorization").is_none());
-        assert!(req.metadata().get("x-organization-id").is_none());
-    }
-
-    #[test]
-    fn auth_interceptor_rejects_unencodable_key() {
-        // A newline cannot go in a header. Sending the request unauthenticated
-        // instead would hide a configuration error, so the call must fail.
-        let mut auth = AuthInterceptor {
-            api_key: Some("bad\nkey".into()),
-            organization_id: None,
-        };
-        assert!(auth.call(tonic::Request::new(())).is_err());
-    }
 
     #[test]
     fn a_cancellation_sets_no_cleanup_limit_by_default() {
