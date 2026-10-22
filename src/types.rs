@@ -1,5 +1,6 @@
 //! The shared vocabulary of workflows, tasks and events: ids, statuses,
-//! retry policies, failures, headers and what the clients list and describe.
+//! retry policies, the options a workflow starts with, and what the clients
+//! list and describe.
 //! Their conversions to and from the wire are in `crate::wire`.
 //!
 //! ## Terminology
@@ -15,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 // `crate::payload::Payload` is the one payload type; it is re-exported here for
 // convenience.
@@ -105,11 +106,13 @@ impl fmt::Display for WorkflowStatus {
     }
 }
 
-/// Retry policy for workflows and tasks.
+/// The retry policy a described workflow runs under, as the engine reports
+/// it, in whole seconds.
 ///
 /// The default starts at 1 second, doubles each attempt up to 60 seconds, and
 /// retries without limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct RetryPolicy {
     /// Delay before the first retry, in seconds
@@ -172,133 +175,73 @@ impl RetryPolicy {
     }
 }
 
-/// A failure, with its type, message, stack trace, and optional cause.
+/// How a workflow run is retried: a child, or the fresh run a workflow
+/// restarts as. A delay or multiplier left unset takes the engine's default
+/// for workflow retries, which is not the task default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRetryPolicy {
+    /// Maximum number of attempts, the first included; 0 is unlimited.
+    pub max_attempts: u32,
+
+    /// Delay before the first retry; `None`: the engine's default.
+    pub initial_interval: Option<Duration>,
+
+    /// Upper bound on the delay between retries; `None`: the engine's
+    /// default.
+    pub max_interval: Option<Duration>,
+
+    /// Multiplier applied to the delay after each retry; 0: the engine's
+    /// default.
+    pub backoff_coefficient: f64,
+
+    /// Error types that are never retried.
+    pub non_retryable_errors: Vec<String>,
+}
+
+/// What a start does when its workflow id is already in use in the
+/// namespace.
 ///
-/// Displays as `[error_type] message`, followed by a `Caused by:` line per
-/// cause.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Failure {
-    /// Error message
-    pub message: String,
-    /// The failure that caused this one, if any
-    pub source: Option<Box<Failure>>,
-    /// Stack trace
-    pub stack_trace: String,
-    /// Error type name
-    pub error_type: String,
+/// An id whose execution is still open is never started a second time:
+/// every policy but [`WorkflowIdReusePolicy::TerminateIfRunning`] refuses it
+/// with [`crate::Error::WorkflowAlreadyExists`]. The policies differ in what
+/// they allow once the previous execution has closed. An execution that is
+/// being retried, or that restarted fresh, is still open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum WorkflowIdReusePolicy {
+    /// Start once the previous execution has closed, however it closed: the
+    /// engine's default.
+    AllowDuplicate,
+    /// Start once the previous execution has closed without completing:
+    /// failed, cancelled, terminated or timed out.
+    AllowDuplicateFailedOnly,
+    /// Never start an id an execution has carried before.
+    RejectDuplicate,
+    /// Terminate the open execution, if there is one, and start.
+    TerminateIfRunning,
 }
 
-impl Failure {
-    /// Creates a failure with no cause and no stack trace.
-    pub fn new(message: impl Into<String>, error_type: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            source: None,
-            stack_trace: String::new(),
-            error_type: error_type.into(),
-        }
-    }
-
-    /// Sets the failure that caused this one.
-    pub fn with_source(mut self, source: Failure) -> Self {
-        self.source = Some(Box::new(source));
-        self
-    }
-
-    /// Sets the stack trace.
-    pub fn with_stack_trace(mut self, stack_trace: impl Into<String>) -> Self {
-        self.stack_trace = stack_trace.into();
-        self
-    }
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}", self.error_type, self.message)?;
-        if let Some(source) = &self.source {
-            write!(f, "\nCaused by: {}", source)?;
-        }
-        Ok(())
-    }
-}
-
-/// Header metadata attached to workflows and tasks.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Header {
-    /// Header fields
-    pub fields: HashMap<String, Vec<u8>>,
-}
-
-impl Header {
-    /// Creates an empty header.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds a string field, stored as UTF-8 bytes.
-    pub fn with_string(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.fields.insert(key.into(), value.into().into_bytes());
-        self
-    }
-
-    /// Returns a field as a string, or `None` if it is absent or not UTF-8.
-    pub fn get_string(&self, key: &str) -> Option<String> {
-        self.fields
-            .get(key)
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
-    }
-
-    /// Adds a binary field.
-    pub fn with_bytes(mut self, key: impl Into<String>, value: Vec<u8>) -> Self {
-        self.fields.insert(key.into(), value);
-        self
-    }
-
-    /// Returns a field's raw bytes.
-    pub fn get_bytes(&self, key: &str) -> Option<&[u8]> {
-        self.fields.get(key).map(|v| v.as_slice())
-    }
-}
-
-/// Annotations for storing non-indexed workflow metadata.
-///
-/// Use annotations for correlation IDs, deployment tags, environment info,
-/// or any key-value data you want to read back but don't need to filter on.
-/// For metadata you want to search or filter on, use labels instead.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Annotations {
-    /// Annotation key-value pairs
-    pub fields: HashMap<String, String>,
-}
-
-impl Annotations {
-    /// Creates an empty annotations map.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds a key-value annotation.
-    pub fn with_value(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.fields.insert(key.into(), value.into());
-        self
-    }
-
-    /// Returns the value for `key`, if present.
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.fields.get(key)
-    }
-}
-
-impl From<HashMap<String, String>> for Annotations {
-    fn from(fields: HashMap<String, String>) -> Self {
-        Self { fields }
-    }
-}
-
-impl From<Annotations> for HashMap<String, String> {
-    fn from(annotations: Annotations) -> Self {
-        annotations.fields
-    }
+/// A namespace, as the engine reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Namespace {
+    /// The namespace's unique name.
+    pub name: String,
+    /// `active`, `deprecated` or `deleted`.
+    pub status: String,
+    /// What the namespace is for.
+    pub description: String,
+    /// Who owns it.
+    pub owner_email: String,
+    /// How long a closed workflow's data is kept, in days.
+    pub retention_period_days: i32,
+    /// Any other data recorded with it.
+    pub data: HashMap<String, String>,
+    /// When it was created.
+    pub created_at: Option<SystemTime>,
+    /// When it last changed.
+    pub updated_at: Option<SystemTime>,
 }
 
 /// Detailed description of a workflow execution.
@@ -599,35 +542,5 @@ mod tests {
         assert_eq!(policy.initial_interval_seconds, 1);
         assert_eq!(policy.backoff_coefficient, 2.0);
         assert_eq!(policy.max_attempts, 0); // Unlimited
-    }
-
-    #[test]
-    fn test_failure() {
-        let failure = Failure::new("test error", "TestError").with_stack_trace("line 1\nline 2");
-        assert_eq!(failure.message, "test error");
-        assert_eq!(failure.error_type, "TestError");
-        assert!(failure.to_string().contains("TestError"));
-    }
-
-    #[test]
-    fn test_header() {
-        let header = Header::new()
-            .with_string("key1", "value1")
-            .with_bytes("key2", vec![1, 2, 3]);
-
-        assert_eq!(header.get_string("key1"), Some("value1".to_string()));
-        assert_eq!(header.get_bytes("key2"), Some(&[1u8, 2, 3][..]));
-    }
-
-    #[test]
-    fn test_annotations() {
-        let annotations = Annotations::new()
-            .with_value("count", "42")
-            .with_value("name", "test");
-
-        assert!(annotations.get("count").is_some());
-        assert!(annotations.get("name").is_some());
-        assert_eq!(annotations.get("count").unwrap(), "42");
-        assert_eq!(annotations.get("name").unwrap(), "test");
     }
 }

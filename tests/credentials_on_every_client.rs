@@ -163,3 +163,21 @@ async fn a_connection_without_credentials_sends_none() {
         [(None, None), (None, None)]
     );
 }
+
+/// A namespace call the engine refuses fails with the engine's status, not
+/// as an internal error, so a caller can tell why.
+#[tokio::test]
+async fn a_refused_namespace_call_keeps_its_status() {
+    let (addr, _) = recording_server().await;
+    let error = connection(addr)
+        .namespace_client()
+        .get_namespace("payments")
+        .await
+        .unwrap_err();
+    match error {
+        orcher_sdk_core::Error::Status(status) => {
+            assert_eq!(status.code(), orcher_sdk_core::error::Code::Unimplemented)
+        }
+        other => panic!("{other:?}"),
+    }
+}

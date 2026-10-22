@@ -6,14 +6,16 @@ use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
     namespace_service_client::NamespaceServiceClient, CreateNamespaceRequest,
     DeleteNamespaceRequest, DeprecateNamespaceRequest, GetNamespaceRequest, ListNamespacesRequest,
-    NamespaceInfo, UpdateNamespaceRequest,
+    UpdateNamespaceRequest,
 };
+use crate::types::Namespace;
 
 /// Client for managing ORCHER namespaces.
 ///
-/// Every method returns [`Error::Internal`] wrapping the
-/// server's message if the RPC fails or the server replies without a
-/// namespace.
+/// A call the engine refuses fails with its status ([`Error::Status`]), so
+/// a caller can tell a namespace that already exists from credentials the
+/// engine does not accept. A reply without a namespace fails with
+/// [`Error::Internal`].
 #[derive(Clone)]
 pub struct NamespaceClient {
     client: NamespaceServiceClient<ClientChannel>,
@@ -32,7 +34,7 @@ impl NamespaceClient {
         &self,
         name: impl Into<String>,
         retention_period_days: i32,
-    ) -> Result<NamespaceInfo> {
+    ) -> Result<Namespace> {
         let mut client = self.client.clone();
         let response = client
             .create_namespace(CreateNamespaceRequest {
@@ -41,11 +43,12 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to create namespace: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
 
         response
             .into_inner()
             .namespace
+            .map(crate::wire::client::namespace)
             .ok_or_else(|| Error::internal("Empty response from CreateNamespace".to_string()))
     }
 
@@ -57,7 +60,7 @@ impl NamespaceClient {
         description: impl Into<String>,
         retention_period_days: i32,
         owner_email: impl Into<String>,
-    ) -> Result<NamespaceInfo> {
+    ) -> Result<Namespace> {
         let mut client = self.client.clone();
         let response = client
             .create_namespace(CreateNamespaceRequest {
@@ -68,16 +71,17 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to create namespace: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
 
         response
             .into_inner()
             .namespace
+            .map(crate::wire::client::namespace)
             .ok_or_else(|| Error::internal("Empty response from CreateNamespace".to_string()))
     }
 
     /// Returns the namespace with the given name.
-    pub async fn get_namespace(&self, name: impl Into<String>) -> Result<NamespaceInfo> {
+    pub async fn get_namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         let mut client = self.client.clone();
         let response = client
             .get_namespace(GetNamespaceRequest {
@@ -85,11 +89,12 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to get namespace: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
 
         response
             .into_inner()
             .namespace
+            .map(crate::wire::client::namespace)
             .ok_or_else(|| Error::internal("Empty response from GetNamespace".to_string()))
     }
 
@@ -100,7 +105,7 @@ impl NamespaceClient {
         &self,
         page_size: i32,
         page_offset: i32,
-    ) -> Result<(Vec<NamespaceInfo>, i64)> {
+    ) -> Result<(Vec<Namespace>, i64)> {
         let mut client = self.client.clone();
         let response = client
             .list_namespaces(ListNamespacesRequest {
@@ -109,10 +114,17 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to list namespaces: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
 
         let inner = response.into_inner();
-        Ok((inner.namespaces, inner.total_count))
+        Ok((
+            inner
+                .namespaces
+                .into_iter()
+                .map(crate::wire::client::namespace)
+                .collect(),
+            inner.total_count,
+        ))
     }
 
     /// Updates a namespace's description, owner, and retention period.
@@ -122,7 +134,7 @@ impl NamespaceClient {
         description: impl Into<String>,
         owner_email: impl Into<String>,
         retention_period_days: i32,
-    ) -> Result<NamespaceInfo> {
+    ) -> Result<Namespace> {
         let mut client = self.client.clone();
         let response = client
             .update_namespace(UpdateNamespaceRequest {
@@ -133,17 +145,18 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to update namespace: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
 
         response
             .into_inner()
             .namespace
+            .map(crate::wire::client::namespace)
             .ok_or_else(|| Error::internal("Empty response from UpdateNamespace".to_string()))
     }
 
     /// Deprecates a namespace, so the server refuses to start further
     /// workflows in it.
-    pub async fn deprecate_namespace(&self, name: impl Into<String>) -> Result<NamespaceInfo> {
+    pub async fn deprecate_namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         let mut client = self.client.clone();
         let response = client
             .deprecate_namespace(DeprecateNamespaceRequest {
@@ -151,11 +164,12 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to deprecate namespace: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
 
         response
             .into_inner()
             .namespace
+            .map(crate::wire::client::namespace)
             .ok_or_else(|| Error::internal("Empty response from DeprecateNamespace".to_string()))
     }
 
@@ -171,7 +185,7 @@ impl NamespaceClient {
                 ..Default::default()
             })
             .await
-            .map_err(|e| Error::internal(format!("Failed to delete namespace: {}", e)))?;
+            .map_err(crate::wire::status::error)?;
         Ok(())
     }
 }

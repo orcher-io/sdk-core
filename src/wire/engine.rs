@@ -370,7 +370,7 @@ pub(crate) fn update_answers(responses: &[UpdateResponse]) -> Vec<proto::UpdateR
 /// An activation to hand back, named by the token its poll carried.
 /// A workflow retry policy as the engine reads it. A delay left unset stays
 /// unset, so the engine applies its own workflow-retry default.
-fn retry_policy(policy: &WorkflowRetryPolicy) -> proto::RetryPolicy {
+pub(crate) fn retry_policy(policy: &WorkflowRetryPolicy) -> proto::RetryPolicy {
     let duration = |d: Duration| crate::proto::prost_types::Duration {
         seconds: d.as_secs() as i64,
         nanos: d.subsec_nanos() as i32,

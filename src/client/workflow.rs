@@ -20,9 +20,8 @@ use crate::proto::orcher::v1::{
 };
 use crate::types::{
     ListWorkflowsOptions, SearchWorkflowsOptions, WorkflowExecution, WorkflowExecutionDescription,
-    WorkflowListPage, WorkflowStatus,
+    WorkflowIdReusePolicy, WorkflowListPage, WorkflowRetryPolicy, WorkflowStatus,
 };
-use std::collections::HashMap;
 use tracing::debug;
 
 /// How long the server is asked to hold each result long-poll.
@@ -51,7 +50,7 @@ pub struct StartWorkflowOpts {
     ///
     /// `None` means a failed workflow is not retried. A policy with
     /// `maximum_attempts > 0` retries it as a fresh run.
-    pub retry_policy: Option<crate::proto::orcher::v1::RetryPolicy>,
+    pub retry_policy: Option<WorkflowRetryPolicy>,
     /// Maximum time for the entire workflow execution.
     pub execution_timeout: Option<Duration>,
     /// Maximum time for a single run of the workflow.
@@ -64,7 +63,7 @@ pub struct StartWorkflowOpts {
     /// previous one has closed. An id whose run is still open is refused with
     /// [`Error::WorkflowAlreadyExists`] under every policy except
     /// `TerminateIfRunning`.
-    pub id_reuse_policy: Option<crate::proto::orcher::v1::WorkflowIdReusePolicy>,
+    pub id_reuse_policy: Option<WorkflowIdReusePolicy>,
 }
 
 impl StartWorkflowOpts {
@@ -94,10 +93,7 @@ impl StartWorkflowOpts {
     }
 
     /// Retries a failed workflow as a fresh run under this policy.
-    pub fn with_retry_policy(
-        mut self,
-        retry_policy: crate::proto::orcher::v1::RetryPolicy,
-    ) -> Self {
+    pub fn with_retry_policy(mut self, retry_policy: WorkflowRetryPolicy) -> Self {
         self.retry_policy = Some(retry_policy);
         self
     }
@@ -121,10 +117,7 @@ impl StartWorkflowOpts {
     }
 
     /// Sets what to do when `workflow_id` is already in use.
-    pub fn with_id_reuse_policy(
-        mut self,
-        policy: crate::proto::orcher::v1::WorkflowIdReusePolicy,
-    ) -> Self {
+    pub fn with_id_reuse_policy(mut self, policy: WorkflowIdReusePolicy) -> Self {
         self.id_reuse_policy = Some(policy);
         self
     }
@@ -497,47 +490,20 @@ impl WorkflowClient {
         task_queue: impl Into<String>,
         input_bytes: Vec<u8>,
     ) -> Result<WorkflowHandle> {
-        let workflow_id: String = workflow_id.into();
-        let request = StartWorkflowRequest {
-            workflow_id: workflow_id.clone(),
-            workflow_type: workflow_type.into(),
-            task_queue: task_queue.into(),
-            namespace: self.namespace.clone(),
-            input: input_bytes,
-            execution_timeout: None,
-            run_timeout: None,
-            task_timeout: None,
-            retry_policy: None,
-            cron_schedule: String::new(),
-            annotations: HashMap::new(),
-            labels: HashMap::new(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-            start_delay: None,
-            schedule_config: None,
-            workflow_id_reuse_policy: 0,
-            ..Default::default()
-        };
-        self.start_workflow_request(request).await
+        self.start_workflow_with_options(StartWorkflowOpts::new(
+            workflow_id,
+            workflow_type,
+            task_queue,
+            input_bytes,
+        ))
+        .await
     }
 
-    /// Starts a single workflow from a fully formed request.
-    ///
-    /// This is the general primitive over the `StartWorkflow` endpoint. The
-    /// caller controls every field (retry policy, timeouts, cron, labels, and
-    /// so on); `start_workflow_raw` and the higher-level SDKs build on it. The
-    /// handle carries the caller's `workflow_id`, or the server-assigned one
-    /// when it is left empty. Unlike the batch endpoint, this uses the
-    /// single-start path and does not re-wrap the input.
-    ///
-    /// # Errors
-    ///
-    /// A workflow id already in use fails with [`Error::WorkflowAlreadyExists`],
-    /// whose `run_id` names the execution holding it. Any other refusal is
-    /// returned as the server's status.
-    pub async fn start_workflow_request(
-        &self,
-        request: StartWorkflowRequest,
-    ) -> Result<WorkflowHandle> {
+    /// Starts one workflow through the single-start call, which, unlike the
+    /// batch call, does not re-wrap the input. The handle carries the
+    /// caller's `workflow_id`, or the server-assigned one when it is left
+    /// empty.
+    async fn start(&self, request: StartWorkflowRequest) -> Result<WorkflowHandle> {
         let requested_id = request.workflow_id.clone();
         let response = self
             .client
@@ -564,31 +530,15 @@ impl WorkflowClient {
     ///
     /// # Errors
     ///
-    /// Same as [`WorkflowClient::start_workflow_request`].
+    /// A workflow id already in use fails with
+    /// [`Error::WorkflowAlreadyExists`], whose `run_id` names the execution
+    /// holding it. Any other refusal is returned as the server's status.
     pub async fn start_workflow_with_options(
         &self,
         opts: StartWorkflowOpts,
     ) -> Result<WorkflowHandle> {
-        let request = StartWorkflowRequest {
-            workflow_id: opts.workflow_id,
-            workflow_type: opts.workflow_type,
-            task_queue: opts.task_queue,
-            namespace: self.namespace.clone(),
-            input: opts.input_bytes,
-            execution_timeout: opts.execution_timeout.map(to_proto_duration),
-            run_timeout: opts.run_timeout.map(to_proto_duration),
-            task_timeout: opts.task_timeout.map(to_proto_duration),
-            retry_policy: opts.retry_policy,
-            cron_schedule: opts.cron_schedule.unwrap_or_default(),
-            annotations: HashMap::new(),
-            labels: HashMap::new(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-            start_delay: None,
-            schedule_config: None,
-            workflow_id_reuse_policy: opts.id_reuse_policy.map_or(0, |p| p as i32),
-            ..Default::default()
-        };
-        self.start_workflow_request(request).await
+        self.start(crate::wire::client::start_request(opts, &self.namespace))
+            .await
     }
 
     /// Starts several workflows in a single batch transaction.
@@ -601,12 +551,15 @@ impl WorkflowClient {
     /// to attribute a refusal to.
     pub async fn batch_start_workflows(
         &self,
-        requests: Vec<StartWorkflowRequest>,
+        workflows: Vec<StartWorkflowOpts>,
     ) -> Result<Vec<WorkflowHandle>> {
         use crate::proto::orcher::v1::BatchStartWorkflowRequest;
 
         let batch_request = BatchStartWorkflowRequest {
-            workflows: requests.clone(),
+            workflows: workflows
+                .into_iter()
+                .map(|opts| crate::wire::client::start_request(opts, &self.namespace))
+                .collect(),
             ..Default::default()
         };
 
@@ -796,7 +749,7 @@ impl WorkflowClient {
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
-        Ok(WorkflowStatus::from(response.into_inner().status))
+        Ok(crate::wire::client::status(response.into_inner().status))
     }
 
     /// Requests cancellation of a workflow execution.
@@ -911,7 +864,11 @@ impl WorkflowClient {
     /// # }
     /// ```
     pub async fn list_workflows(&self, options: ListWorkflowsOptions) -> Result<WorkflowListPage> {
-        let status_filter: Vec<i32> = options.status_filter.into_iter().map(i32::from).collect();
+        let status_filter: Vec<i32> = options
+            .status_filter
+            .into_iter()
+            .map(crate::wire::client::status_number)
+            .collect();
 
         let request = ListWorkflowsRequest {
             namespace: self.namespace.clone(),
@@ -926,7 +883,10 @@ impl WorkflowClient {
             status_filter,
             start_time_begin: None,
             start_time_end: None,
-            sort_order: options.sort_order.map(i32::from).unwrap_or(0),
+            sort_order: options
+                .sort_order
+                .map(crate::wire::client::sort_order)
+                .unwrap_or(0),
             ..Default::default()
         };
 
@@ -1295,7 +1255,7 @@ fn result_from_answer(
     answer: crate::proto::orcher::v1::GetWorkflowResultResponse,
 ) -> Result<Vec<u8>> {
     use crate::proto::orcher::v1::get_workflow_result_response::Outcome;
-    let reported = WorkflowStatus::from(answer.status);
+    let reported = crate::wire::client::status(answer.status);
     match answer.outcome {
         Some(Outcome::Result(result)) => Ok(result),
         // An engine that sends no status (or a non-final one) with an error

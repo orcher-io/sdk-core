@@ -14,6 +14,7 @@
 //! ```
 
 use crate::types::Payload;
+pub use crate::types::WorkflowRetryPolicy;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -400,29 +401,6 @@ pub struct StartChildWorkflowCommand {
     /// How the child is retried when it fails. `None`: it is not retried.
     #[serde(default)]
     pub retry_policy: Option<WorkflowRetryPolicy>,
-}
-
-/// How a workflow run is retried: a child, or the fresh run a workflow
-/// restarts as. A delay or multiplier left unset takes the engine's default
-/// for workflow retries, which is not the task default.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct WorkflowRetryPolicy {
-    /// Maximum number of attempts, the first included; 0 is unlimited.
-    pub max_attempts: u32,
-
-    /// Delay before the first retry; `None`: the engine's default.
-    pub initial_interval: Option<Duration>,
-
-    /// Upper bound on the delay between retries; `None`: the engine's
-    /// default.
-    pub max_interval: Option<Duration>,
-
-    /// Multiplier applied to the delay after each retry; 0: the engine's
-    /// default.
-    pub backoff_coefficient: f64,
-
-    /// Error types that are never retried.
-    pub non_retryable_errors: Vec<String>,
 }
 
 /// What happens to a child workflow when its parent closes.

@@ -6,7 +6,7 @@
 //! place, and the rest of the crate speaks its own types. `scripts/
 //! check-wire-boundary.sh` keeps generated types from spreading elsewhere.
 
-mod client;
+pub(crate) mod client;
 pub(crate) mod engine;
 pub(crate) mod host;
 pub(crate) mod status;
