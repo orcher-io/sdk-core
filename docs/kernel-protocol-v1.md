@@ -34,7 +34,7 @@ Non-goals for v1: resumable live workflow instances (§9); moving task and actor
   | journaled updates replayed | no | yes | no |
 
 - **Determinism is checked only partly.** Core's `JournalSteps::check_activation` compares scheduled tasks, timers and children plus `reached_steps`; a task inserted before a same-type task, or a changed timer duration, replays silently (sdk-core#14). `WaitForEvent` is silently dropped on conversion and `RequestCancellation` fails the workflow as "unsupported".
-- **Every activation is the whole journal.** The engine reads it all from Postgres each time (measured: 1,004,002 journal rows for one 1,000-step run), and the `WorkflowCache` is held and never read.
+- **Every activation is the whole journal.** The engine reads it all from Postgres each time (measured: 1,004,002 journal rows for one 1,000-step run), and the worker kept a `WorkflowCache` it never read (since removed).
 - **The boundary is JSON.** Bytes become JSON number arrays (3–4× size), tokens base64 on top.
 
 ## 3. Principles

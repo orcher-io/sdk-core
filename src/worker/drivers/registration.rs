@@ -482,11 +482,6 @@ impl WorkerRegistrationDriver {
         Ok(())
     }
 
-    /// Signals the driver to shut down.
-    pub fn shutdown(&self) {
-        let _ = self.shutdown_sender.send(true);
-    }
-
     /// Returns a handle that stops this driver from outside.
     ///
     /// [`run`](Self::run) holds `&mut self`, so once it is running (usually in
@@ -495,11 +490,6 @@ impl WorkerRegistrationDriver {
     /// still takes effect, and `run` deregisters and returns at once.
     pub fn shutdown_handle(&self) -> ShutdownHandle {
         ShutdownHandle::from_sender(self.shutdown_sender.clone())
-    }
-
-    /// Returns the registration ID, if the worker is registered.
-    pub fn registration_id(&self) -> Option<&str> {
-        self.registration_id.as_deref()
     }
 }
 
@@ -525,3 +515,7 @@ mod tests {
         assert_eq!(md.get("x-organization-id").unwrap(), "org_123");
     }
 }
+
+#[cfg(test)]
+#[path = "registration_tests.rs"]
+mod lifecycle_tests;

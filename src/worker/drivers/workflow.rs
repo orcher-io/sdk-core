@@ -14,7 +14,6 @@ use crate::protocol::{
     QueryResponse, QueryResult as BridgeQueryResult, UpdateResponse,
     UpdateResult as BridgeUpdateResult, WorkflowRetryPolicy,
 };
-use crate::state::cache::WorkflowCache;
 use crate::state::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
 use crate::transport::channel::ChannelManager;
 use crate::types::WorkflowExecution;
@@ -49,9 +48,6 @@ pub struct WorkflowDriverConfig {
 
     /// Poll timeout.
     pub poll_timeout: Duration,
-
-    /// Workflow cache capacity.
-    pub cache_capacity: usize,
 
     /// Whether to enable strict determinism checking.
     pub strict_determinism: bool,
@@ -132,7 +128,6 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             max_concurrent_executions,
             identity,
             poll_timeout,
-            cache_capacity,
             strict_determinism,
             poller_count,
             organization_id,
@@ -152,7 +147,6 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             .field("max_concurrent_executions", max_concurrent_executions)
             .field("identity", identity)
             .field("poll_timeout", poll_timeout)
-            .field("cache_capacity", cache_capacity)
             .field("strict_determinism", strict_determinism)
             .field("poller_count", poller_count)
             .field("organization_id", organization_id)
@@ -176,7 +170,6 @@ impl Default for WorkflowDriverConfig {
             max_concurrent_executions: 100,
             identity: format!("workflow-driver-{}", uuid::Uuid::new_v4()),
             poll_timeout: Duration::from_secs(60),
-            cache_capacity: 1000,
             strict_determinism: false,
             poller_count: 4,
             organization_id: None,
@@ -284,10 +277,6 @@ pub struct WorkflowDriver {
     config: Arc<WorkflowDriverConfig>,
 
     channel_manager: Arc<ChannelManager>,
-
-    /// Workflow cache. Held by the driver but not read by it.
-    #[allow(dead_code)]
-    cache: Arc<WorkflowCache>,
 
     replay_config: ReplayConfig,
 
@@ -411,7 +400,6 @@ impl WorkflowDriver {
             });
         }
 
-        let cache = Arc::new(WorkflowCache::new(config.cache_capacity));
         let replay_config = ReplayConfig {
             strict_mode: config.strict_determinism,
             ..ReplayConfig::default()
@@ -420,7 +408,6 @@ impl WorkflowDriver {
         let driver = Self {
             config,
             channel_manager: Arc::new(channel_manager),
-            cache,
             replay_config,
             journal_steps: Default::default(),
             non_deterministic: Default::default(),
@@ -1474,11 +1461,6 @@ impl WorkflowDriver {
                 }
             })
             .collect()
-    }
-
-    /// Ask the driver to stop; the same as [`ShutdownHandle::shutdown`].
-    pub fn shutdown(&self) {
-        let _ = self.shutdown_sender.send(true);
     }
 }
 

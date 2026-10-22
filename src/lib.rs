@@ -1,94 +1,64 @@
 #![allow(clippy::result_large_err)]
 //! # ORCHER SDK Core
 //!
-//! The shared engine behind the ORCHER language SDKs. It handles:
-//! - gRPC communication with the ORCHER server
-//! - State machines for workflows and tasks
-//! - Deterministic replay
-//! - Workflow state caching
-//! - The worker host ([`Host`]), which every language SDK runs its worker on
+//! The kernel behind every ORCHER language SDK. It owns, once for every
+//! language:
+//! - the worker: the [`Host`] every SDK runs its worker on, pulling
+//!   activations, tasks and actor operations and handing back their outcomes;
+//! - the kernel: what a run's history means ([`kernel::resolve`]), and the
+//!   determinism checks every answer goes through;
+//! - the connection to the engine: gRPC, TLS, credentials, retries, limits;
+//! - the clients for workflows, namespaces and actors.
+//!
+//! A language SDK keeps only its language's idioms: how handlers are
+//! declared, the workflow context's API, and running the user's code.
 //!
 //! ## Terminology
 //!
-//! - **Worker** - A process that polls for and executes workflows and tasks.
+//! - **Worker** - A process that pulls work from the engine and runs it.
 //! - **Task** - A unit of work that performs side effects, executed by a worker.
-//! - **Event** - An external signal sent to a running workflow.
+//! - **Event** - An external message delivered to a running workflow.
 //! - **Execution Journal** - The event-sourced history of a workflow execution.
-//! - **Execution Step** - A single decision point in a workflow execution.
+//! - **Activation** - One time the engine hands a run to a worker: its history,
+//!   resolved by the kernel into the outcomes the run's code observes.
 //!
 //! ## Architecture
 //!
-//! The work is split between this crate and a language SDK:
-//! - This crate polls the server and owns all gRPC communication, through
-//!   `WorkflowDriver`, `TaskDriver` and `ActorDriver`.
-//! - The language SDK (Rust `orcher`, Python, TypeScript) stores the user's
-//!   handlers and runs them.
-//! - In short: core polls, the SDK executes.
-//!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────┐
-//! │        Language SDK (Rust, Python, TypeScript)          │
-//! │  • Handler storage                                      │
-//! │  • Workflow/Task execution                              │
-//! │  • User-facing API                                      │
+//! │        Language SDK (Rust, Python, TypeScript, …)       │
+//! │  handlers · workflow context · running the user's code  │
 //! └────────────────────────────┬────────────────────────────┘
-//!                              │ Channels
+//!                              │ pull: next activation / task / actor op,
+//!                              │ then its outcome (kernel and host messages)
 //!                              ▼
 //! ┌─────────────────────────────────────────────────────────┐
 //! │              ORCHER SDK Core (this crate)               │
-//! │                                                         │
-//! │  ┌────────────────┐  ┌──────────────┐  ┌─────────────┐  │
-//! │  │ Workflow Client│  │   Worker     │  │  Replayer   │  │
-//! │  │  (gRPC calls)  │  │  (Drivers)   │  │  (State     │  │
-//! │  │                │  │              │  │  Machine)   │  │
-//! │  └────────────────┘  └──────────────┘  └─────────────┘  │
-//! │                                                         │
-//! │  ┌───────────────────────────────────────────────────┐  │
-//! │  │              Workflow Cache (LRU)                 │  │
-//! │  └───────────────────────────────────────────────────┘  │
+//! │   Host ─ worker machinery (drivers, polls, governor)    │
+//! │   kernel (history → activation, answers → commands)     │
+//! │   clients · transport                                   │
 //! └────────────────────────────┬────────────────────────────┘
 //!                              │ gRPC
 //!                              ▼
-//! ┌─────────────────────────────────────────────────────────┐
-//! │                     ORCHER Server                       │
-//! │  • Orchestration engine                                 │
-//! │  • State management                                     │
-//! │  • Task distribution                                    │
-//! └─────────────────────────────────────────────────────────┘
+//!                       ORCHER engine
 //! ```
 //!
 //! ## Layout
 //!
 //! ```text
 //! src/
-//!   state/       state machines, the replayer and determinism checks, the workflow cache
-//!   protocol/    activations in (ExecutionRequest), commands out (ExecutionResult)
+//!   kernel/      what a run's history means: resolution, answers, step ids, random
 //!   worker/
-//!     host/      the Host: one worker's plumbing, the API every language SDK runs a worker on
-//!     drivers/   workflow, task, actor and registration drivers, which the host runs
-//!     poll/      long-polling, and reporting results (eager tasks included)
-//!     governor/  each driver's slots, and the reports it still has in flight
-//!     heartbeat, lifecycle, metrics
-//!   transport/   gRPC channels and TLS, credentials, message size limits
+//!     host/      the Host: the one way a language SDK runs a worker
+//!     record     recorded runs, for replay tools
+//!     …          drivers, polling, the governor, heartbeats (private)
 //!   client/      start, query and manage workflows, namespaces and actors
+//!   protocol/    what workflow code produces: commands, in an ExecutionResult
+//!   state/       the journal checks every activation goes through (private)
+//!   transport/   the connection to the engine
 //!   payload/     the Payload type, converters and codecs
-//!   error, types, interceptor
+//!   error, types, interceptor, observability
 //! ```
-//!
-//! - **state** - State machines, deterministic replay and determinism checks.
-//! - **protocol** - The request/result types exchanged with language SDKs.
-//! - **worker** - The [`Host`], the API language SDKs run a worker on, and the drivers and polling under it.
-//! - **transport** - The connection to the engine.
-//! - **client** - Start, query and manage workflows, namespaces and actors.
-//! - **payload** - Payloads, their conversion from values ([`payload::converter`])
-//!   and their encoding ([`payload::codec`]: compression, encryption).
-//! - **interceptor** - Shared types for interceptors (logging, metrics, tracing).
-//! - **error** - Error types.
-//! - **types** - Common type definitions.
-//!
-//! The modules `poller`, `state`, `bridge`, `codec`, `converter` and `limits`
-//! are the paths these lived at before; they re-export the new ones and are
-//! deprecated.
 //!
 //! ## Usage
 //!
@@ -132,62 +102,40 @@ pub mod kernel;
 pub mod observability;
 pub mod payload;
 pub mod protocol;
-pub mod state;
+pub(crate) mod state;
 pub mod transport;
 pub mod types;
 pub mod worker;
+
+// The worker host: the one way a language SDK runs a worker.
 pub use worker::host::{ActorHandler, Host, HostConfig, Registrations, StateScope, StateValue};
+pub use worker::{TaskExecutionTask, WorkflowExecutionTask};
 
-// The paths these modules had before the sources were organised by role.
-mod compat;
-#[allow(deprecated)]
-pub use compat::{bridge, codec, converter, limits, poller};
-
-// Commonly used types, re-exported at the crate root.
-
-// Client types
+// Clients for workflows, namespaces and actors.
 pub use client::{NamespaceClient, WorkflowClient, WorkflowHandle};
 
-// Worker/Driver types (for language SDK integration)
-pub use worker::{
-    ActorDriver, ActorDriverConfig, ActorDriverEvent, ActorOperationPoller, ActorPollerConfig,
-    ActorWork, ActorWorkResult, PollerConfig, TaskDriver, TaskDriverConfig, TaskExecutionPoller,
-    TaskExecutionTask, TaskWork, TaskWorkResult, WorkerRegistrationConfig,
-    WorkerRegistrationDriver, WorkflowDriver, WorkflowDriverConfig, WorkflowExecutionPoller,
-    WorkflowExecutionTask, WorkflowWork, WorkflowWorkResult,
-};
-
-// State machine and replay types
-pub use state::{
-    cache::{CachedWorkflowState, WorkflowCache},
-    machine::{
-        ActiveTimer, PendingTask, TaskState, TaskStateMachine, WorkflowState, WorkflowStateMachine,
-    },
-    replayer::{
-        CommandCoverage, DeterminismViolation, Difference, ReplayConfig, ReplayResult, Replayer,
-        ViolationKind, ViolationSeverity, NON_DETERMINISM_FAILURE_TYPE,
-    },
-};
-
-// Error and Result types
+// Errors.
 pub use error::{Error, Result, TaskFailure};
 pub use error_code::ErrorCode;
 
-// Payload types
+// Payloads.
 pub use payload::{Payload, Payloads};
 
-// Common types
+// Shared vocabulary.
 pub use types::{
     ListWorkflowsOptions, ListWorkflowsSortOrder, OrganizationContext, SearchWorkflowsOptions,
     WorkflowExecution, WorkflowExecutionDescription, WorkflowExecutionInfo, WorkflowListPage,
     WorkflowStatus,
 };
 
-// Protocol types - for language SDK integration
-pub use protocol::{
-    task_to_execution_request, validate_execution_result, Command, CompleteTaskJob,
-    ExecutionRequest, ExecutionResult, FireTimerJob, HandleEventJob, RequestJob, StartWorkflowJob,
-    TaskExecutionResult as BridgeTaskResult,
+// What workflow code produces, as the kernel hands it to the worker.
+pub use protocol::{Command, ExecutionResult};
+
+// Determinism: what the kernel reports when an activation does not replay
+// its history.
+pub use state::replayer::{
+    DeterminismViolation, Difference, ViolationKind, ViolationSeverity,
+    NON_DETERMINISM_FAILURE_TYPE,
 };
 
 /// The version of this crate.
@@ -203,15 +151,14 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 /// completion and failure, so the engine only asks of it what it can handle.
 /// What a version promises covers the whole worker, the language SDK on top
 /// of this crate included, so the language SDK chooses it:
-/// [`WorkflowDriverConfig::protocol_version`] and
-/// [`WorkerRegistrationConfig::protocol_version`].
+/// [`HostConfig::with_protocol_version`].
 pub mod worker_protocol {
     /// What every worker from before protocol versions handles.
     pub const BASELINE: u32 = 0;
 
-    /// The worker hands a workflow cancellation request in the journal
-    /// ([`crate::protocol::RequestJob::CancelWorkflow`]) to workflow code,
-    /// letting the workflow clean up before it ends.
+    /// The worker hands a workflow cancellation request (a `cancel`
+    /// resolution in the activation) to workflow code, letting the workflow
+    /// clean up before it ends.
     ///
     /// Report it only once workflow code really sees the request. The engine
     /// then waits for the workflow to end itself, so a worker that reports it

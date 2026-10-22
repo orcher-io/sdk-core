@@ -679,11 +679,6 @@ impl ActorDriver {
             }
         }
     }
-
-    /// Ask the driver to stop.
-    pub fn shutdown(&self) {
-        let _ = self.shutdown_sender.send(true);
-    }
 }
 
 #[cfg(test)]

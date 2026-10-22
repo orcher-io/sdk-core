@@ -15,17 +15,8 @@ pub const SESSION_COMPLETE_TASK: &str = "__orcher_complete_session";
 /// Task types the SDK registers on every worker rather than the user.
 pub const BUILT_IN_TASK_TYPES: &[&str] = &[SESSION_CREATE_TASK, SESSION_COMPLETE_TASK];
 
-/// The work drivers a worker needs.
-///
-/// ```
-/// use orcher_sdk_core::worker::NeededDrivers;
-///
-/// // A worker that only runs tasks polls only for tasks.
-/// let needed = NeededDrivers::for_registrations(&[] as &[&str], &["send_email"], &[] as &[&str]);
-/// assert!(!needed.workflows);
-/// assert!(needed.tasks);
-/// assert!(!needed.actors);
-/// ```
+/// The work drivers a worker needs: a worker that only runs tasks polls only
+/// for tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NeededDrivers {

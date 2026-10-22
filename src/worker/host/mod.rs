@@ -36,9 +36,10 @@ use crate::proto::host::v1::{
 use crate::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
 use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
 use crate::worker::{
-    ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkerMetrics, WorkflowDriver,
+    ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkerMetrics,
+    WorkerRegistrationDriver, WorkflowDriver,
 };
-use crate::{Error, Result, WorkerRegistrationDriver};
+use crate::{Error, Result};
 use tokio::task::JoinHandle;
 
 pub use actors::{ActorHandler, StateScope, StateValue};

@@ -815,7 +815,7 @@ mod tests {
         };
         let check = |calls| {
             let result = execution_result("run-1", failed(calls)).unwrap();
-            crate::Replayer::check_activation(&journal, &result)
+            crate::state::replayer::Replayer::check_activation(&journal, &result)
         };
 
         let left_last = check(Some(vec![task(0, "charge_0")]));
@@ -1091,7 +1091,7 @@ mod tests {
             result.reached_steps.as_deref(),
             Some(&["charge_0".to_string(), "ship_1".to_string()][..])
         );
-        let violations = crate::Replayer::check_activation(&journal, &result);
+        let violations = crate::state::replayer::Replayer::check_activation(&journal, &result);
         assert!(violations.is_empty(), "{violations:?}");
     }
 }

@@ -188,11 +188,13 @@ impl TaskHeartbeat {
     ///
     /// This is the task's own, or the engine's default for a worker that
     /// heartbeats on its own. `None` when there is none.
+    #[cfg(test)]
     pub fn heartbeat_timeout(&self) -> Option<Duration> {
         self.guard.beat.heartbeat_timeout
     }
 
     /// Returns whether this handle's heartbeats have stopped.
+    #[cfg(test)]
     pub fn is_finished(&self) -> bool {
         self.guard.beat.finished.is_cancelled()
     }

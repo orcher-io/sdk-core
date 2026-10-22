@@ -9,7 +9,4 @@ pub mod polling;
 pub mod scaler;
 
 pub use completion::CompletionRetryConfig;
-pub use polling::{
-    ActorOperationPoller, ActorPollerConfig, PollerConfig, TaskExecutionPoller, TaskExecutionTask,
-    WorkflowExecutionPoller, WorkflowExecutionTask,
-};
+pub use polling::{TaskExecutionTask, WorkflowExecutionTask};
