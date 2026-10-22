@@ -291,3 +291,39 @@ async fn calls_to_the_engine_are_measured_by_method() {
     assert_eq!(work.task_failures, 0);
     host.shutdown().await;
 }
+
+/// The worker's heartbeat tells the engine what it has run: a task reported
+/// complete is counted in the next one.
+#[tokio::test]
+async fn a_completed_task_is_counted_in_the_worker_heartbeat() {
+    let engine = Engine::default();
+    engine.script().tasks.push_back(task("charge_0", "token-1"));
+    let addr = engine.serve().await;
+    let host = Host::start(
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(Duration::from_millis(300))
+            .with_heartbeat_interval(Duration::from_millis(100)),
+        Registrations::new([] as [&str; 0], ["charge"], [] as [&str; 0]),
+    )
+    .await
+    .unwrap();
+
+    let assignment = host.next_task().await.expect("a task");
+    host.complete_task(TaskOutcome {
+        token: assignment.token.clone(),
+        result: value(b"{}"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    eventually("a heartbeat counting the completed task", || {
+        engine.script().worker_heartbeats.iter().any(|heartbeat| {
+            heartbeat
+                .metrics
+                .as_ref()
+                .is_some_and(|load| load.tasks_completed == 1 && load.tasks_in_progress == 0)
+        })
+    })
+    .await;
+    host.shutdown().await;
+}

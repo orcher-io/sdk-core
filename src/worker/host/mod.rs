@@ -35,7 +35,9 @@ use crate::proto::host::v1::{
 };
 use crate::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
 use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
-use crate::worker::{ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkflowDriver};
+use crate::worker::{
+    ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkerMetrics, WorkflowDriver,
+};
 use crate::{Error, Result, WorkerRegistrationDriver};
 use tokio::task::JoinHandle;
 
@@ -149,6 +151,9 @@ impl Host {
         }
         // One worker's wire measurements, shared by all its connections.
         let wire = WireMetrics::new();
+        // What the worker is running and has run, counted by the drivers and
+        // reported to the engine with every worker heartbeat.
+        let load = WorkerMetrics::new();
         let mut stops = Stops::default();
 
         let mut eager_tasks = None;
@@ -159,7 +164,9 @@ impl Host {
                 driver_config
             })
             .await?;
-            let mut driver = driver.with_completion_retry(config.completion_retry());
+            let mut driver = driver
+                .with_completion_retry(config.completion_retry())
+                .with_metrics(Arc::clone(&load));
             // Tasks the engine hands back with a workflow's completion reach
             // this worker's task driver without a poll.
             eager_tasks = Some(driver.eager_task_injector());
@@ -189,7 +196,9 @@ impl Host {
                 driver_config
             })
             .await?;
-            let driver = driver.with_completion_retry(config.completion_retry());
+            let driver = driver
+                .with_completion_retry(config.completion_retry())
+                .with_metrics(Arc::clone(&load));
             let mut driver = match eager_tasks {
                 Some(injector) => driver.with_eager_task_injector(injector),
                 None => driver,
@@ -258,7 +267,8 @@ impl Host {
             driver_config.wire = Arc::clone(&wire);
             driver_config
         })
-        .await?;
+        .await?
+        .with_metrics(load);
         let stop = registration.shutdown_handle();
         let running = tokio::spawn(async move {
             if let Err(error) = registration.run().await {
