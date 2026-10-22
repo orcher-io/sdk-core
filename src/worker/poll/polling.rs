@@ -848,7 +848,7 @@ impl WorkflowExecutionPoller {
                         error_message = %e.message(),
                         "Workflow poll gRPC error"
                     );
-                    return Err(Error::GrpcStatus(e));
+                    return Err(Error::Status(crate::wire::status::status(e)));
                 }
             }
         }
@@ -908,7 +908,7 @@ impl WorkflowExecutionPoller {
                 elapsed_ms = elapsed.as_millis(),
                 "Workflow poll gRPC error"
             );
-            Error::GrpcStatus(e)
+            Error::Status(crate::wire::status::status(e))
         })?;
 
         let poll_response = response.into_inner();
@@ -1450,7 +1450,7 @@ impl TaskExecutionPoller {
                 Err(e) => {
                     let e = crate::transport::clarify(e);
                     tracing::warn!(error = %e, code = ?e.code(), "Task poll gRPC error");
-                    return Err(Error::GrpcStatus(e));
+                    return Err(Error::Status(crate::wire::status::status(e)));
                 }
             }
         }
@@ -1509,7 +1509,7 @@ impl TaskExecutionPoller {
                     }
                     let e = crate::transport::clarify(e);
                     tracing::warn!(error = %e, code = ?e.code(), "Task poll gRPC error");
-                    Error::GrpcStatus(e)
+                    Error::Status(crate::wire::status::status(e))
                 })?;
 
         let elapsed = start.elapsed();
@@ -1976,7 +1976,7 @@ impl ActorOperationPoller {
                     if e.code() == tonic::Code::DeadlineExceeded {
                         return Error::timeout("poll actor operation");
                     }
-                    Error::from(e)
+                    crate::wire::status::error(e)
                 })?;
 
         let poll_response = response.into_inner();
@@ -2023,7 +2023,7 @@ mod tests {
         let status = tonic::Status::internal(
             "protocol error: received message with invalid compression flag: 60",
         );
-        let error = crate::error::Error::from(status);
+        let error = crate::wire::status::error(status);
         assert!(
             !error.is_retryable(),
             "if this becomes retryable the poller takes the quick-retry path, which is fine; \

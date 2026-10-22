@@ -222,9 +222,9 @@ fn cancel_request(
 /// and reporting it as a missing workflow would mislead.
 fn start_error(status: tonic::Status, workflow_id: &str) -> Error {
     if status.code() == tonic::Code::AlreadyExists {
-        Error::from_status_for_workflow(status, workflow_id)
+        crate::wire::status::for_workflow(status, workflow_id)
     } else {
-        Error::from(status)
+        crate::wire::status::error(status)
     }
 }
 
@@ -490,7 +490,7 @@ impl WorkflowClient {
             let inner = match self.client.clone().get_workflow_result(request).await {
                 Ok(r) => r.into_inner(),
                 Err(status) => {
-                    let err = Error::from(status);
+                    let err = crate::wire::status::error(status);
                     // `is_normal_timeout` covers the server's DeadlineExceeded, a
                     // transport or proxy DeadlineExceeded, and Cancelled("Timeout
                     // expired"). The short sleep stops a server that returns
@@ -757,7 +757,7 @@ impl WorkflowClient {
             .await
             // No single workflow to attribute a NOT_FOUND to here, so the status
             // stays opaque rather than being misfiled against an arbitrary id.
-            .map_err(Error::GrpcStatus)?;
+            .map_err(crate::wire::status::error)?;
 
         let executions = response.into_inner().executions;
         let handles = executions
@@ -804,7 +804,7 @@ impl WorkflowClient {
             .clone()
             .send_event(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         Ok(())
     }
@@ -844,7 +844,7 @@ impl WorkflowClient {
             .clone()
             .query_workflow(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         let result_bytes = response.into_inner().result;
 
@@ -894,7 +894,7 @@ impl WorkflowClient {
             .clone()
             .update_workflow(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         let inner = response.into_inner();
         match inner.outcome {
@@ -934,7 +934,7 @@ impl WorkflowClient {
             .clone()
             .get_workflow_status(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         Ok(WorkflowStatus::from(response.into_inner().status))
     }
@@ -975,7 +975,7 @@ impl WorkflowClient {
             .clone()
             .cancel_workflow(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         Ok(())
     }
@@ -1007,7 +1007,7 @@ impl WorkflowClient {
             .clone()
             .describe_workflow_execution(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         WorkflowExecutionDescription::from_proto(response.into_inner())
     }
@@ -1077,7 +1077,7 @@ impl WorkflowClient {
             .await
             // No single workflow to attribute a NOT_FOUND to here, so the status
             // stays opaque rather than being misfiled against an arbitrary id.
-            .map_err(Error::GrpcStatus)?;
+            .map_err(crate::wire::status::error)?;
 
         Ok(WorkflowListPage::from_list_response(response.into_inner()))
     }
@@ -1132,7 +1132,7 @@ impl WorkflowClient {
             .await
             // No single workflow to attribute a NOT_FOUND to here, so the status
             // stays opaque rather than being misfiled against an arbitrary id.
-            .map_err(Error::GrpcStatus)?;
+            .map_err(crate::wire::status::error)?;
 
         Ok(WorkflowListPage::from_search_response(
             response.into_inner(),
@@ -1166,7 +1166,7 @@ impl WorkflowClient {
             .clone()
             .terminate_workflow(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         Ok(())
     }
@@ -1196,7 +1196,7 @@ impl WorkflowClient {
             .clone()
             .reset_workflow(request)
             .await
-            .map_err(|s| Error::from_status_for_workflow(s, &workflow_id))?;
+            .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
         Ok(response.into_inner().new_execution_id)
     }
@@ -1663,6 +1663,6 @@ mod tests {
     #[test]
     fn other_start_refusals_stay_opaque() {
         let err = start_error(tonic::Status::not_found("namespace"), "order-1");
-        assert!(matches!(err, Error::GrpcStatus(ref s) if s.code() == tonic::Code::NotFound));
+        assert!(matches!(err, Error::Status(ref s) if s.code() == crate::error::Code::NotFound));
     }
 }

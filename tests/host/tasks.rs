@@ -266,6 +266,15 @@ async fn calls_to_the_engine_are_measured_by_method() {
     .await
     .unwrap();
     eventually("the completion", || !engine.script().completed.is_empty()).await;
+    // The engine holds the completion before the call that carried it has
+    // returned and been measured.
+    eventually("both completion calls measured", || {
+        host.wire_metrics()
+            .methods
+            .get(COMPLETE)
+            .is_some_and(|completes| completes.calls == 2)
+    })
+    .await;
 
     let wire = host.wire_metrics();
     let polls = &wire.methods[POLL];

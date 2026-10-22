@@ -196,10 +196,14 @@ mod tests {
                 .await
                 .unwrap();
             let error = client.get_workflow_status("wf", None).await.unwrap_err();
-            let crate::error::Error::GrpcStatus(status) = &error else {
+            let crate::error::Error::Status(status) = &error else {
                 panic!("{error:?}");
             };
-            assert_eq!(status.code(), code, "HTTP {http}: {status:?}");
+            assert_eq!(
+                status.code().as_i32(),
+                code as i32,
+                "HTTP {http}: {status:?}"
+            );
             assert_eq!(error.is_retryable(), retryable, "HTTP {http}: {status:?}");
             assert!(!status.message().contains("compression"), "{status:?}");
         }
