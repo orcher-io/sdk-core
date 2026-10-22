@@ -1,7 +1,8 @@
-//! Error types for every SDK operation: gRPC communication, workflow and task
-//! execution, state machine, and replay.
+//! Error types for every SDK operation: calls to the engine, workflow and
+//! task execution, and replay.
 
 use std::fmt;
+use std::sync::Arc;
 
 /// Metadata key the server sets on an ALREADY_EXISTS from StartWorkflow, naming
 /// the workflow whose id is in use.
@@ -24,17 +25,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// gRPC transport error.
-    #[error("gRPC transport error: {}", with_causes(.0))]
-    Transport(#[from] tonic::transport::Error),
-
-    /// gRPC status error.
+    /// The engine answered a call with a status other than OK.
     ///
-    /// A status that reports a message over a gRPC size limit arrives
-    /// rewritten by [`crate::transport::limits::clarify`]: OUT_OF_RANGE, saying which
-    /// limit to raise or that the data belongs elsewhere.
+    /// A status that reports a message over a size limit arrives restated as
+    /// OUT_OF_RANGE, saying which limit to raise or that the data belongs
+    /// elsewhere.
     #[error("gRPC status error: {}", with_causes(.0))]
-    GrpcStatus(#[source] tonic::Status),
+    Status(#[source] Status),
 
     /// Workflow not found.
     #[error("Workflow not found: workflow_id={workflow_id}, run_id={run_id:?}")]
@@ -225,9 +222,159 @@ pub(crate) fn with_causes(error: &(dyn std::error::Error + 'static)) -> String {
     text
 }
 
-impl From<tonic::Status> for Error {
-    fn from(status: tonic::Status) -> Self {
-        Error::GrpcStatus(crate::transport::clarify(status))
+/// The status code of a call the engine refused, as RPC status codes number
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Code {
+    /// The call succeeded.
+    Ok = 0,
+    /// The call was cancelled, usually by the caller.
+    Cancelled = 1,
+    /// An error with no better code, including one the client could not read.
+    Unknown = 2,
+    /// The request was invalid, whatever the system's state.
+    InvalidArgument = 3,
+    /// The deadline passed before the call completed.
+    DeadlineExceeded = 4,
+    /// Something the call named does not exist.
+    NotFound = 5,
+    /// What the call would create already exists.
+    AlreadyExists = 6,
+    /// The caller may not do this.
+    PermissionDenied = 7,
+    /// A quota or limit ran out.
+    ResourceExhausted = 8,
+    /// The system is not in the state the call needs.
+    FailedPrecondition = 9,
+    /// The call was aborted, usually by a conflict.
+    Aborted = 10,
+    /// A value was outside its valid range, a message size limit included.
+    OutOfRange = 11,
+    /// The engine does not offer the call.
+    Unimplemented = 12,
+    /// The engine broke one of its own invariants.
+    Internal = 13,
+    /// The engine cannot be reached for now.
+    Unavailable = 14,
+    /// Data was lost or corrupted.
+    DataLoss = 15,
+    /// The call carried no valid credentials.
+    Unauthenticated = 16,
+}
+
+impl Code {
+    /// The code numbered `value`; [`Code::Unknown`] for a number with no code.
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            0 => Code::Ok,
+            1 => Code::Cancelled,
+            3 => Code::InvalidArgument,
+            4 => Code::DeadlineExceeded,
+            5 => Code::NotFound,
+            6 => Code::AlreadyExists,
+            7 => Code::PermissionDenied,
+            8 => Code::ResourceExhausted,
+            9 => Code::FailedPrecondition,
+            10 => Code::Aborted,
+            11 => Code::OutOfRange,
+            12 => Code::Unimplemented,
+            13 => Code::Internal,
+            14 => Code::Unavailable,
+            15 => Code::DataLoss,
+            16 => Code::Unauthenticated,
+            _ => Code::Unknown,
+        }
+    }
+
+    /// The code's number.
+    pub fn as_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// The code's name, as RPC status codes are written: `NOT_FOUND`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Code::Ok => "OK",
+            Code::Cancelled => "CANCELLED",
+            Code::Unknown => "UNKNOWN",
+            Code::InvalidArgument => "INVALID_ARGUMENT",
+            Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
+            Code::NotFound => "NOT_FOUND",
+            Code::AlreadyExists => "ALREADY_EXISTS",
+            Code::PermissionDenied => "PERMISSION_DENIED",
+            Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+            Code::FailedPrecondition => "FAILED_PRECONDITION",
+            Code::Aborted => "ABORTED",
+            Code::OutOfRange => "OUT_OF_RANGE",
+            Code::Unimplemented => "UNIMPLEMENTED",
+            Code::Internal => "INTERNAL",
+            Code::Unavailable => "UNAVAILABLE",
+            Code::DataLoss => "DATA_LOSS",
+            Code::Unauthenticated => "UNAUTHENTICATED",
+        }
+    }
+}
+
+impl fmt::Display for Code {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the engine answered a call it did not complete with: a code and a
+/// message, and the error underneath when the client produced the status
+/// itself (a connection that broke mid-call).
+#[derive(Debug, Clone)]
+pub struct Status {
+    code: Code,
+    message: String,
+    source: Option<Arc<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+impl Status {
+    /// A status with `code` and `message`.
+    pub fn new(code: Code, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Sets the error underneath the status.
+    pub(crate) fn with_source(
+        mut self,
+        source: Option<Arc<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// The status code.
+    pub fn code(&self) -> Code {
+        self.code
+    }
+
+    /// The message the status came with.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.message.is_empty() {
+            write!(f, "{}", self.code)
+        } else {
+            write!(f, "{}: {}", self.code, self.message)
+        }
+    }
+}
+
+impl std::error::Error for Status {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as _)
     }
 }
 
@@ -304,57 +451,6 @@ impl Error {
             Error::Other(e) => e.downcast_ref::<TaskFailure>(),
             Error::WithContext { source, .. } => source.task_failure(),
             _ => None,
-        }
-    }
-}
-
-impl Error {
-    /// Maps a gRPC status to a semantic error, given the workflow it concerns.
-    ///
-    /// NOT_FOUND becomes [`Error::WorkflowNotFound`], ALREADY_EXISTS becomes
-    /// [`Error::WorkflowAlreadyExists`], and DEADLINE_EXCEEDED becomes
-    /// [`Error::Timeout`]. This spares every SDK from interpreting an opaque
-    /// `Error::GrpcStatus` on its own.
-    ///
-    /// The workflow id is a parameter rather than something parsed out of the
-    /// message. A caller asking about a specific workflow already knows which
-    /// one, and recovering it from prose would break as soon as the server
-    /// rewords the error.
-    ///
-    /// Codes with no semantic equivalent stay `GrpcStatus`, so nothing is lost
-    /// or misfiled by guessing.
-    pub fn from_status_for_workflow(status: tonic::Status, workflow_id: impl Into<String>) -> Self {
-        let message = status.message().to_string();
-        match status.code() {
-            tonic::Code::NotFound => Error::WorkflowNotFound {
-                workflow_id: workflow_id.into(),
-                run_id: None,
-            },
-            tonic::Code::AlreadyExists => {
-                let named = |key: &str| {
-                    status
-                        .metadata()
-                        .get(key)
-                        .and_then(|v| v.to_str().ok())
-                        .filter(|v| !v.is_empty())
-                        .map(str::to_string)
-                };
-                Error::WorkflowAlreadyExists {
-                    // The server's id takes precedence: a start that left the
-                    // id to the server has none of its own to report.
-                    workflow_id: named(WORKFLOW_ID_METADATA_KEY)
-                        .unwrap_or_else(|| workflow_id.into()),
-                    run_id: named(EXECUTION_ID_METADATA_KEY),
-                }
-            }
-            tonic::Code::DeadlineExceeded => Error::Timeout {
-                operation: if message.is_empty() {
-                    "request".to_string()
-                } else {
-                    message
-                },
-            },
-            _ => Error::from(status),
         }
     }
 }
@@ -572,12 +668,11 @@ impl Error {
         match self {
             Error::Timeout { .. } => true,
 
-            Error::GrpcStatus(status) if status.code() == tonic::Code::DeadlineExceeded => true,
+            Error::Status(status) if status.code() == Code::DeadlineExceeded => true,
 
             // Cancelled with "Timeout expired" is how the server ends a long poll
-            Error::GrpcStatus(status)
-                if status.code() == tonic::Code::Cancelled
-                    && status.message() == "Timeout expired" =>
+            Error::Status(status)
+                if status.code() == Code::Cancelled && status.message() == "Timeout expired" =>
             {
                 true
             }
@@ -588,23 +683,22 @@ impl Error {
 
     /// Returns whether retrying the operation could succeed.
     ///
-    /// True for transport and connection failures, timeouts, resource
-    /// exhaustion (after a backoff), and the gRPC codes that signal a
+    /// True for connection failures, timeouts, resource
+    /// exhaustion (after a backoff), and the status codes that signal a
     /// transient condition.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Error::Transport(_) => true,
             Error::Connection(_) => true,
 
-            Error::GrpcStatus(status) => {
+            Error::Status(status) => {
                 matches!(
                     status.code(),
-                    tonic::Code::Unavailable
-                        | tonic::Code::DeadlineExceeded
-                        | tonic::Code::ResourceExhausted
-                        | tonic::Code::Aborted
-                        | tonic::Code::Cancelled
-                        | tonic::Code::Unknown // How transport errors surface mid-long-poll
+                    Code::Unavailable
+                        | Code::DeadlineExceeded
+                        | Code::ResourceExhausted
+                        | Code::Aborted
+                        | Code::Cancelled
+                        | Code::Unknown // How transport errors surface mid-long-poll
                 )
             }
 
@@ -619,7 +713,7 @@ impl Error {
     /// Returns whether this error is permanent, so retrying cannot help.
     ///
     /// True for authentication and authorization failures, workflow state and
-    /// determinism errors, configuration errors, invalid data, and the gRPC
+    /// determinism errors, configuration errors, invalid data, and the status
     /// codes that describe a bad or impossible request. An error can be
     /// neither retryable nor permanent.
     pub fn is_permanent(&self) -> bool {
@@ -637,16 +731,16 @@ impl Error {
             | Error::InvalidEvent { .. }
             | Error::InvalidExecutionJournal { .. } => true,
 
-            Error::GrpcStatus(status) => {
+            Error::Status(status) => {
                 matches!(
                     status.code(),
-                    tonic::Code::InvalidArgument
-                        | tonic::Code::NotFound
-                        | tonic::Code::AlreadyExists
-                        | tonic::Code::PermissionDenied
-                        | tonic::Code::Unauthenticated
-                        | tonic::Code::FailedPrecondition
-                        | tonic::Code::Unimplemented
+                    Code::InvalidArgument
+                        | Code::NotFound
+                        | Code::AlreadyExists
+                        | Code::PermissionDenied
+                        | Code::Unauthenticated
+                        | Code::FailedPrecondition
+                        | Code::Unimplemented
                 )
             }
 
@@ -708,7 +802,7 @@ mod tests {
                 ))),
             ))),
         );
-        let err = Error::from(tonic::Status::from_error(Box::new(cause)));
+        let err = crate::wire::status::error(tonic::Status::from_error(Box::new(cause)));
         let text = err.to_string();
         assert!(
             text.ends_with(": client error (Connect): received fatal alert: CertificateRequired"),
@@ -768,107 +862,5 @@ mod tests {
         assert!(err_with_context
             .to_string()
             .contains("while processing workflow"));
-    }
-}
-
-#[cfg(test)]
-mod semantic_status_mapping_tests {
-    use super::*;
-
-    #[test]
-    fn not_found_becomes_a_workflow_not_found() {
-        let err = Error::from_status_for_workflow(
-            tonic::Status::new(tonic::Code::NotFound, "Workflow execution not found: wf-1"),
-            "wf-1",
-        );
-        assert!(
-            matches!(err, Error::WorkflowNotFound { ref workflow_id, .. } if workflow_id == "wf-1")
-        );
-    }
-
-    #[test]
-    fn already_exists_becomes_a_workflow_already_exists() {
-        let err = Error::from_status_for_workflow(
-            tonic::Status::new(tonic::Code::AlreadyExists, "duplicate"),
-            "wf-2",
-        );
-        assert!(
-            matches!(err, Error::WorkflowAlreadyExists { ref workflow_id, run_id: None } if workflow_id == "wf-2")
-        );
-    }
-
-    /// The execution holding the id travels in trailing metadata. Dropping it
-    /// leaves a caller that started a duplicate unable to reach the run that
-    /// is already doing the work.
-    #[test]
-    fn already_exists_names_the_execution_in_the_way() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        metadata.insert(EXECUTION_ID_METADATA_KEY, "run-7".parse().unwrap());
-        metadata.insert(WORKFLOW_ID_METADATA_KEY, "order-7".parse().unwrap());
-        let err = Error::from_status_for_workflow(
-            tonic::Status::with_metadata(tonic::Code::AlreadyExists, "running", metadata),
-            "",
-        );
-        match err {
-            Error::WorkflowAlreadyExists {
-                workflow_id,
-                run_id,
-            } => {
-                assert_eq!(workflow_id, "order-7");
-                assert_eq!(run_id.as_deref(), Some("run-7"));
-            }
-            other => panic!("expected WorkflowAlreadyExists, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deadline_exceeded_becomes_a_timeout() {
-        let err = Error::from_status_for_workflow(
-            tonic::Status::new(tonic::Code::DeadlineExceeded, "took too long"),
-            "wf-3",
-        );
-        assert!(matches!(err, Error::Timeout { .. }));
-    }
-
-    /// Codes with no semantic equivalent must stay opaque. Guessing would be
-    /// worse than opacity: a misfiled error is harder to diagnose than an
-    /// unclassified one.
-    #[test]
-    fn codes_without_a_meaning_stay_a_grpc_status() {
-        for code in [
-            tonic::Code::PermissionDenied,
-            tonic::Code::InvalidArgument,
-            tonic::Code::Internal,
-            tonic::Code::Unavailable,
-        ] {
-            let err = Error::from_status_for_workflow(tonic::Status::new(code, "x"), "wf-4");
-            assert!(
-                matches!(err, Error::GrpcStatus(_)),
-                "{code:?} should not have been given a semantic meaning"
-            );
-        }
-    }
-
-    /// The id comes from the caller, never from the message. A reworded server
-    /// error must not change which error type a caller sees.
-    #[test]
-    fn the_workflow_id_is_not_parsed_out_of_the_message() {
-        let err = Error::from_status_for_workflow(
-            tonic::Status::new(tonic::Code::NotFound, "some entirely different wording"),
-            "wf-5",
-        );
-        assert!(
-            matches!(err, Error::WorkflowNotFound { ref workflow_id, .. } if workflow_id == "wf-5")
-        );
-    }
-
-    /// Retryability follows the mapped meaning, not the gRPC wrapper.
-    #[test]
-    fn a_missing_workflow_is_not_retryable_after_mapping() {
-        let err = Error::from_status_for_workflow(
-            tonic::Status::new(tonic::Code::NotFound, "gone"),
-            "wf-6",
-        );
-        assert!(!err.is_retryable());
     }
 }

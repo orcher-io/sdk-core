@@ -115,7 +115,7 @@ impl Error {
             Error::WorkflowCancelled { .. } => ErrorCode::WorkflowCanceled,
             Error::WorkflowTerminated { .. } => ErrorCode::WorkflowTerminated,
             Error::Timeout { .. } => ErrorCode::Timeout,
-            Error::Transport(_) | Error::Connection(_) => ErrorCode::ConnectionFailed,
+            Error::Connection(_) => ErrorCode::ConnectionFailed,
             Error::Authentication(_) => ErrorCode::Unauthenticated,
             Error::Authorization(_) => ErrorCode::PermissionDenied,
             Error::Configuration(_) | Error::InvalidPayload { .. } => ErrorCode::InvalidArgument,
@@ -126,20 +126,20 @@ impl Error {
             Error::Protocol(_) => ErrorCode::Internal,
             // The context is for people; the code is the wrapped error's.
             Error::WithContext { source, .. } => source.code(),
-            Error::GrpcStatus(status) => match status.code() {
-                tonic::Code::NotFound => ErrorCode::NotFound,
-                tonic::Code::AlreadyExists => ErrorCode::AlreadyExists,
-                tonic::Code::DeadlineExceeded => ErrorCode::Timeout,
-                tonic::Code::Unavailable => ErrorCode::Unavailable,
-                tonic::Code::PermissionDenied => ErrorCode::PermissionDenied,
-                tonic::Code::Unauthenticated => ErrorCode::Unauthenticated,
-                tonic::Code::InvalidArgument => ErrorCode::InvalidArgument,
-                tonic::Code::ResourceExhausted => ErrorCode::ResourceExhausted,
-                tonic::Code::FailedPrecondition => ErrorCode::FailedPrecondition,
-                tonic::Code::Aborted => ErrorCode::Aborted,
-                tonic::Code::OutOfRange => ErrorCode::OutOfRange,
-                tonic::Code::Unimplemented => ErrorCode::Unimplemented,
-                tonic::Code::DataLoss => ErrorCode::DataLoss,
+            Error::Status(status) => match status.code() {
+                crate::error::Code::NotFound => ErrorCode::NotFound,
+                crate::error::Code::AlreadyExists => ErrorCode::AlreadyExists,
+                crate::error::Code::DeadlineExceeded => ErrorCode::Timeout,
+                crate::error::Code::Unavailable => ErrorCode::Unavailable,
+                crate::error::Code::PermissionDenied => ErrorCode::PermissionDenied,
+                crate::error::Code::Unauthenticated => ErrorCode::Unauthenticated,
+                crate::error::Code::InvalidArgument => ErrorCode::InvalidArgument,
+                crate::error::Code::ResourceExhausted => ErrorCode::ResourceExhausted,
+                crate::error::Code::FailedPrecondition => ErrorCode::FailedPrecondition,
+                crate::error::Code::Aborted => ErrorCode::Aborted,
+                crate::error::Code::OutOfRange => ErrorCode::OutOfRange,
+                crate::error::Code::Unimplemented => ErrorCode::Unimplemented,
+                crate::error::Code::DataLoss => ErrorCode::DataLoss,
                 _ => ErrorCode::Internal,
             },
             _ => ErrorCode::Unknown,
@@ -165,6 +165,7 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{Code, Status};
 
     /// The codes the TypeScript bridge tagged errors with before this
     /// mapping moved here, which switching to it keeps.
@@ -183,15 +184,12 @@ mod tests {
             (Error::Authorization("no".into()), "PERMISSION_DENIED"),
             (Error::Configuration("bad".into()), "INVALID_ARGUMENT"),
             (Error::Serialization("bad".into()), "INTERNAL"),
+            (Error::Status(Status::new(Code::NotFound, "x")), "NOT_FOUND"),
             (
-                Error::GrpcStatus(tonic::Status::not_found("x")),
-                "NOT_FOUND",
-            ),
-            (
-                Error::GrpcStatus(tonic::Status::unavailable("x")),
+                Error::Status(Status::new(Code::Unavailable, "x")),
                 "UNAVAILABLE",
             ),
-            (Error::GrpcStatus(tonic::Status::cancelled("x")), "INTERNAL"),
+            (Error::Status(Status::new(Code::Cancelled, "x")), "INTERNAL"),
             (Error::Internal("x".into()), "UNKNOWN"),
             (Error::workflow_execution_failed("x"), "UNKNOWN"),
         ];

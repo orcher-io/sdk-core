@@ -172,7 +172,7 @@ impl ActorService {
             .clone()
             .register_handlers(self.request(request))
             .await
-            .map_err(Error::from)?
+            .map_err(crate::wire::status::error)?
             .into_inner();
         if !response.success {
             return Err(Error::Configuration(format!(
@@ -199,7 +199,7 @@ impl ActorService {
                 ..Default::default()
             }))
             .await
-            .map_err(Error::from)?
+            .map_err(crate::wire::status::error)?
             .into_inner();
         Ok(response.exists.then_some(StateValue {
             value: response.value,
@@ -227,7 +227,7 @@ impl ActorService {
                 ..Default::default()
             }))
             .await
-            .map_err(Error::from)?
+            .map_err(crate::wire::status::error)?
             .into_inner();
         if !response.success {
             return Err(Error::WorkerError(format!(
@@ -250,7 +250,7 @@ impl ActorService {
                 ..Default::default()
             }))
             .await
-            .map_err(Error::from)?
+            .map_err(crate::wire::status::error)?
             .into_inner();
         Ok(response.existed)
     }
@@ -267,7 +267,7 @@ impl ActorService {
                 ..Default::default()
             }))
             .await
-            .map_err(Error::from)?
+            .map_err(crate::wire::status::error)?
             .into_inner();
         Ok(response.keys)
     }

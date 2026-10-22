@@ -96,7 +96,8 @@ impl CoreActorClient {
             .client
             .clone()
             .invoke_operation(request)
-            .await?
+            .await
+            .map_err(crate::wire::status::error)?
             .into_inner();
 
         match ExecutionStatus::try_from(response.status) {

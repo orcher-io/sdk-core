@@ -17,6 +17,6 @@ pub use credentials::credentialed_request;
 /// Restates a failed call's status by what actually happened: a message over
 /// a size limit, or an answer from something other than the engine. Every
 /// path that turns a call's status into a decision goes through this.
-pub fn clarify(status: tonic::Status) -> tonic::Status {
+pub(crate) fn clarify(status: tonic::Status) -> tonic::Status {
     limits::clarify(non_grpc::clarify(status))
 }
