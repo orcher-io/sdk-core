@@ -11,12 +11,10 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use orcher_sdk_core::proto::orcher::v1::worker_service_server::{
-    WorkerService, WorkerServiceServer,
-};
-use orcher_sdk_core::proto::orcher::v1::*;
-use orcher_sdk_core::worker::drivers::registration::DEREGISTER_TIMEOUT;
-use orcher_sdk_core::{WorkerRegistrationConfig, WorkerRegistrationDriver};
+use crate::proto::orcher::v1::worker_service_server::{WorkerService, WorkerServiceServer};
+use crate::proto::orcher::v1::*;
+use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
+use crate::worker::drivers::registration::{WorkerRegistrationConfig, WorkerRegistrationDriver};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
@@ -124,7 +122,7 @@ async fn registered_driver_with(
     config.heartbeat_interval = Duration::from_secs(3600);
     let driver = WorkerRegistrationDriver::new(config).await.unwrap();
     assert_eq!(
-        driver.registration_id(),
+        driver.registration_id.as_deref(),
         Some(REGISTRATION_ID),
         "the driver did not register with the fake server"
     );
@@ -184,7 +182,7 @@ async fn registration_declares_the_worker_protocol_version() {
     let (addr, recorded) = fake_server(false).await;
     let _baseline = registered_driver(addr).await;
     let _cancel_aware = registered_driver_with(addr, |config| {
-        config.protocol_version = orcher_sdk_core::worker_protocol::CANCEL_REQUEST;
+        config.protocol_version = crate::worker_protocol::CANCEL_REQUEST;
     })
     .await;
 
@@ -202,8 +200,8 @@ async fn registration_declares_the_worker_protocol_version() {
     assert_eq!(
         versions,
         vec![
-            orcher_sdk_core::worker_protocol::BASELINE,
-            orcher_sdk_core::worker_protocol::CANCEL_REQUEST,
+            crate::worker_protocol::BASELINE,
+            crate::worker_protocol::CANCEL_REQUEST,
         ]
     );
 }

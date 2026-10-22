@@ -486,7 +486,7 @@ pub(crate) enum Report {
         /// `WorkflowExecutionError`, or [`NON_DETERMINISM_FAILURE_TYPE`] for
         /// an activation whose commands contradict its journal.
         ///
-        /// [`NON_DETERMINISM_FAILURE_TYPE`]: crate::state::NON_DETERMINISM_FAILURE_TYPE
+        /// [`NON_DETERMINISM_FAILURE_TYPE`]: crate::NON_DETERMINISM_FAILURE_TYPE
         failure_type: String,
         /// Running the same code again cannot succeed.
         non_retryable: bool,

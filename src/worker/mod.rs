@@ -1,44 +1,31 @@
 //! Everything a worker runs. Its face is the [`Host`](host::Host): one worker's plumbing,
 //! which every language SDK runs its worker on, pulling work and handing back
-//! outcomes. Under it are the drivers, the pollers and completion reporting,
-//! the governor, task heartbeats, shutdown notices and worker metrics.
+//! outcomes. Under it, private to this crate, are the drivers, the pollers and
+//! completion reporting, the governor, task heartbeats, shutdown notices and
+//! worker metrics.
 
-pub mod drivers;
+pub(crate) mod drivers;
 pub(crate) mod governor;
-pub mod heartbeat;
+pub(crate) mod heartbeat;
 pub mod host;
 mod lifecycle;
-pub mod metrics;
-pub mod poll;
+pub(crate) mod metrics;
+pub(crate) mod poll;
 pub mod record;
 
-// Driver types: the main API for language SDKs.
-pub use drivers::{
-    ActorDriver, ActorDriverConfig, ActorDriverEvent, ActorWork, ActorWorkResult,
-    EagerTaskInjector, RegistrationHandle, SessionQueueChange, ShutdownHandle, TaskDriver,
-    TaskDriverConfig, TaskWork, TaskWorkResult, WorkflowDriver, WorkflowDriverConfig, WorkflowWork,
-    WorkflowWorkResult,
+// The work a poll brings, as the kernel takes it to resolve an activation.
+pub use poll::{TaskExecutionTask, WorkflowExecutionTask};
+
+// The built-in task types the host runs itself: a session's creation and end.
+pub use drivers::{SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
+
+pub(crate) use drivers::WorkerRegistrationDriver;
+pub(crate) use drivers::{
+    ActorDriver, ActorDriverEvent, ActorWork, ActorWorkResult, RegistrationHandle,
+    SessionQueueChange, ShutdownHandle, TaskDriver, TaskWork, TaskWorkResult, WorkflowDriver,
+    WorkflowWork, WorkflowWorkResult,
 };
-
-// Which of the work drivers a worker starts, and the built-in task types that
-// do not count towards it.
-pub use drivers::{NeededDrivers, BUILT_IN_TASK_TYPES, SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
-
-// A running task's heartbeat, as the language SDK sees it.
-pub use heartbeat::{CancellationToken, TaskHeartbeat};
-
-// The id this process sends on its polls and with its shutdown notice.
-pub use lifecycle::worker_instance_id;
-
-// How hard the drivers try to deliver a completion.
-pub use poll::CompletionRetryConfig;
-
-// Polling types.
-pub use poll::{
-    ActorOperationPoller, ActorPollerConfig, PollerConfig, TaskExecutionPoller, TaskExecutionTask,
-    WorkflowExecutionPoller, WorkflowExecutionTask,
-};
-
-// Worker metrics and registration.
-pub use drivers::{WorkerRegistrationConfig, WorkerRegistrationDriver};
-pub use metrics::{WorkerMetrics, WorkerMetricsSnapshot};
+pub(crate) use drivers::{NeededDrivers, BUILT_IN_TASK_TYPES};
+pub(crate) use heartbeat::{CancellationToken, TaskHeartbeat};
+pub(crate) use metrics::WorkerMetrics;
+pub(crate) use poll::CompletionRetryConfig;

@@ -39,11 +39,9 @@ pub use actor::{
     RegistrationHandle,
 };
 pub use needed::{NeededDrivers, BUILT_IN_TASK_TYPES, SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};
-pub use registration::{WorkerRegistrationConfig, WorkerRegistrationDriver};
+pub use registration::WorkerRegistrationDriver;
 pub(crate) use task::proto_task_to_task_work;
-pub use task::{
-    EagerTaskInjector, SessionQueueChange, TaskDriver, TaskDriverConfig, TaskWork, TaskWorkResult,
-};
+pub use task::{SessionQueueChange, TaskDriver, TaskDriverConfig, TaskWork, TaskWorkResult};
 pub use workflow::{WorkflowDriver, WorkflowDriverConfig, WorkflowWork, WorkflowWorkResult};
 
 /// A handle that stops a running [`WorkflowDriver`], [`TaskDriver`] or

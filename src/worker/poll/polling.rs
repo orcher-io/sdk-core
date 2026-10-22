@@ -177,33 +177,6 @@ impl Default for PollerConfig {
     }
 }
 
-impl PollerConfig {
-    /// Creates a configuration from environment variables.
-    ///
-    /// Reads `ORCHER_VERSION_ID` into [`version_id`](Self::version_id); a
-    /// blank value counts as unset. Every other field takes its default.
-    pub fn from_env() -> Self {
-        Self {
-            // The release identity almost always comes from CI — a git sha or an
-            // image digest — so reading it from the environment is the path that
-            // actually gets used. Empty is treated as unset.
-            version_id: std::env::var("ORCHER_VERSION_ID")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
-            ..Self::default()
-        }
-    }
-
-    /// Declares the code release this worker is running.
-    ///
-    /// A blank value leaves the release undeclared.
-    pub fn with_version_id(mut self, version_id: impl Into<String>) -> Self {
-        let v = version_id.into();
-        self.version_id = if v.trim().is_empty() { None } else { Some(v) };
-        self
-    }
-}
-
 /// A workflow execution step polled from the server, waiting to be processed.
 #[derive(Debug, Clone)]
 pub struct WorkflowExecutionTask {
@@ -2130,40 +2103,6 @@ mod tests {
         assert_eq!(config.task_queue, "default");
         assert_eq!(config.poll_timeout_seconds, 35);
         assert!(config.identity.starts_with("rust-sdk-"));
-    }
-
-    /// Empty must mean "not declared", not a release literally named "".
-    /// The wire type is a bare string, so an empty value would otherwise bind
-    /// executions to an empty release and look like a declaration.
-    #[test]
-    fn an_empty_version_is_treated_as_undeclared() {
-        assert_eq!(PollerConfig::default().with_version_id("").version_id, None);
-        assert_eq!(
-            PollerConfig::default().with_version_id("   ").version_id,
-            None
-        );
-        assert_eq!(
-            PollerConfig::default().with_version_id("abc123").version_id,
-            Some("abc123".to_string())
-        );
-    }
-
-    /// The release normally comes from CI, so the environment is the path that
-    /// actually gets used.
-    #[test]
-    fn from_env_reads_the_release_and_ignores_blanks() {
-        // SAFETY: single-threaded test, restored below.
-        unsafe { std::env::set_var("ORCHER_VERSION_ID", "sha-deadbeef") };
-        assert_eq!(
-            PollerConfig::from_env().version_id,
-            Some("sha-deadbeef".to_string())
-        );
-
-        unsafe { std::env::set_var("ORCHER_VERSION_ID", "  ") };
-        assert_eq!(PollerConfig::from_env().version_id, None);
-
-        unsafe { std::env::remove_var("ORCHER_VERSION_ID") };
-        assert_eq!(PollerConfig::from_env().version_id, None);
     }
 
     #[test]

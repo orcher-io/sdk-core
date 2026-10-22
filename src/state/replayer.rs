@@ -1,8 +1,8 @@
 //! Replay of a workflow's execution journal.
 //!
-//! The replayer rebuilds a workflow's state by feeding its execution journal (the
-//! event-sourced history of the run) through a [`WorkflowStateMachine`], and reports
-//! anything in the journal that would stop the replay from reproducing the original run.
+//! The replayer checks a workflow's execution journal (the event-sourced history of
+//! the run) entry by entry, and reports anything in it that would stop a replay from
+//! reproducing the original run.
 //!
 //! ## Determinism
 //!
@@ -41,7 +41,7 @@
 use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::protocol::{Command, ExecutionResult};
-use crate::state::machine::WorkflowStateMachine;
+use crate::state::journal::JournalSequence;
 use crate::types::WorkflowExecution;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -50,8 +50,7 @@ use std::time::Duration;
 /// The failure type of a workflow activation whose commands do not match its
 /// journal.
 ///
-/// Such an activation is not applied: the
-/// [`WorkflowDriver`](crate::worker::WorkflowDriver) logs the violation and
+/// Such an activation is not applied: the worker logs the violation and
 /// hands the activation back to the engine to be tried again after a pause,
 /// so the run stays open until code that replays its journal picks it up.
 pub const NON_DETERMINISM_FAILURE_TYPE: &str = "NonDeterminismError";
@@ -699,13 +698,9 @@ impl JournalSteps {
     }
 }
 
-/// Outcome of a replay: the rebuilt state machine and any violations found.
+/// Outcome of a replay: any violations found.
 #[derive(Debug)]
 pub struct ReplayResult {
-    /// State machine rebuilt from the entries replayed. If replay stopped early, it
-    /// reflects only the entries before the stopping point.
-    pub state_machine: WorkflowStateMachine,
-
     /// Violations found during replay, in the order found.
     pub violations: Vec<DeterminismViolation>,
 
@@ -720,24 +715,6 @@ impl ReplayResult {
             .iter()
             .any(|v| v.severity == ViolationSeverity::Critical)
     }
-
-    /// Returns `true` if any violation is `Error`.
-    pub fn has_error_violations(&self) -> bool {
-        self.violations
-            .iter()
-            .any(|v| v.severity == ViolationSeverity::Error)
-    }
-
-    /// Returns the violations with the given severity.
-    pub fn violations_by_severity(
-        &self,
-        severity: ViolationSeverity,
-    ) -> Vec<&DeterminismViolation> {
-        self.violations
-            .iter()
-            .filter(|v| v.severity == severity)
-            .collect()
-    }
 }
 
 /// Rebuilds workflow state by replaying an execution journal and checks it for
@@ -747,7 +724,7 @@ impl ReplayResult {
 ///
 /// - Sequence: entry IDs must run 1, 2, 3, ... with no gaps.
 /// - Duplicates: an entry ID may appear only once.
-/// - State transitions: every entry must be accepted by the [`WorkflowStateMachine`].
+/// - Entries: every entry must be accepted in sequence, with a known type.
 /// - Commands and non-deterministic operations: hooks run on each entry when enabled, but
 ///   report nothing, because neither can be judged from journal entries alone.
 ///
@@ -801,24 +778,15 @@ pub struct ReplayConfig {
     /// Maximum number of entries a journal may have; longer journals are rejected. 0 means
     /// unlimited. Default: 0.
     pub max_events: usize,
-
-    /// Has no effect.
-    #[deprecated(
-        note = "has no effect: non-determinism is found by comparing the workflow's commands \
-                with its journal, which `verify_commands` turns on"
-    )]
-    pub track_non_deterministic_ops: bool,
 }
 
 impl Default for ReplayConfig {
-    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             strict_mode: false,
             fail_on_missing_events: true,
             verify_commands: true,
             max_events: 0,
-            track_non_deterministic_ops: true,
         }
     }
 }
@@ -830,15 +798,6 @@ impl Replayer {
             config,
             seen_event_ids: HashSet::new(),
         }
-    }
-
-    /// Creates a replayer in strict mode, which stops at the first violation of any
-    /// severity.
-    pub fn strict() -> Self {
-        Self::new(ReplayConfig {
-            strict_mode: true,
-            ..ReplayConfig::default()
-        })
     }
 
     /// Replays `journal` to rebuild the workflow's state, collecting any violations.
@@ -881,7 +840,7 @@ impl Replayer {
         self.seen_event_ids.clear();
 
         let mut violations = Vec::new();
-        let mut state_machine = WorkflowStateMachine::new(execution.clone());
+        let mut journal_sequence = JournalSequence::default();
 
         if self.config.max_events > 0 && journal.len() > self.config.max_events {
             return Err(Error::InvalidExecutionJournal {
@@ -907,7 +866,6 @@ impl Replayer {
 
                 if self.config.strict_mode || violation.severity == ViolationSeverity::Critical {
                     return Ok(ReplayResult {
-                        state_machine,
                         violations,
                         success: false,
                     });
@@ -924,13 +882,12 @@ impl Replayer {
                 violations.push(violation);
 
                 return Ok(ReplayResult {
-                    state_machine,
                     violations,
                     success: false,
                 });
             }
 
-            if let Err(e) = state_machine.process_entry(entry) {
+            if let Err(e) = journal_sequence.accept(entry) {
                 let violation = DeterminismViolation::new(
                     ViolationSeverity::Critical,
                     entry.entry_id,
@@ -939,7 +896,6 @@ impl Replayer {
                 violations.push(violation);
 
                 return Ok(ReplayResult {
-                    state_machine,
                     violations,
                     success: false,
                 });
@@ -959,7 +915,6 @@ impl Replayer {
                 .any(|v| v.severity == ViolationSeverity::Critical);
 
         Ok(ReplayResult {
-            state_machine,
             violations,
             success,
         })
@@ -1004,6 +959,7 @@ impl Replayer {
     /// The commands are compared only when
     /// [`verify_commands`](ReplayConfig::verify_commands) is set, and only
     /// with a journal that replayed without a critical violation.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn replay_with_commands(
         &mut self,
         execution: WorkflowExecution,
@@ -1041,6 +997,7 @@ impl Replayer {
     /// [`CommandCoverage`]. Commands that are not steps — step results,
     /// events sent, cancellations, waits — are not compared. Every violation
     /// is of [`ViolationKind::NonDeterminism`].
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn check_commands(
         journal: &[JournalEntry],
         commands: &[Command],
@@ -1063,62 +1020,6 @@ impl Replayer {
         result: &ExecutionResult,
     ) -> Vec<DeterminismViolation> {
         JournalSteps::from_journal(journal).check_activation(result)
-    }
-
-    /// Replays `journal` and returns only the rebuilt state machine.
-    ///
-    /// Non-critical violations are logged as a warning and otherwise ignored.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`replay`](Self::replay), and
-    /// [`Error::DeterminismViolation`] listing every violation if the replay was unsuccessful
-    /// or found a critical violation.
-    pub fn replay_or_fail(
-        &mut self,
-        execution: WorkflowExecution,
-        journal: Vec<JournalEntry>,
-    ) -> Result<WorkflowStateMachine> {
-        let result = self.replay(execution, journal)?;
-
-        if !result.success || result.has_critical_violations() {
-            let violation_desc = result
-                .violations
-                .iter()
-                .map(|v| format!("Event {}: {}", v.event_id, v))
-                .collect::<Vec<_>>()
-                .join("; ");
-
-            return Err(Error::DeterminismViolation {
-                reason: format!("Replay failed with violations: {}", violation_desc),
-            });
-        }
-
-        if result.has_error_violations() {
-            tracing::warn!(
-                violations = result.violations.len(),
-                "Replay completed with non-critical violations"
-            );
-        }
-
-        Ok(result.state_machine)
-    }
-
-    /// Clears all tracking state.
-    ///
-    /// [`replay`](Self::replay) already does this at the start of each call.
-    pub fn reset(&mut self) {
-        self.seen_event_ids.clear();
-    }
-
-    /// Returns the current configuration.
-    pub fn config(&self) -> &ReplayConfig {
-        &self.config
-    }
-
-    /// Replaces the configuration.
-    pub fn set_config(&mut self, config: ReplayConfig) {
-        self.config = config;
     }
 }
 
@@ -1191,12 +1092,6 @@ mod tests {
     fn test_replayer_default() {
         let replayer = Replayer::default();
         assert!(!replayer.config.strict_mode);
-    }
-
-    #[test]
-    fn test_replayer_strict() {
-        let replayer = Replayer::strict();
-        assert!(replayer.config.strict_mode);
     }
 
     #[test]
@@ -1288,47 +1183,6 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_or_fail_success() {
-        let mut replayer = Replayer::new(ReplayConfig::default());
-        let execution = create_test_execution();
-        let history = vec![create_workflow_started_event(1)];
-
-        let state_machine = replayer.replay_or_fail(execution, history).unwrap();
-        assert_eq!(state_machine.event_count(), 1);
-    }
-
-    #[test]
-    fn test_replay_or_fail_with_violations() {
-        let mut replayer = Replayer::new(ReplayConfig::default());
-        let execution = create_test_execution();
-
-        // Entry 2 is missing.
-        let history = vec![
-            create_workflow_started_event(1),
-            create_test_event(3, EntryType::ExecutionStepScheduled),
-        ];
-
-        let result = replayer.replay_or_fail(execution, history);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_replayer_reset() {
-        let mut replayer = Replayer::new(ReplayConfig::default());
-        let execution = create_test_execution();
-        let history = vec![create_workflow_started_event(1)];
-
-        let _ = replayer.replay(execution.clone(), history.clone()).unwrap();
-        assert_eq!(replayer.seen_event_ids.len(), 1);
-
-        replayer.reset();
-        assert_eq!(replayer.seen_event_ids.len(), 0);
-
-        let result = replayer.replay(execution, history).unwrap();
-        assert!(result.success);
-    }
-
-    #[test]
     fn test_violation_severity_checks() {
         let violation = DeterminismViolation::new(ViolationSeverity::Critical, 1, "Test violation");
 
@@ -1348,12 +1202,10 @@ mod tests {
 
         let result = replayer.replay(execution, history).unwrap();
 
-        if !result.violations.is_empty() {
-            let critical = result.violations_by_severity(ViolationSeverity::Critical);
-            let errors = result.violations_by_severity(ViolationSeverity::Error);
-
-            assert!(!critical.is_empty() || !errors.is_empty());
-        }
+        assert!(result.violations.iter().any(|v| matches!(
+            v.severity,
+            ViolationSeverity::Critical | ViolationSeverity::Error
+        )));
     }
 
     // ── Commands against the journal ────────────────────────────────────
@@ -2267,18 +2119,6 @@ mod tests {
             with.reached_steps,
             Some(vec!["a_0".to_string(), "timer_1".to_string()])
         );
-    }
-
-    #[test]
-    fn test_config_updates() {
-        let mut replayer = Replayer::new(ReplayConfig::default());
-        assert!(!replayer.config().strict_mode);
-
-        replayer.set_config(ReplayConfig {
-            strict_mode: true,
-            ..Default::default()
-        });
-        assert!(replayer.config().strict_mode);
     }
 
     /// sdk-core#14, first case: a task inserted before a loop's first wait.

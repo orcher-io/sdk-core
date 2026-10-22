@@ -1,21 +1,21 @@
-//! Replays recorded runs (see `orcher_sdk_core::worker::record`).
+//! Replays recorded runs (see `crate::worker::record`).
 //!
 //! `tests/fixtures/replay` holds runs recorded from each SDK's contract
 //! suite (worker identities replaced), and is always replayed. Set
 //! `ORCHER_REPLAY_CORPUS` to a directory recorded with
 //! `ORCHER_RECORD_ACTIVATIONS` to replay a larger corpus as well.
 //!
-//! Today it checks that the corpus is sound and that today's conversion takes
-//! every recorded activation: each decodes, replays without a critical
-//! violation, and converts to jobs. The kernel steps add their comparisons
-//! here (docs/kernel-protocol-v1.md, "Conformance").
+//! Each recorded activation decodes and replays through the replayer that
+//! checks every activation before the language runs it, without a critical
+//! violation. What the kernel resolves them to is checked by
+//! `tests/kernel_resolution.rs`.
 
 use std::collections::BTreeMap;
 
-use orcher_sdk_core::proto::orcher::v1::EntryType;
-use orcher_sdk_core::worker::poll::polling::WorkflowExecutionTask;
-use orcher_sdk_core::worker::record::{read_runs, Recorded};
-use orcher_sdk_core::{task_to_execution_request, ReplayConfig, Replayer};
+use crate::proto::orcher::v1::EntryType;
+use crate::state::replayer::{ReplayConfig, Replayer};
+use crate::worker::record::{read_runs, Recorded};
+use crate::worker::WorkflowExecutionTask;
 
 /// The committed runs, one directory per SDK.
 #[test]
@@ -78,15 +78,8 @@ fn replay_all(dir: &std::path::Path) {
                             run.workflow_id, run.run_id
                         )),
                     }
-                    if let Err(error) = task_to_execution_request(task) {
-                        problems.push(format!(
-                            "{}/{}: does not convert: {error}",
-                            run.workflow_id, run.run_id
-                        ));
-                    }
                 }
                 Recorded::Completion(_) | Recorded::Failure(_) => answers += 1,
-                _ => {}
             }
         }
     }

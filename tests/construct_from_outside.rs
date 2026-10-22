@@ -10,9 +10,8 @@ use orcher_sdk_core::client::workflow::{CancelWorkflowOpts, StartWorkflowOpts};
 use orcher_sdk_core::transport::TlsConfig;
 use orcher_sdk_core::types::RetryPolicy;
 use orcher_sdk_core::{
-    ActorDriverConfig, ActorPollerConfig, Error, ListWorkflowsOptions, ListWorkflowsSortOrder,
-    PollerConfig, ReplayConfig, SearchWorkflowsOptions, TaskDriverConfig, WorkerRegistrationConfig,
-    WorkflowDriverConfig, WorkflowStatus,
+    Error, HostConfig, ListWorkflowsOptions, ListWorkflowsSortOrder, Registrations,
+    SearchWorkflowsOptions, WorkflowStatus,
 };
 
 #[test]
@@ -54,30 +53,17 @@ fn options_build_with_their_methods() {
 }
 
 #[test]
-fn driver_configs_build_from_default_and_field_assignment() {
-    let mut workflow = WorkflowDriverConfig::default();
-    workflow.task_queue = "orders".into();
-    workflow.protocol_version = orcher_sdk_core::worker_protocol::CANCEL_REQUEST;
-    let mut task = TaskDriverConfig::default();
-    task.tls_config = Some(TlsConfig::new());
-    let mut actor = ActorDriverConfig::default();
-    actor.service_id = "svc".into();
-    let mut poller = PollerConfig::default();
-    poller.api_key = Some("key".into());
-    let mut actor_poller = ActorPollerConfig::default();
-    actor_poller.max_operations = 1;
-    let mut registration = WorkerRegistrationConfig::default();
-    registration.task_types = vec!["t".into()];
-    let mut replay = ReplayConfig::default();
-    replay.strict_mode = true;
+fn a_host_configuration_and_its_registrations_build_from_outside() {
+    let config = HostConfig::new("http://localhost:50051", "orders")
+        .with_namespace("shop")
+        .with_tls(TlsConfig::new())
+        .with_protocol_version(orcher_sdk_core::worker_protocol::CANCEL_REQUEST);
+    assert_eq!(config.task_queue, "orders");
+    assert_eq!(config.namespace, "shop");
+    assert!(config.tls.is_some());
 
-    assert_eq!(workflow.task_queue, "orders");
-    assert!(task.tls_config.is_some());
-    assert_eq!(actor.service_id, "svc");
-    assert_eq!(poller.api_key.as_deref(), Some("key"));
-    assert_eq!(actor_poller.max_operations, 1);
-    assert_eq!(registration.task_types, vec!["t".to_string()]);
-    assert!(replay.strict_mode);
+    let registrations = Registrations::new(["checkout"], ["charge"], Vec::<String>::new());
+    assert_eq!(registrations.task_types, vec!["charge".to_string()]);
 }
 
 #[test]

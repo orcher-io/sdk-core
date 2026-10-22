@@ -14,6 +14,7 @@
 //!   for the engine.
 //! - [`step_ids`]: step ids under the kernel's own scheme, `KERNEL_V1`.
 //! - [`random`]: the deterministic random source for runs under that scheme.
+//! - [`check_activation`]: whether an answer replays the history it came from.
 
 pub mod activation;
 pub mod completion;
@@ -22,3 +23,26 @@ pub mod step_ids;
 
 pub use activation::resolve;
 pub use completion::execution_result;
+
+use crate::protocol::ExecutionResult;
+use crate::worker::WorkflowExecutionTask;
+use crate::DeterminismViolation;
+
+/// Checks the answer to an activation, as the kernel turned it into an
+/// [`ExecutionResult`], against the history the activation was resolved
+/// from: the checks the worker runs before it sends an answer to the engine.
+///
+/// The answer's commands are compared with the steps the history recorded.
+/// When the answer also reports the steps the code reached, a recorded step
+/// it did not reach, in an answer that issues new work or ends the workflow,
+/// is reported too: the code no longer does what it did when the history was
+/// written. Empty when the answer replays its history.
+///
+/// For replay tools: an SDK's replay tests and a conformance kit check an
+/// SDK's answers to recorded activations with it.
+pub fn check_activation(
+    task: &WorkflowExecutionTask,
+    result: &ExecutionResult,
+) -> Vec<DeterminismViolation> {
+    crate::state::replayer::Replayer::check_activation(&task.journal, result)
+}

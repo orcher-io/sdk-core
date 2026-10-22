@@ -1,47 +1,15 @@
-//! The protocol between this crate and a language SDK: activations go in as
-//! [`ExecutionRequest`]s, commands come out in [`ExecutionResult`]s.
+//! What a language SDK's workflow code produces: the [`Command`]s an
+//! activation issues, carried in an [`ExecutionResult`], with its query and
+//! update answers.
 //!
-//! Formerly the `bridge` module, which still re-exports it.
-//!
-//! Defines the interface that language SDKs (Rust, Python, TypeScript) implement
-//! to run workflow code. Core polls work from the server, converts it to an
-//! [`ExecutionRequest`], hands it to the SDK, and gets back an [`ExecutionResult`]
-//! that carries orchestration [`Command`]s.
-//!
-//! ```text
-//! Server → Poller → ExecutionRequest → Language SDK
-//!                                          ↓
-//!                                    ExecutionResult { commands } → Server
-//! ```
-//!
-//! ## Key Types
-//!
-//! - [`ExecutionRequest`]: work sent to the SDK (run ID, jobs, journal state).
-//! - [`RequestJob`]: one unit of work, such as `StartWorkflow`, `CompleteTask`, `FireTimer`
-//!   or `HandleEvent`.
-//! - [`ExecutionResult`]: the SDK's response (success or failure, commands, query responses).
-//! - [`Command`]: an instruction to the server, such as `ScheduleTask`, `StartTimer`,
-//!   `CompleteWorkflow` or `StartChildWorkflow`.
-//!
-//! All types are `Send + Sync + Clone` and serialize with `serde`.
+//! The kernel turns a language's answer to an activation into an
+//! [`ExecutionResult`] (see [`crate::kernel::execution_result`]); the worker
+//! checks it and sends it to the engine.
 
-pub mod convert;
-pub mod request;
 pub mod result;
+mod validate;
 
-pub use convert::{
-    create_eviction_request, extract_commands, task_execution_to_request,
-    task_to_execution_request, validate_execution_result,
-};
-
-pub use request::{
-    CancelWorkflowJob, ChildWorkflowCanceledJob, ChildWorkflowCompletedJob, ChildWorkflowFailedJob,
-    ChildWorkflowFailure, ChildWorkflowStartedJob, ChildWorkflowTerminatedJob,
-    ChildWorkflowTimedOutJob, ChildWorkflowTimeoutType, CompleteStepJob, CompleteTaskJob,
-    EvictFromCacheJob, EvictionReason, ExecutionRequest, FireTimerJob, HandleEventJob,
-    ProcessQueryJob, RequestJob, StartWorkflowJob, StepFailure as RequestStepFailure,
-    TaskExecutionResult, UpdateStateJob,
-};
+pub(crate) use validate::validate_execution_result;
 
 pub use result::{
     CancelChildWorkflowCommand, CancelTimerCommand, CancelWorkflowCommand, Command,
@@ -56,63 +24,8 @@ pub use result::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Payload, WorkflowExecution};
-    use std::time::{Duration, SystemTime};
-
-    #[test]
-    fn test_bridge_layer_integration() {
-        let execution = WorkflowExecution {
-            workflow_id: "test-workflow".to_string(),
-            run_id: "run-123".to_string(),
-        };
-
-        let start_job = RequestJob::StartWorkflow(StartWorkflowJob {
-            workflow_type: "TestWorkflow".to_string(),
-            workflow_id: "test-workflow".to_string(),
-            task_queue: "test-queue".to_string(),
-            input: serde_json::json!({}),
-            headers: vec![],
-            scheduled_time: SystemTime::now(),
-            namespace: "default".to_string(),
-        });
-
-        let request =
-            ExecutionRequest::new("run-123".to_string(), execution, vec![start_job], 0, false);
-
-        // Stand in for a language SDK processing the request.
-        let mut result = ExecutionResult::success("run-123".to_string(), vec![]);
-
-        result.add_command(Command::StartTimer(StartTimerCommand {
-            sequence: 1,
-            timer_id: "timer-1".to_string(),
-            duration: Duration::from_secs(60),
-        }));
-
-        result.add_command(Command::CompleteWorkflow(CompleteWorkflowCommand {
-            result: Payload::from_json(&serde_json::json!({"status": "done"})).unwrap(),
-        }));
-
-        assert_eq!(request.run_id, result.run_id);
-        assert!(result.successful);
-        assert_eq!(result.commands.len(), 2);
-        assert!(result.commands[1].is_terminal());
-    }
-
-    #[test]
-    fn test_request_serialization() {
-        let execution = WorkflowExecution {
-            workflow_id: "test-workflow".to_string(),
-            run_id: "run-123".to_string(),
-        };
-
-        let request = ExecutionRequest::new("run-123".to_string(), execution, vec![], 0, false);
-
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("run-123"));
-
-        let deserialized: ExecutionRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.run_id, "run-123");
-    }
+    use crate::types::Payload;
+    use std::time::Duration;
 
     #[test]
     fn test_result_serialization() {

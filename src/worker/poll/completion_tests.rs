@@ -1678,7 +1678,7 @@ async fn shutdown_tells_the_engine_and_an_idle_driver_stops_at_once() {
     assert_eq!(shutdown.identity, "wf-worker");
     assert_eq!(
         shutdown.worker_instance_id,
-        crate::worker::worker_instance_id()
+        crate::worker::lifecycle::worker_instance_id()
     );
     assert_eq!(shutdown.task_queues, vec!["q-1"]);
     assert!(!script.poll_instance_ids.is_empty());
@@ -1686,7 +1686,7 @@ async fn shutdown_tells_the_engine_and_an_idle_driver_stops_at_once() {
         script
             .poll_instance_ids
             .iter()
-            .all(|id| id == crate::worker::worker_instance_id()),
+            .all(|id| id == crate::worker::lifecycle::worker_instance_id()),
         "a poll did not name the process: {:?}",
         script.poll_instance_ids
     );

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::proto::orcher::v1::PollTaskExecutionResponse;
 use crate::transport::channel::ChannelManager;
 use crate::worker::governor::{Credits, InFlight, SlotBudget, SlotPermit};
@@ -542,9 +542,12 @@ impl TaskDriver {
     ///
     /// Returns an error if the driver is already shutting down, or if the
     /// session poller cannot be created.
+    #[cfg(test)]
     pub async fn add_session_queue(&self, session_queue: String) -> Result<()> {
         let task_sender = self.task_sender.clone().ok_or_else(|| {
-            Error::worker_error("Task driver is shutting down; no new session queue is polled")
+            crate::error::Error::worker_error(
+                "Task driver is shutting down; no new session queue is polled",
+            )
         })?;
         let Some(stop) = self.session_queues.add(&session_queue) else {
             return Ok(());
@@ -566,6 +569,22 @@ impl TaskDriver {
                 Err(e)
             }
         }
+    }
+
+    /// Return a cloned sender for the work channel.
+    ///
+    /// Use this to give a `WorkflowDriver` a handle so it can inject eager tasks
+    /// directly into this driver's language-SDK work channel after workflow
+    /// completions. Nothing heartbeats tasks injected this way; prefer
+    /// [`eager_task_injector`](Self::eager_task_injector).
+    ///
+    /// ```rust,ignore
+    /// let task_work_tx = task_driver.clone_work_sender();
+    /// workflow_driver = workflow_driver.with_eager_task_injector(task_work_tx);
+    /// ```
+    #[cfg(test)]
+    pub fn clone_work_sender(&self) -> mpsc::Sender<TaskWork> {
+        self.work_sender.clone()
     }
 
     /// Start polling a session queue without waiting for the poller to
@@ -929,21 +948,6 @@ impl TaskDriver {
         }
     }
 
-    /// Return a cloned sender for the work channel.
-    ///
-    /// Use this to give a `WorkflowDriver` a handle so it can inject eager tasks
-    /// directly into this driver's language-SDK work channel after workflow
-    /// completions. Nothing heartbeats tasks injected this way; prefer
-    /// [`eager_task_injector`](Self::eager_task_injector).
-    ///
-    /// ```rust,ignore
-    /// let task_work_tx = task_driver.clone_work_sender();
-    /// workflow_driver = workflow_driver.with_eager_task_injector(task_work_tx);
-    /// ```
-    pub fn clone_work_sender(&self) -> mpsc::Sender<TaskWork> {
-        self.work_sender.clone()
-    }
-
     /// Return where a [`WorkflowDriver`](super::WorkflowDriver) should hand the tasks the engine
     /// returns eagerly on its completions.
     ///
@@ -958,14 +962,6 @@ impl TaskDriver {
             sender: self.work_sender.clone(),
             heartbeats: Some(self.heartbeats.clone()),
         }
-    }
-
-    /// Ask the driver to stop.
-    ///
-    /// The same as [`ShutdownHandle::shutdown`], for a driver not yet
-    /// running.
-    pub fn shutdown(&self) {
-        let _ = self.shutdown_sender.send(true);
     }
 }
 

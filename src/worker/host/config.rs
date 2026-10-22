@@ -1,8 +1,8 @@
 //! One worker's configuration, and every default its drivers are built with.
 //!
 //! The defaults were retyped in each SDK (the Python and TypeScript native
-//! modules and the Rust SDK each hard-coded the same poll timeouts, cache
-//! size, heartbeat interval and protocol version). They live here, once.
+//! modules and the Rust SDK each hard-coded the same poll timeouts,
+//! heartbeat interval and protocol version). They live here, once.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -20,8 +20,6 @@ pub const WORKFLOW_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const TASK_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long an actor poll waits for work.
 pub const ACTOR_POLL_TIMEOUT: Duration = Duration::from_secs(30);
-/// How many workflow runs the workflow driver's cache holds.
-pub const WORKFLOW_CACHE_CAPACITY: usize = 1000;
 /// How often a running task is heartbeated for, when it does not heartbeat
 /// itself.
 pub const TASK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -225,7 +223,7 @@ impl HostConfig {
     }
 
     /// The workflow driver's configuration.
-    pub fn workflow_driver(&self) -> WorkflowDriverConfig {
+    pub(crate) fn workflow_driver(&self) -> WorkflowDriverConfig {
         WorkflowDriverConfig {
             server_url: self.server_url.clone(),
             namespace: self.namespace.clone(),
@@ -233,7 +231,6 @@ impl HostConfig {
             max_concurrent_executions: self.max_concurrent_workflows as usize,
             identity: self.identity.clone(),
             poll_timeout: WORKFLOW_POLL_TIMEOUT,
-            cache_capacity: WORKFLOW_CACHE_CAPACITY,
             strict_determinism: false,
             poller_count: self.workflow_pollers.max(1),
             organization_id: self.organization_id.clone(),
@@ -246,7 +243,7 @@ impl HostConfig {
     }
 
     /// The task driver's configuration.
-    pub fn task_driver(&self) -> TaskDriverConfig {
+    pub(crate) fn task_driver(&self) -> TaskDriverConfig {
         TaskDriverConfig {
             server_url: self.server_url.clone(),
             namespace: self.namespace.clone(),
@@ -268,7 +265,7 @@ impl HostConfig {
 
     /// The actor driver's configuration, for the registration the actor
     /// service gave the worker's handlers.
-    pub fn actor_driver(&self, registration_id: Option<String>) -> ActorDriverConfig {
+    pub(crate) fn actor_driver(&self, registration_id: Option<String>) -> ActorDriverConfig {
         ActorDriverConfig {
             server_url: self.server_url.clone(),
             namespace: self.namespace.clone(),
@@ -290,7 +287,7 @@ impl HostConfig {
     /// The worker registration's configuration, advertising what the worker
     /// registered. The built-in session tasks are advertised whenever the
     /// worker runs tasks, since it handles them.
-    pub fn registration(
+    pub(crate) fn registration(
         &self,
         registrations: &crate::worker::host::Registrations,
     ) -> WorkerRegistrationConfig {
@@ -336,5 +333,132 @@ impl HostConfig {
             protocol_version: self.protocol_version,
             ..WorkerRegistrationConfig::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worker::host::Registrations;
+    use crate::worker_protocol::{CANCEL_REQUEST, WORKFLOW_FAILURE_RETRYABILITY};
+
+    /// The poll counts and the heartbeat interval a worker sets reach the
+    /// drivers that use them; zero polls counts as one.
+    #[test]
+    fn poll_counts_and_heartbeat_interval_reach_the_drivers() {
+        let config = HostConfig::new("http://engine:50051", "orders")
+            .with_pollers(2, 6, 0)
+            .with_heartbeat_interval(std::time::Duration::from_secs(3));
+        assert_eq!(config.workflow_driver().poller_count, 2);
+        assert_eq!(config.task_driver().poller_count, 6);
+        let actor = config.actor_driver(None);
+        assert_eq!(actor.poller_count, 1);
+        assert_eq!(actor.heartbeat_interval, std::time::Duration::from_secs(3));
+        let registration = config.registration(&Registrations::new(
+            ["checkout"],
+            [] as [&str; 0],
+            [] as [&str; 0],
+        ));
+        assert_eq!(
+            registration.heartbeat_interval,
+            std::time::Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn every_driver_is_built_from_one_config() {
+        let config = HostConfig::new("https://engine:443", "orders")
+            .with_namespace("payments")
+            .with_api_key("key")
+            .with_organization_id("org-1")
+            .with_version_id("release-7");
+
+        let workflow = config.workflow_driver();
+        let task = config.task_driver();
+        let actor = config.actor_driver(Some("registration-1".into()));
+        let registration = config.registration(&Registrations::new(
+            ["checkout"],
+            ["charge"],
+            [] as [&str; 0],
+        ));
+
+        for identity in [
+            &workflow.identity,
+            &task.identity,
+            &actor.identity,
+            &registration.identity,
+        ] {
+            assert_eq!(identity, &config.identity);
+        }
+        assert_eq!(registration.service_id, config.identity);
+        assert_eq!(actor.service_id, config.identity);
+        for api_key in [
+            &workflow.api_key,
+            &task.api_key,
+            &actor.api_key,
+            &registration.api_key,
+        ] {
+            assert_eq!(api_key.as_deref(), Some("key"));
+        }
+        for org in [
+            &workflow.organization_id,
+            &task.organization_id,
+            &actor.organization_id,
+            &registration.organization_id,
+        ] {
+            assert_eq!(org.as_deref(), Some("org-1"));
+        }
+        assert_eq!(workflow.version_id.as_deref(), Some("release-7"));
+        assert_eq!(task.version_id.as_deref(), Some("release-7"));
+        assert_eq!(registration.version_id.as_deref(), Some("release-7"));
+
+        assert_eq!(workflow.poll_timeout, WORKFLOW_POLL_TIMEOUT);
+        assert!(!workflow.strict_determinism);
+        assert_eq!(
+            workflow.protocol_version,
+            crate::worker_protocol::CANCEL_REQUEST
+        );
+        assert_eq!(task.poll_timeout, TASK_POLL_TIMEOUT);
+        assert!(task.auto_heartbeat);
+        assert_eq!(task.heartbeat_interval, TASK_HEARTBEAT_INTERVAL);
+        assert_eq!(actor.poll_timeout, ACTOR_POLL_TIMEOUT);
+        assert_eq!(actor.registration_id.as_deref(), Some("registration-1"));
+    }
+
+    /// The worker protocol version is the language SDK's to raise, and every
+    /// report of it says the same: registration and the workflow driver alike.
+    #[test]
+    fn the_protocol_version_is_the_sdks_to_raise() {
+        let registrations = Registrations::default();
+        let config = HostConfig::new("http://engine", "q");
+        assert_eq!(config.workflow_driver().protocol_version, CANCEL_REQUEST);
+        assert_eq!(
+            config.registration(&registrations).protocol_version,
+            CANCEL_REQUEST
+        );
+        let config = config.with_protocol_version(WORKFLOW_FAILURE_RETRYABILITY);
+        assert_eq!(
+            config.workflow_driver().protocol_version,
+            WORKFLOW_FAILURE_RETRYABILITY
+        );
+        assert_eq!(
+            config.registration(&registrations).protocol_version,
+            WORKFLOW_FAILURE_RETRYABILITY
+        );
+    }
+
+    /// An identity is generated once; a blank one or a blank release is not a
+    /// value.
+    #[test]
+    fn identity_is_stable_and_blanks_are_unset() {
+        let config = HostConfig::new("http://engine", "q");
+        assert_eq!(
+            config.workflow_driver().identity,
+            config.task_driver().identity
+        );
+        let kept = config.identity.clone();
+        let config = config.with_identity("  ").with_version_id(" ");
+        assert_eq!(config.identity, kept);
+        assert_eq!(config.version_id, None);
     }
 }
