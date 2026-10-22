@@ -5,6 +5,7 @@ mod common;
 
 mod actors;
 mod drain;
+mod encoded;
 mod lifecycle;
 mod sessions;
 mod tasks;

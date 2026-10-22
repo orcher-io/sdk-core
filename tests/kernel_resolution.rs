@@ -114,3 +114,38 @@ fn unhex(text: &str) -> Vec<u8> {
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
         .collect()
 }
+
+/// The encoded replay tools a language binding uses resolve every recording
+/// exactly as the typed ones do, and refuse bytes that are not the message.
+#[test]
+fn the_encoded_replay_tools_resolve_as_the_typed_ones() {
+    use orcher_sdk_core::kernel::encoded;
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay");
+    let mut checked = 0;
+    for sdk in ["rust", "python", "typescript"] {
+        for run in read_runs(fixtures.join(sdk)).expect("read the recorded runs") {
+            for message in &run.messages {
+                let Recorded::Activation(response) = message else {
+                    continue;
+                };
+                let typed = resolve(&WorkflowExecutionTask::from(response.clone()), NAMESPACE);
+                let bytes = encoded::resolve_recorded(&response.encode_to_vec(), NAMESPACE)
+                    .expect("a recorded activation resolves");
+                assert_eq!(
+                    RunActivation::decode(bytes.as_slice()).expect("a RunActivation"),
+                    typed
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0);
+    assert!(matches!(
+        encoded::resolve_recorded(&[0xff, 0xff, 0xff], NAMESPACE),
+        Err(orcher_sdk_core::Error::Protocol(_))
+    ));
+    assert!(matches!(
+        encoded::execution_result("run", &[0xff, 0xff, 0xff]),
+        Err(orcher_sdk_core::Error::Protocol(_))
+    ));
+}
