@@ -31,6 +31,9 @@ jobs:
       # A field added to orcher-proto must not break this crate's build.
       - name: Proto messages leave room for new fields
         run: python3 scripts/check-proto-literals.py
+      # Generated protocol types stay behind src/wire/.
+      - name: Generated types stay behind the wire
+        run: python3 scripts/check-wire-boundary.py
       - name: Doc examples
         run: cargo test --workspace --doc
       - name: Docs build without warnings

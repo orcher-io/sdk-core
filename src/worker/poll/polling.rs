@@ -44,8 +44,8 @@ use crate::error::{Error, Result};
 use crate::proto::orcher::v1::{
     actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
     ActorOperation, JournalEntry, PollActorOperationRequest, PollTaskExecutionRequest,
-    PollTaskExecutionResponse, PollTaskExecutionsRequest, PollWorkflowExecutionRequest,
-    PollWorkflowExecutionResponse, PollWorkflowExecutionsRequest, QueryRequest, UpdateRequest,
+    PollTaskExecutionsRequest, PollWorkflowExecutionRequest, PollWorkflowExecutionsRequest,
+    QueryRequest, UpdateRequest,
 };
 use crate::types::WorkflowExecution;
 
@@ -936,47 +936,6 @@ impl WorkflowExecutionPoller {
     }
 }
 
-/// The work an activation the engine sent asks for. This is what a poll
-/// hands the driver, and what a recorded activation (see
-/// [`crate::worker::record`]) is replayed as.
-impl From<PollWorkflowExecutionResponse> for WorkflowExecutionTask {
-    fn from(poll_response: PollWorkflowExecutionResponse) -> Self {
-        // The poll response has no task token field; the engine returns the
-        // activation token in `stream_entry_id` instead. It is carried as the
-        // task token too, because a failure report has nowhere else to put
-        // it and language SDKs hand the task token back with every result.
-        // The token must name the activation, not only the workflow, so the
-        // engine can tell a repeat of a completion from a new one. An engine
-        // that returns no token gets an empty one back, which it ignores.
-        let task_token = poll_response.stream_entry_id.clone().into_bytes();
-
-        WorkflowExecutionTask {
-            execution: WorkflowExecution::new(
-                poll_response.workflow_id,
-                poll_response.execution_id,
-            ),
-            workflow_type: poll_response.workflow_type,
-            task_queue: poll_response.task_queue,
-            input: serde_json::from_slice(&poll_response.input)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
-            journal: poll_response.journal,
-            started_event_id: poll_response.started_event_id,
-            previous_started_event_id: poll_response.previous_started_event_id,
-            attempt: poll_response.attempt,
-            task_token,
-            // Echoed on completion, where engines read the activation token.
-            stream_entry_id: if poll_response.stream_entry_id.is_empty() {
-                None
-            } else {
-                Some(poll_response.stream_entry_id)
-            },
-            // Pending queries and updates from the server.
-            queries: poll_response.queries,
-            updates: poll_response.updates,
-        }
-    }
-}
-
 /// Poller for task executions.
 ///
 /// Long-polls the server for task execution work.
@@ -1578,30 +1537,6 @@ impl TaskExecutionPoller {
         );
 
         Ok(Some(TaskExecutionTask::from(poll_response)))
-    }
-}
-
-/// The task a poll handed out.
-impl From<PollTaskExecutionResponse> for TaskExecutionTask {
-    fn from(poll_response: PollTaskExecutionResponse) -> Self {
-        TaskExecutionTask {
-            execution: WorkflowExecution::new(
-                poll_response.workflow_id,
-                poll_response.execution_id,
-            ),
-            task_id: poll_response.task_id,
-            task_type: poll_response.task_type,
-            task_queue: poll_response.task_queue,
-            input: poll_response.input,
-            task_token: poll_response.task_token,
-            attempt: poll_response.attempt,
-            start_to_close_timeout: poll_response
-                .start_to_close_timeout
-                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32)),
-            heartbeat_timeout: poll_response
-                .heartbeat_timeout
-                .map(|d| Duration::new(d.seconds as u64, d.nanos as u32)),
-        }
     }
 }
 
