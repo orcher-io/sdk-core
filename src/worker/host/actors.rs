@@ -13,14 +13,14 @@ use std::sync::Mutex;
 
 use crate::proto::host::v1::{actor_result, ActorMode, ActorOperation, ActorResult};
 use crate::proto::kernel::v1::Payload;
-use crate::proto::orcher::v1::actor_service_client::ActorServiceClient;
-use crate::proto::orcher::v1::{
-    self as engine, DeleteStateRequest, GetStateRequest, ListStateKeysRequest,
-    RegisterHandlersRequest, SetStateRequest,
-};
 use crate::transport::credentialed_request;
 use crate::worker::{ActorWork, ActorWorkResult, RegistrationHandle};
 use crate::{Error, Result, TaskFailure};
+use orcher_proto::orcher::v1::actor_service_client::ActorServiceClient;
+use orcher_proto::orcher::v1::{
+    self as engine, DeleteStateRequest, GetStateRequest, ListStateKeysRequest,
+    RegisterHandlersRequest, SetStateRequest,
+};
 use tokio::sync::mpsc;
 
 use crate::worker::host::HostConfig;

@@ -4,11 +4,11 @@
 use std::time::Duration;
 
 use crate::common::{activation, Engine};
+use orcher_proto::orcher::v1::command::Attributes;
 use orcher_sdk_core::proto::kernel::v1::{
     command, resolution, run_activation_result, Command, Commands, Failure, ProtocolError,
     RunActivationResult, RunTask,
 };
-use orcher_sdk_core::proto::orcher::v1::command::Attributes;
 use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn workflow_worker(engine: &Engine) -> Host {

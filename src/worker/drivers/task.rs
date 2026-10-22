@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::proto::orcher::v1::PollTaskExecutionResponse;
 use crate::transport::channel::ChannelManager;
 use crate::worker::governor::{Credits, InFlight, SlotBudget, SlotPermit};
 use crate::worker::heartbeat::{TaskHeartbeat, TaskHeartbeats};
@@ -17,6 +16,7 @@ use crate::worker::poll::completion::{
     Caller, Completer, CompletionRetryConfig, TaskIds, TaskReport,
 };
 use crate::worker::poll::polling::{PollerConfig, TaskExecutionPoller, TaskExecutionTask};
+use orcher_proto::orcher::v1::PollTaskExecutionResponse;
 
 use super::{announce_shutdown, ShutdownHandle};
 

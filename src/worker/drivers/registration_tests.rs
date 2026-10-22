@@ -11,10 +11,10 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::proto::orcher::v1::worker_service_server::{WorkerService, WorkerServiceServer};
-use crate::proto::orcher::v1::*;
 use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
 use crate::worker::drivers::registration::{WorkerRegistrationConfig, WorkerRegistrationDriver};
+use orcher_proto::orcher::v1::worker_service_server::{WorkerService, WorkerServiceServer};
+use orcher_proto::orcher::v1::*;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};

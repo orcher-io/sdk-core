@@ -10,11 +10,11 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use orcher_sdk_core::proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
-use orcher_sdk_core::proto::orcher::v1::namespace_service_server::{
+use orcher_proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
+use orcher_proto::orcher::v1::namespace_service_server::{
     NamespaceService, NamespaceServiceServer,
 };
-use orcher_sdk_core::proto::orcher::v1::*;
+use orcher_proto::orcher::v1::*;
 use orcher_sdk_core::{ConnectOptions, Connection};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;

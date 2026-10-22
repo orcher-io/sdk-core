@@ -16,12 +16,12 @@ use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
 
 use super::*;
-use crate::proto::orcher::v1::execution_service_server::{
-    ExecutionService, ExecutionServiceServer,
-};
-use crate::proto::orcher::v1::*;
 use crate::protocol::{Command as BridgeCommand, CompleteWorkflowCommand, ExecutionResult};
 use crate::worker::drivers::{WorkflowDriver, WorkflowWorkResult};
+use orcher_proto::orcher::v1::execution_service_server::{
+    ExecutionService, ExecutionServiceServer,
+};
+use orcher_proto::orcher::v1::*;
 
 /// One call as it arrived: the token it carried, and `stream_entry_id` for a
 /// completion.
@@ -2020,7 +2020,7 @@ async fn the_whole_shutdown_fits_in_one_grace() {
 
 /// An activation of a run whose journal records `task_0` as a `Charge` task.
 fn charged_activation(workflow_id: &str, token: &str) -> PollWorkflowExecutionResponse {
-    use crate::proto::orcher::v1::journal_entry::Attributes;
+    use orcher_proto::orcher::v1::journal_entry::Attributes;
     let entry = |entry_id: i64, entry_type: EntryType, attributes: Attributes| JournalEntry {
         entry_id,
         timestamp: None,
@@ -2183,7 +2183,7 @@ async fn an_activation_whose_commands_contradict_its_journal_is_retried_not_fail
 /// that waits for a `status` event with a deadline and applies it with a
 /// task, as the engine journals them.
 fn three_rounds_activation(workflow_id: &str, token: &str) -> PollWorkflowExecutionResponse {
-    use crate::proto::orcher::v1::journal_entry::Attributes;
+    use orcher_proto::orcher::v1::journal_entry::Attributes;
     let mut journal = vec![(
         EntryType::WorkflowExecutionStarted,
         Attributes::WorkflowExecutionStarted(Default::default()),
@@ -2413,8 +2413,8 @@ async fn a_held_activation_is_handed_back_at_once_on_shutdown() {
 /// 4 MiB default could not be received at all.
 mod size_limits {
     use super::*;
-    use crate::proto::orcher::v1::command::Attributes;
     use crate::transport::limits::{MAX_RECEIVE_MESSAGE_BYTES_HEADER, PAYLOAD_TOO_LARGE};
+    use orcher_proto::orcher::v1::command::Attributes;
 
     const MIB: usize = 1024 * 1024;
 

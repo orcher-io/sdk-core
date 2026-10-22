@@ -9,22 +9,21 @@
 //! The protocol is `orcher.kernel.v1` (orcher-proto); the design is
 //! `docs/kernel-protocol-v1.md`.
 //!
-//! - [`activation`]: an activation's history, resolved.
-//! - [`completion`]: the language's answer to an activation, back to commands
+//! - `activation`: an activation's history, resolved.
+//! - `completion`: the language's answer to an activation, back to commands
 //!   for the engine.
 //! - [`step_ids`]: step ids under the kernel's own scheme, `KERNEL_V1`.
 //! - [`random`]: the deterministic random source for runs under that scheme.
-//! - [`check_activation`]: whether an answer replays the history it came from.
-//! - [`encoded`]: the replay tools on encoded protocol messages, for bindings.
+//! - [`encoded`]: the replay tools, on encoded protocol messages.
 
-pub mod activation;
-pub mod completion;
+pub(crate) mod activation;
+pub(crate) mod completion;
 pub mod encoded;
 pub mod random;
 pub mod step_ids;
 
-pub use activation::resolve;
-pub use completion::execution_result;
+pub(crate) use activation::resolve;
+pub(crate) use completion::execution_result;
 
 use crate::protocol::ExecutionResult;
 use crate::worker::WorkflowExecutionTask;
@@ -39,10 +38,7 @@ use crate::DeterminismViolation;
 /// it did not reach, in an answer that issues new work or ends the workflow,
 /// is reported too: the code no longer does what it did when the history was
 /// written. Empty when the answer replays its history.
-///
-/// For replay tools: an SDK's replay tests and a conformance kit check an
-/// SDK's answers to recorded activations with it.
-pub fn check_activation(
+pub(crate) fn check_activation(
     task: &WorkflowExecutionTask,
     result: &ExecutionResult,
 ) -> Vec<DeterminismViolation> {

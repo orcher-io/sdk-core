@@ -13,12 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{
+use crate::transport::channel::ChannelManager;
+use crate::worker::drivers::ShutdownHandle;
+use orcher_proto::orcher::v1::{
     worker_service_client::WorkerServiceClient, DeregisterWorkerRequest, RegisterWorkerRequest,
     WorkerCapabilities, WorkerHeartbeatRequest, WorkerLoadMetrics, WorkerRegistrationStatus,
 };
-use crate::transport::channel::ChannelManager;
-use crate::worker::drivers::ShutdownHandle;
 
 /// Configuration for worker registration.
 #[derive(Clone)]

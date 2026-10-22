@@ -34,7 +34,7 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use orcher_sdk_core::proto::orcher::v1::{
+use orcher_proto::orcher::v1::{
     CompleteWorkflowExecutionResponse, PollTaskExecutionResponse, PollWorkflowExecutionResponse,
 };
 use prost::Message;

@@ -14,7 +14,7 @@ pub(crate) mod poll;
 pub mod record;
 
 // The work a poll brings, as the kernel takes it to resolve an activation.
-pub use poll::{TaskExecutionTask, WorkflowExecutionTask};
+pub(crate) use poll::{TaskExecutionTask, WorkflowExecutionTask};
 
 // The built-in task types the host runs itself: a session's creation and end.
 pub use drivers::{SESSION_COMPLETE_TASK, SESSION_CREATE_TASK};

@@ -8,19 +8,19 @@ use crate::types::WorkflowExecution;
 use crate::worker::{TaskExecutionTask, WorkflowExecutionTask};
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1 as proto;
 use crate::protocol::{
     Command as BridgeCommand, QueryResponse, QueryResult as BridgeQueryResult, UpdateResponse,
     UpdateResult as BridgeUpdateResult, WorkflowRetryPolicy,
 };
+use orcher_proto::orcher::v1 as proto;
 
 /// Convert bridge commands to proto commands.
 pub(crate) fn commands(
     commands: Vec<BridgeCommand>,
     default_task_queue: &str,
     namespace: &str,
-) -> Result<Vec<crate::proto::orcher::v1::Command>> {
-    use crate::proto::orcher::v1::{
+) -> Result<Vec<orcher_proto::orcher::v1::Command>> {
+    use orcher_proto::orcher::v1::{
         command::Attributes, CancelChildWorkflowCommandAttributes, CancelTimerCommandAttributes,
         CancelWorkflowCommandAttributes, Command as ProtoCommand, CommandType,
         CompleteWorkflowCommandAttributes, FailWorkflowCommandAttributes,
@@ -41,7 +41,7 @@ pub(crate) fn commands(
                         step_name: cmd.step_name,
                         step_type: cmd.step_type,
                         result: cmd.result,
-                        failure: cmd.failure.map(|f| crate::proto::orcher::v1::Failure {
+                        failure: cmd.failure.map(|f| orcher_proto::orcher::v1::Failure {
                             message: f.message,
                             source: f.source,
                             stack_trace: f.stack_trace,
@@ -158,7 +158,7 @@ pub(crate) fn commands(
             BridgeCommand::FailWorkflow(cmd) => ProtoCommand {
                 command_type: CommandType::FailWorkflow as i32,
                 attributes: Some(Attributes::FailWorkflow(FailWorkflowCommandAttributes {
-                    failure: Some(crate::proto::orcher::v1::Failure {
+                    failure: Some(orcher_proto::orcher::v1::Failure {
                         message: cmd.message,
                         source: "WorkflowHandler".to_string(),
                         stack_trace: String::new(),

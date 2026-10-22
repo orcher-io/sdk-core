@@ -767,8 +767,8 @@ mod tests {
     /// call, when history recorded a step.
     #[test]
     fn a_failure_after_leaving_a_recorded_step_behind_is_held() {
-        use crate::proto::orcher::v1::journal_entry::Attributes;
-        use crate::proto::orcher::v1::{
+        use orcher_proto::orcher::v1::journal_entry::Attributes;
+        use orcher_proto::orcher::v1::{
             EntryType, JournalEntry, TaskCompletedEventAttributes, TaskScheduledEventAttributes,
             WorkflowExecutionStartedEventAttributes,
         };
@@ -1034,8 +1034,8 @@ mod tests {
     /// determinism check must see both steps reached in it.
     #[test]
     fn steps_issued_again_count_as_reached_in_issue_order() {
-        use crate::proto::orcher::v1::journal_entry::Attributes;
-        use crate::proto::orcher::v1::{
+        use orcher_proto::orcher::v1::journal_entry::Attributes;
+        use orcher_proto::orcher::v1::{
             EntryType, JournalEntry, TaskCompletedEventAttributes, TaskScheduledEventAttributes,
             WorkflowExecutionStartedEventAttributes,
         };

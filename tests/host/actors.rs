@@ -5,9 +5,9 @@
 use std::time::Duration;
 
 use crate::common::Engine;
+use orcher_proto::orcher::v1::{ActorOperation, OperationMode};
 use orcher_sdk_core::proto::host::v1::{actor_result, ActorMode, ActorResult};
 use orcher_sdk_core::proto::kernel::v1::{Failure, Payload};
-use orcher_sdk_core::proto::orcher::v1::{ActorOperation, OperationMode};
 use orcher_sdk_core::{ActorHandler, Host, HostConfig, Registrations, StateScope};
 
 fn handlers() -> Registrations {

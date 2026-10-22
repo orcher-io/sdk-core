@@ -1093,8 +1093,8 @@ impl WorkflowDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::orcher::v1 as proto;
     use crate::protocol::{Command as BridgeCommand, WorkflowRetryPolicy};
+    use orcher_proto::orcher::v1 as proto;
 
     /// A driver connected to a bare HTTP/2 server that is sent nothing.
     async fn idle_driver() -> WorkflowDriver {

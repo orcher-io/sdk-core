@@ -11,16 +11,16 @@ use std::time::Duration;
 
 use crate::client::connection::{ClientChannel, Connection};
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{
+use crate::types::{
+    ListWorkflowsOptions, SearchWorkflowsOptions, WorkflowExecution, WorkflowExecutionDescription,
+    WorkflowIdReusePolicy, WorkflowListPage, WorkflowRetryPolicy, WorkflowStatus,
+};
+use orcher_proto::orcher::v1::{
     query_service_client::QueryServiceClient, update_workflow_response,
     workflow_service_client::WorkflowServiceClient, CancelWorkflowRequest,
     DescribeWorkflowExecutionRequest, GetWorkflowResultRequest, GetWorkflowStatusRequest,
     ListWorkflowsRequest, QueryWorkflowRequest, ResetWorkflowRequest, SearchWorkflowsRequest,
     SendEventRequest, StartWorkflowRequest, TerminateWorkflowRequest, UpdateWorkflowRequest,
-};
-use crate::types::{
-    ListWorkflowsOptions, SearchWorkflowsOptions, WorkflowExecution, WorkflowExecutionDescription,
-    WorkflowIdReusePolicy, WorkflowListPage, WorkflowRetryPolicy, WorkflowStatus,
 };
 use tracing::debug;
 
@@ -553,7 +553,7 @@ impl WorkflowClient {
         &self,
         workflows: Vec<StartWorkflowOpts>,
     ) -> Result<Vec<WorkflowHandle>> {
-        use crate::proto::orcher::v1::BatchStartWorkflowRequest;
+        use orcher_proto::orcher::v1::BatchStartWorkflowRequest;
 
         let batch_request = BatchStartWorkflowRequest {
             workflows: workflows
@@ -1252,9 +1252,9 @@ impl WorkflowHandle {
 /// unless the caller asked for the status again. A timed-out run comes with
 /// no outcome at all, which read as an internal error.
 fn result_from_answer(
-    answer: crate::proto::orcher::v1::GetWorkflowResultResponse,
+    answer: orcher_proto::orcher::v1::GetWorkflowResultResponse,
 ) -> Result<Vec<u8>> {
-    use crate::proto::orcher::v1::get_workflow_result_response::Outcome;
+    use orcher_proto::orcher::v1::get_workflow_result_response::Outcome;
     let reported = crate::wire::client::status(answer.status);
     match answer.outcome {
         Some(Outcome::Result(result)) => Ok(result),
@@ -1290,11 +1290,11 @@ mod tests {
     mod result_from_answer {
         use super::super::result_from_answer;
         use crate::error::Error;
-        use crate::proto::orcher::v1::{
+        use crate::types::WorkflowStatus;
+        use orcher_proto::orcher::v1::{
             get_workflow_result_response::Outcome, GetWorkflowResultResponse,
             WorkflowStatus as Wire,
         };
-        use crate::types::WorkflowStatus;
 
         fn answer(status: Wire, outcome: Option<Outcome>) -> GetWorkflowResultResponse {
             GetWorkflowResultResponse {

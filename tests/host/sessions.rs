@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use crate::common::{task, Engine};
-use orcher_sdk_core::proto::orcher::v1::PollTaskExecutionResponse;
+use orcher_proto::orcher::v1::PollTaskExecutionResponse;
 use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn session_worker(engine: &Engine, max_sessions: usize) -> Host {
