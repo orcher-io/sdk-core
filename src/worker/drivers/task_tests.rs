@@ -17,16 +17,16 @@ use tonic::{Code, Request, Response, Status};
 
 use super::*;
 use crate::error::Error;
-use crate::proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
-use crate::proto::orcher::v1::execution_service_server::{
-    ExecutionService, ExecutionServiceServer,
-};
-use crate::proto::orcher::v1::*;
 use crate::worker::drivers::{
     ActorDriver, ActorDriverConfig, ActorWorkResult, WorkflowDriverConfig,
 };
 use crate::worker::metrics::WorkerMetrics as Metrics;
 use crate::worker::poll::completion::{EagerTasks, Report};
+use orcher_proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
+use orcher_proto::orcher::v1::execution_service_server::{
+    ExecutionService, ExecutionServiceServer,
+};
+use orcher_proto::orcher::v1::*;
 
 #[derive(Default)]
 struct Script {

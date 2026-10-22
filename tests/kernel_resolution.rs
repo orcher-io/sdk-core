@@ -1,4 +1,6 @@
-//! The kernel resolves every recorded activation as it is expected to.
+//! The kernel's replay tools, through the encoded API every language SDK
+//! uses: every recorded activation resolves as it is expected to, and an
+//! answer is checked against the history it answers.
 //!
 //! `tests/fixtures/replay/<sdk>/resolutions.json` holds, for each activation
 //! recorded from that SDK's contract suite, the `RunActivation` the kernel
@@ -14,11 +16,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use orcher_sdk_core::kernel::resolve;
+use orcher_sdk_core::kernel::encoded;
 use orcher_sdk_core::proto::kernel::v1::RunActivation;
 use orcher_sdk_core::proto::prost::Message;
 use orcher_sdk_core::worker::record::{read_runs, Recorded};
-use orcher_sdk_core::WorkflowExecutionTask;
 
 const NAMESPACE: &str = "contract";
 
@@ -38,14 +39,15 @@ fn resolved(dir: &Path) -> BTreeMap<String, RunActivation> {
     let mut out = BTreeMap::new();
     for run in read_runs(dir).expect("read the recorded runs") {
         let activations = run.messages.iter().filter_map(|message| match message {
-            Recorded::Activation(response) => Some(response),
+            Recorded::Activation(recorded) => Some(recorded),
             _ => None,
         });
-        for (n, response) in activations.enumerate() {
-            let task = WorkflowExecutionTask::from(response.clone());
+        for (n, recorded) in activations.enumerate() {
+            let resolved = encoded::resolve_recorded(recorded, NAMESPACE)
+                .expect("a recorded activation resolves");
             out.insert(
                 format!("{}/{}/{n}", run.workflow_id, run.run_id),
-                resolve(&task, NAMESPACE),
+                RunActivation::decode(resolved.as_slice()).expect("a RunActivation"),
             );
         }
     }
@@ -115,37 +117,131 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// The encoded replay tools a language binding uses resolve every recording
-/// exactly as the typed ones do, and refuse bytes that are not the message.
+/// Bytes that are not the messages are refused as protocol errors.
 #[test]
-fn the_encoded_replay_tools_resolve_as_the_typed_ones() {
-    use orcher_sdk_core::kernel::encoded;
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay");
-    let mut checked = 0;
-    for sdk in ["rust", "python", "typescript"] {
-        for run in read_runs(fixtures.join(sdk)).expect("read the recorded runs") {
-            for message in &run.messages {
-                let Recorded::Activation(response) = message else {
-                    continue;
-                };
-                let typed = resolve(&WorkflowExecutionTask::from(response.clone()), NAMESPACE);
-                let bytes = encoded::resolve_recorded(&response.encode_to_vec(), NAMESPACE)
-                    .expect("a recorded activation resolves");
-                assert_eq!(
-                    RunActivation::decode(bytes.as_slice()).expect("a RunActivation"),
-                    typed
-                );
-                checked += 1;
-            }
-        }
+fn the_replay_tools_refuse_bytes_that_are_not_the_message() {
+    let garbage = [0xff, 0xff, 0xff];
+    assert!(matches!(
+        encoded::resolve_recorded(&garbage, NAMESPACE),
+        Err(orcher_sdk_core::Error::Protocol(_))
+    ));
+    assert!(matches!(
+        encoded::execution_result("run", &garbage),
+        Err(orcher_sdk_core::Error::Protocol(_))
+    ));
+    assert!(matches!(
+        encoded::check_recorded(&garbage, &answer(vec![]).encode_to_vec()),
+        Err(orcher_sdk_core::Error::Protocol(_))
+    ));
+    assert!(matches!(
+        encoded::check_recorded(&charged(), &garbage),
+        Err(orcher_sdk_core::Error::Protocol(_))
+    ));
+}
+
+/// An answer that makes the recorded call again and goes on replays its
+/// history; one that makes another call at the recorded step does not, and
+/// says where.
+#[test]
+fn an_answer_is_checked_against_the_recorded_history() {
+    let replays = answer(vec![
+        call(0, true, "charge_0", "charge"),
+        call(1, false, "ship_1", "ship"),
+    ]);
+    let violations = encoded::check_recorded(&charged(), &replays.encode_to_vec()).unwrap();
+    assert!(violations.is_empty(), "{violations:?}");
+
+    let changed = answer(vec![call(0, false, "charge_0", "refund")]);
+    let violations = encoded::check_recorded(&charged(), &changed.encode_to_vec()).unwrap();
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations[0].step_id.as_deref(), Some("charge_0"));
+}
+
+/// A recorded activation of a run whose history scheduled task `charge_0`
+/// and recorded its result.
+fn charged() -> Vec<u8> {
+    use orcher_proto::orcher::v1::{
+        journal_entry::Attributes, EntryType, JournalEntry, PollWorkflowExecutionResponse,
+        StepCompletedEventAttributes, TaskScheduledEventAttributes,
+    };
+    let entry = |entry_id, entry_type: EntryType, attributes| JournalEntry {
+        entry_id,
+        entry_type: entry_type as i32,
+        attributes: Some(attributes),
+        timestamp: Some(orcher_proto::prost_types::Timestamp {
+            seconds: entry_id,
+            nanos: 0,
+        }),
+        ..Default::default()
+    };
+    PollWorkflowExecutionResponse {
+        workflow_id: "order-7".into(),
+        execution_id: "run-1".into(),
+        workflow_type: "checkout".into(),
+        task_queue: "orders".into(),
+        stream_entry_id: "act-1".into(),
+        journal: vec![
+            entry(
+                1,
+                EntryType::WorkflowExecutionStarted,
+                Attributes::WorkflowExecutionStarted(Default::default()),
+            ),
+            entry(
+                2,
+                EntryType::TaskScheduled,
+                Attributes::TaskScheduled(TaskScheduledEventAttributes {
+                    task_id: "charge_0".into(),
+                    task_type: "charge".into(),
+                    ..Default::default()
+                }),
+            ),
+            entry(
+                3,
+                EntryType::StepCompleted,
+                Attributes::StepCompleted(StepCompletedEventAttributes {
+                    step_name: "charge_0".into(),
+                    result: br#""ok""#.to_vec(),
+                    execution_attempt: 1,
+                    ..Default::default()
+                }),
+            ),
+        ],
+        ..Default::default()
     }
-    assert!(checked > 0);
-    assert!(matches!(
-        encoded::resolve_recorded(&[0xff, 0xff, 0xff], NAMESPACE),
-        Err(orcher_sdk_core::Error::Protocol(_))
-    ));
-    assert!(matches!(
-        encoded::execution_result("run", &[0xff, 0xff, 0xff]),
-        Err(orcher_sdk_core::Error::Protocol(_))
-    ));
+    .encode_to_vec()
+}
+
+fn call(
+    seq: u64,
+    satisfied: bool,
+    step_id: &str,
+    task_type: &str,
+) -> orcher_sdk_core::proto::kernel::v1::Command {
+    use orcher_sdk_core::proto::kernel::v1::{command, Command, RunTask};
+    Command {
+        seq,
+        satisfied,
+        step_id: step_id.into(),
+        what: Some(command::What::RunTask(RunTask {
+            task_type: task_type.into(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+fn answer(
+    commands: Vec<orcher_sdk_core::proto::kernel::v1::Command>,
+) -> orcher_sdk_core::proto::kernel::v1::RunActivationResult {
+    use orcher_sdk_core::proto::kernel::v1::{
+        run_activation_result, Commands, RunActivationResult,
+    };
+    RunActivationResult {
+        activation_id: b"act-1".to_vec(),
+        outcome: Some(run_activation_result::Outcome::Commands(Commands {
+            commands,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
 }

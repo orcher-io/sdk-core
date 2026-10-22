@@ -8,14 +8,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use orcher_sdk_core::proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
-use orcher_sdk_core::proto::orcher::v1::execution_service_server::{
+use orcher_proto::orcher::v1::actor_service_server::{ActorService, ActorServiceServer};
+use orcher_proto::orcher::v1::execution_service_server::{
     ExecutionService, ExecutionServiceServer,
 };
-use orcher_sdk_core::proto::orcher::v1::worker_service_server::{
-    WorkerService, WorkerServiceServer,
-};
-use orcher_sdk_core::proto::orcher::v1::*;
+use orcher_proto::orcher::v1::worker_service_server::{WorkerService, WorkerServiceServer};
+use orcher_proto::orcher::v1::*;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};

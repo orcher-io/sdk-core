@@ -5,9 +5,11 @@
 //! language:
 //! - the worker: the [`Host`] every SDK runs its worker on, pulling
 //!   activations, tasks and actor operations and handing back their outcomes;
-//! - the kernel: what a run's history means ([`kernel::resolve`]), and the
-//!   determinism checks every answer goes through;
-//! - the connection to the engine: gRPC, TLS, credentials, retries, limits;
+//! - the kernel: what a run's history means, and the determinism checks
+//!   every answer goes through, with the same replay tools for every
+//!   language ([`kernel::encoded`]);
+//! - the connection to the engine ([`Connection`]): gRPC, TLS, credentials,
+//!   retries, limits;
 //! - the clients for workflows, namespaces and actors.
 //!
 //! A language SDK keeps only its language's idioms: how handlers are
@@ -93,8 +95,17 @@
 //! }
 //! ```
 
-// The generated protocol types, re-exported for convenience.
-pub use orcher_proto as proto;
+/// The protocols a language SDK speaks with this crate, as generated from
+/// orcher-proto: the kernel protocol (`orcher.kernel.v1`), what a workflow's
+/// activation and its answer are, and the host protocol (`orcher.host.v1`),
+/// what a task or an actor operation and its outcome are, with the protobuf
+/// runtime to encode and decode them.
+///
+/// The engine's own protocol (`orcher.v1`) is not here: it is what this crate
+/// speaks to the engine on a language SDK's behalf.
+pub mod proto {
+    pub use orcher_proto::{host, kernel, prost, prost_types};
+}
 
 pub mod client;
 pub mod error;
@@ -114,7 +125,6 @@ pub mod worker;
 pub use worker::host::{
     ActorHandler, EncodedHost, Host, HostConfig, Registrations, StateScope, StateValue,
 };
-pub use worker::{TaskExecutionTask, WorkflowExecutionTask};
 
 // The connection to the engine, and the clients for workflows, namespaces
 // and actors that share it.

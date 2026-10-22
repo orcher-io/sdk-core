@@ -66,18 +66,18 @@ use rand::Rng;
 use tokio::sync::{mpsc, watch};
 use tonic::{Code, Status};
 
-use crate::proto::orcher::v1::{
-    actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
-    Command, CompleteActorOperationRequest, CompleteTaskExecutionRequest,
-    CompleteWorkflowExecutionRequest, FailTaskExecutionRequest, FailWorkflowExecutionRequest,
-    Failure, QueryResult, TaskCapabilities, UpdateResult,
-};
 use crate::transport::channel::{Breaker, ChannelManager, Unconnected};
 use crate::transport::limits::{refused_as_too_large, sized, too_large_to_send, PAYLOAD_TOO_LARGE};
 use crate::worker::drivers::{
     proto_task_to_task_work, ActorDriverConfig, TaskDriverConfig, TaskWork, WorkflowDriverConfig,
 };
 use crate::worker::heartbeat::TaskHeartbeats;
+use orcher_proto::orcher::v1::{
+    actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
+    Command, CompleteActorOperationRequest, CompleteTaskExecutionRequest,
+    CompleteWorkflowExecutionRequest, FailTaskExecutionRequest, FailWorkflowExecutionRequest,
+    Failure, QueryResult, TaskCapabilities, UpdateResult,
+};
 use prost::Message as _;
 
 /// How hard to try to deliver one completion or failure report — for a
@@ -1042,7 +1042,7 @@ impl Completer {
             operation_id: &operation_id,
             execution_id: &execution_id,
         };
-        let what = if request.status == crate::proto::orcher::v1::ExecutionStatus::Success as i32 {
+        let what = if request.status == orcher_proto::orcher::v1::ExecutionStatus::Success as i32 {
             "completion"
         } else {
             "failure report"
@@ -1367,7 +1367,7 @@ fn declined_as_too_large(code: Code) -> bool {
 /// The payload a workflow completion is made large by, named for the reason
 /// the workflow fails with: its largest one, and what that is.
 fn workflow_completion_named(request: &CompleteWorkflowExecutionRequest) -> String {
-    use crate::proto::orcher::v1::command::Attributes;
+    use orcher_proto::orcher::v1::command::Attributes;
     let mut largest: Option<(String, usize)> = None;
     let mut consider = |what: String, size: usize| {
         if largest.as_ref().is_none_or(|(_, most)| size > *most) {
@@ -1445,7 +1445,7 @@ fn fail_workflow_instead(
     template: CompleteWorkflowExecutionRequest,
     reason: String,
 ) -> CompleteWorkflowExecutionRequest {
-    use crate::proto::orcher::v1::{
+    use orcher_proto::orcher::v1::{
         command::Attributes, CommandType, FailWorkflowCommandAttributes,
     };
     CompleteWorkflowExecutionRequest {

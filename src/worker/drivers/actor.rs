@@ -8,16 +8,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::proto::orcher::v1::{
-    actor_service_client::ActorServiceClient, ActorOperation, CompleteActorOperationRequest,
-    ExecutionStatus, HeartbeatRequest, WorkerMetrics, WorkerStatus,
-};
 use crate::transport::channel::{Breaker, ChannelManager};
 use crate::worker::governor::{InFlight, SlotBudget, SlotPermit};
 use crate::worker::poll::completion::{
     note_connection_failure, Caller, Completer, CompletionRetryConfig,
 };
 use crate::worker::poll::polling::{ActorOperationPoller, ActorPollerConfig};
+use orcher_proto::orcher::v1::{
+    actor_service_client::ActorServiceClient, ActorOperation, CompleteActorOperationRequest,
+    ExecutionStatus, HeartbeatRequest, WorkerMetrics, WorkerStatus,
+};
 
 use super::ShutdownHandle;
 

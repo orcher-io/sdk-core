@@ -3,12 +3,12 @@
 use crate::client::connection::{ClientChannel, Connection};
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{
+use crate::types::Namespace;
+use orcher_proto::orcher::v1::{
     namespace_service_client::NamespaceServiceClient, CreateNamespaceRequest,
     DeleteNamespaceRequest, DeprecateNamespaceRequest, GetNamespaceRequest, ListNamespacesRequest,
     UpdateNamespaceRequest,
 };
-use crate::types::Namespace;
 
 /// Client for managing ORCHER namespaces.
 ///

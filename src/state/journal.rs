@@ -2,7 +2,7 @@
 //! before anything else.
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{EntryType, JournalEntry};
+use orcher_proto::orcher::v1::{EntryType, JournalEntry};
 
 /// Accepts a run's journal entries one at a time, in order.
 ///

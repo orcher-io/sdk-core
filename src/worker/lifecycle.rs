@@ -46,12 +46,12 @@ use std::time::Duration;
 
 use tonic::{Code, Status};
 
-use crate::proto::orcher::v1::{
+use crate::transport::channel::{Breaker, ChannelManager};
+use crate::worker::poll::completion::Caller;
+use orcher_proto::orcher::v1::{
     execution_service_client::ExecutionServiceClient, ReleaseWorkflowExecutionRequest,
     ShutdownWorkerRequest,
 };
-use crate::transport::channel::{Breaker, ChannelManager};
-use crate::worker::poll::completion::Caller;
 
 /// The most task queues one shutdown may name. A driver polling more than
 /// this names none, which the engine reads as every queue its credential may

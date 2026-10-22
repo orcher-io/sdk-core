@@ -3,8 +3,8 @@
 //! update answers.
 //!
 //! The kernel turns a language's answer to an activation into an
-//! [`ExecutionResult`] (see [`crate::kernel::execution_result`]); the worker
-//! checks it and sends it to the engine.
+//! [`ExecutionResult`] (see [`crate::kernel::encoded::execution_result`]);
+//! the worker checks it and sends it to the engine.
 
 pub mod result;
 mod validate;

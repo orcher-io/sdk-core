@@ -30,7 +30,7 @@
 //! except after the attempt is gone, when there is nothing left to keep
 //! alive.
 //!
-//! [`TaskCapabilities::auto_heartbeat`]: crate::proto::orcher::v1::TaskCapabilities
+//! [`TaskCapabilities::auto_heartbeat`]: orcher_proto::orcher::v1::TaskCapabilities
 
 use std::collections::HashMap;
 use std::fmt;
@@ -44,13 +44,13 @@ use tonic::Code;
 
 pub use tokio_util::sync::CancellationToken;
 
-use crate::proto::orcher::v1::{
-    execution_service_client::ExecutionServiceClient, RecordTaskHeartbeatRequest,
-    RecordTaskHeartbeatsRequest, TaskHeartbeatEntry,
-};
 use crate::transport::channel::{Breaker, ChannelManager};
 use crate::worker::poll::completion::{note_connection_failure, Caller};
 use crate::worker::poll::polling::TaskExecutionTask;
+use orcher_proto::orcher::v1::{
+    execution_service_client::ExecutionServiceClient, RecordTaskHeartbeatRequest,
+    RecordTaskHeartbeatsRequest, TaskHeartbeatEntry,
+};
 
 /// The longest wait between two heartbeats of a task, whatever its heartbeat timeout.
 ///

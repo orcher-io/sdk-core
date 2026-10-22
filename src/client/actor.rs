@@ -5,7 +5,7 @@ use crate::client::connection::{ClientChannel, Connection};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{
+use orcher_proto::orcher::v1::{
     actor_service_client::ActorServiceClient, ExecutionStatus, InvokeOperationRequest,
 };
 

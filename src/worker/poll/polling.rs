@@ -41,13 +41,13 @@ pub(crate) fn unexpected_poll_error_backoff(consecutive_errors: u32) -> Duration
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{
+use crate::types::WorkflowExecution;
+use orcher_proto::orcher::v1::{
     actor_service_client::ActorServiceClient, execution_service_client::ExecutionServiceClient,
     ActorOperation, JournalEntry, PollActorOperationRequest, PollTaskExecutionRequest,
     PollTaskExecutionsRequest, PollWorkflowExecutionRequest, PollWorkflowExecutionsRequest,
     QueryRequest, UpdateRequest,
 };
-use crate::types::WorkflowExecution;
 
 /// Configuration for a poller.
 #[derive(Clone)]
@@ -1049,7 +1049,7 @@ impl TaskExecutionPoller {
             // See the workflow poller.
             worker_instance_id: crate::worker::lifecycle::worker_instance_id().to_string(),
             task_capabilities: config.auto_heartbeat.then_some(
-                crate::proto::orcher::v1::TaskCapabilities {
+                orcher_proto::orcher::v1::TaskCapabilities {
                     auto_heartbeat: true,
                     ..Default::default()
                 },

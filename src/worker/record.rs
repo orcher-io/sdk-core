@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 
 use prost::Message;
 
-use crate::proto::orcher::v1::{
+use orcher_proto::orcher::v1::{
     CompleteWorkflowExecutionRequest, FailWorkflowExecutionRequest, PollWorkflowExecutionResponse,
 };
 
@@ -29,16 +29,20 @@ use crate::proto::orcher::v1::{
 /// record into. Unset or empty: nothing is recorded.
 pub const RECORD_ACTIVATIONS_ENV: &str = "ORCHER_RECORD_ACTIVATIONS";
 
-/// One message of a recorded run.
+/// One message of a recorded run, encoded as it crossed the wire: what the
+/// kernel's replay tools ([`crate::kernel::encoded`]) take.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Recorded {
-    /// An activation the engine sent.
-    Activation(PollWorkflowExecutionResponse),
-    /// The commands the worker answered an activation with.
-    Completion(CompleteWorkflowExecutionRequest),
-    /// The worker reporting it could not run an activation.
-    Failure(FailWorkflowExecutionRequest),
+    /// An activation the engine sent: an encoded
+    /// `orcher.v1.PollWorkflowExecutionResponse`.
+    Activation(Vec<u8>),
+    /// The commands the worker answered an activation with: an encoded
+    /// `orcher.v1.CompleteWorkflowExecutionRequest`.
+    Completion(Vec<u8>),
+    /// The worker reporting it could not run an activation: an encoded
+    /// `orcher.v1.FailWorkflowExecutionRequest`.
+    Failure(Vec<u8>),
 }
 
 /// A recorded run: its messages, in the order they happened.
@@ -111,17 +115,19 @@ fn read_message(file: &Path) -> std::io::Result<Recorded> {
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
     let kind = stem.rsplit_once('-').map(|(_, kind)| kind).unwrap_or("");
+    // Decoded here only to refuse a file that is not the message it says.
     let decoded = match kind {
-        "activation" => {
-            PollWorkflowExecutionResponse::decode(bytes.as_slice()).map(Recorded::Activation)
-        }
-        "completion" => {
-            CompleteWorkflowExecutionRequest::decode(bytes.as_slice()).map(Recorded::Completion)
-        }
-        "failure" => FailWorkflowExecutionRequest::decode(bytes.as_slice()).map(Recorded::Failure),
+        "activation" => PollWorkflowExecutionResponse::decode(bytes.as_slice()).map(|_| ()),
+        "completion" => CompleteWorkflowExecutionRequest::decode(bytes.as_slice()).map(|_| ()),
+        "failure" => FailWorkflowExecutionRequest::decode(bytes.as_slice()).map(|_| ()),
         other => return Err(invalid(format!("not a recorded message kind: {other:?}"))),
     };
-    decoded.map_err(|e| invalid(e.to_string()))
+    decoded.map_err(|e| invalid(e.to_string()))?;
+    Ok(match kind {
+        "activation" => Recorded::Activation(bytes),
+        "completion" => Recorded::Completion(bytes),
+        _ => Recorded::Failure(bytes),
+    })
 }
 
 /// Where recordings go, read once from the environment.
@@ -265,8 +271,8 @@ mod tests {
         assert_eq!(
             runs[0].messages,
             vec![
-                Recorded::Activation(activation),
-                Recorded::Completion(completion)
+                Recorded::Activation(activation.encode_to_vec()),
+                Recorded::Completion(completion.encode_to_vec())
             ]
         );
     }
@@ -277,6 +283,17 @@ mod tests {
         let run_dir = dir.join("wf").join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(run_dir.join("0001-mystery.pb"), b"").unwrap();
+        let error = read_runs(&dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_file_that_is_not_its_message_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("orcher-record-{}", uuid::Uuid::new_v4()));
+        let run_dir = dir.join("wf").join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("0001-activation.pb"), [0xff, 0xff, 0xff]).unwrap();
         let error = read_runs(&dir).unwrap_err();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);

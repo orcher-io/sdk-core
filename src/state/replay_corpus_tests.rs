@@ -12,10 +12,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::proto::orcher::v1::EntryType;
 use crate::state::replayer::{ReplayConfig, Replayer};
 use crate::worker::record::{read_runs, Recorded};
 use crate::worker::WorkflowExecutionTask;
+use orcher_proto::orcher::v1::EntryType;
 
 /// The committed runs, one directory per SDK.
 #[test]
@@ -54,7 +54,9 @@ fn replay_all(dir: &std::path::Path) {
     for run in &runs {
         for message in &run.messages {
             match message {
-                Recorded::Activation(response) => {
+                Recorded::Activation(bytes) => {
+                    let response = crate::wire::host::recorded_activation(bytes)
+                        .expect("a recorded activation");
                     activations += 1;
                     *workflow_types
                         .entry(response.workflow_type.clone())

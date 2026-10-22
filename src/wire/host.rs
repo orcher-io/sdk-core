@@ -4,8 +4,8 @@
 use crate::error::{Error, Result};
 use crate::proto::host::v1::{ActorResult, TaskHeartbeat, TaskOutcome};
 use crate::proto::kernel::v1::RunActivationResult;
-use crate::proto::orcher::v1::PollWorkflowExecutionResponse;
 use crate::proto::prost::Message;
+use orcher_proto::orcher::v1::PollWorkflowExecutionResponse;
 
 /// A message, encoded.
 pub(crate) fn encode(message: &impl Message) -> Vec<u8> {

@@ -39,10 +39,10 @@
 //! may stop the code short on cancellation.
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::protocol::{Command, ExecutionResult};
 use crate::state::journal::JournalSequence;
 use crate::types::WorkflowExecution;
+use orcher_proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
@@ -1032,7 +1032,7 @@ impl Default for Replayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::orcher::v1::WorkflowExecutionStartedEventAttributes;
+    use orcher_proto::orcher::v1::WorkflowExecutionStartedEventAttributes;
 
     fn create_test_execution() -> WorkflowExecution {
         WorkflowExecution {
@@ -1054,7 +1054,7 @@ mod tests {
     }
 
     fn create_workflow_started_event(entry_id: i64) -> JournalEntry {
-        use crate::proto::orcher::v1::journal_entry::Attributes;
+        use orcher_proto::orcher::v1::journal_entry::Attributes;
 
         JournalEntry {
             entry_id,
@@ -1210,13 +1210,13 @@ mod tests {
 
     // ── Commands against the journal ────────────────────────────────────
 
-    use crate::proto::orcher::v1::{
-        journal_entry::Attributes, ChildWorkflowExecutionStartedEventAttributes,
-        TaskCompletedEventAttributes, TaskScheduledEventAttributes, TimerStartedEventAttributes,
-    };
     use crate::protocol::{
         CompleteWorkflowCommand, RecordStepResultCommand, ScheduleTaskCommand, SendEventCommand,
         StartChildWorkflowCommand, StartTimerCommand, WaitForEventCommand,
+    };
+    use orcher_proto::orcher::v1::{
+        journal_entry::Attributes, ChildWorkflowExecutionStartedEventAttributes,
+        TaskCompletedEventAttributes, TaskScheduledEventAttributes, TimerStartedEventAttributes,
     };
     use std::time::Duration;
 
@@ -1648,10 +1648,10 @@ mod tests {
     // `TaskScheduled`, and what the workflow is handed (fired timers, events,
     // task results, closure results) has entries of its own.
 
-    use crate::proto::orcher::v1::{
+    use crate::protocol::{ExecutionError, FailWorkflowCommand};
+    use orcher_proto::orcher::v1::{
         EventReceivedEventAttributes, StepCompletedEventAttributes, TimerFiredEventAttributes,
     };
-    use crate::protocol::{ExecutionError, FailWorkflowCommand};
 
     fn timer_fired(timer_id: &str) -> Attributes {
         Attributes::TimerFired(TimerFiredEventAttributes {

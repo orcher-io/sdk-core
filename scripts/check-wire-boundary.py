@@ -25,8 +25,8 @@ GENERATED = re.compile(
 )
 
 ALLOWED = {
-    # The re-export of the generated crate, removed in #31 Phase A step 5.
-    "src/lib.rs": "re-exports orcher-proto (removed in Phase A step 5)",
+    # The protocols a language SDK speaks with this crate.
+    "src/lib.rs": "re-exports the kernel and host protocols a language SDK speaks",
     # The kernel and host speak the kernel and host protocols' messages until
     # #31 Phase B gives them domain types.
     "src/kernel/activation.rs": "kernel protocol messages (Phase B)",

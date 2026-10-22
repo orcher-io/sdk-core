@@ -4,8 +4,8 @@
 use std::time::SystemTime;
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1 as proto;
 use crate::types::*;
+use orcher_proto::orcher::v1 as proto;
 
 /// A status as the engine numbers it, read as the crate's own. A number the
 /// crate does not know reads as the non-terminal `Running`.

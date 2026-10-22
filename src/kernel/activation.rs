@@ -23,9 +23,9 @@ use crate::proto::kernel::v1::{
     FailureCode, Outcome, Payload, QueryAsked, Resolution, RunActivation, RunRef, RunStarted,
     StepSettled, TimerElapsed, UpdateArrived,
 };
-use crate::proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 use crate::proto::prost_types::Timestamp;
 use crate::worker::poll::polling::WorkflowExecutionTask;
+use orcher_proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
 
 /// Resolves the history an activation carries into the [`RunActivation`] the
 /// language SDK runs the workflow against.
@@ -359,12 +359,12 @@ fn json_payload(data: Vec<u8>) -> Payload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::orcher::v1::{
+    use crate::types::WorkflowExecution;
+    use orcher_proto::orcher::v1::{
         Failure as WireFailure, QueryRequest, StepCompletedEventAttributes,
         TimerFiredEventAttributes, WorkflowExecutionCancelRequestedEventAttributes,
         WorkflowExecutionStartedEventAttributes,
     };
-    use crate::types::WorkflowExecution;
 
     fn at(ms: i64) -> Option<Timestamp> {
         Some(Timestamp {
@@ -414,7 +414,7 @@ mod tests {
     /// it keeps that id while it still runs.
     #[test]
     fn a_child_still_running_is_resolved_as_started() {
-        use crate::proto::orcher::v1::ChildWorkflowExecutionStartedEventAttributes;
+        use orcher_proto::orcher::v1::ChildWorkflowExecutionStartedEventAttributes;
         let journal = vec![
             started(1_000),
             entry(
@@ -451,7 +451,7 @@ mod tests {
     /// each SDK words its own failure around.
     #[test]
     fn a_terminated_child_carries_its_reason() {
-        use crate::proto::orcher::v1::ChildWorkflowExecutionTerminatedEventAttributes;
+        use orcher_proto::orcher::v1::ChildWorkflowExecutionTerminatedEventAttributes;
         let journal = vec![
             started(1_000),
             entry(
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn each_resolution_carries_its_place_in_the_order() {
         let mut task = task(failure_and_cancel(3, 2_000_000, 2, 3_000_000));
-        task.updates = vec![crate::proto::orcher::v1::UpdateRequest {
+        task.updates = vec![orcher_proto::orcher::v1::UpdateRequest {
             update_id: "u1".into(),
             update_type: "rename".into(),
             ..Default::default()
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn a_pending_update_is_delivered_last() {
         let mut task = task(vec![started(1_000)]);
-        task.updates = vec![crate::proto::orcher::v1::UpdateRequest {
+        task.updates = vec![orcher_proto::orcher::v1::UpdateRequest {
             update_id: "u1".into(),
             update_type: "rename".into(),
             args: br#"["new name"]"#.to_vec(),
