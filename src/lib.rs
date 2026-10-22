@@ -109,7 +109,9 @@ mod wire;
 pub mod worker;
 
 // The worker host: the one way a language SDK runs a worker.
-pub use worker::host::{ActorHandler, Host, HostConfig, Registrations, StateScope, StateValue};
+pub use worker::host::{
+    ActorHandler, EncodedHost, Host, HostConfig, Registrations, StateScope, StateValue,
+};
 pub use worker::{TaskExecutionTask, WorkflowExecutionTask};
 
 // Clients for workflows, namespaces and actors.

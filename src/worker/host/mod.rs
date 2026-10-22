@@ -22,6 +22,7 @@
 
 mod actors;
 pub mod config;
+mod encoded;
 mod sessions;
 mod tasks;
 mod workflows;
@@ -44,6 +45,7 @@ use tokio::task::JoinHandle;
 
 pub use actors::{ActorHandler, StateScope, StateValue};
 pub use config::HostConfig;
+pub use encoded::EncodedHost;
 
 /// How long a driver has to stop past the shutdown grace and the release
 /// margin, before it is aborted.

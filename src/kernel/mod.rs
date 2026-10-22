@@ -15,9 +15,11 @@
 //! - [`step_ids`]: step ids under the kernel's own scheme, `KERNEL_V1`.
 //! - [`random`]: the deterministic random source for runs under that scheme.
 //! - [`check_activation`]: whether an answer replays the history it came from.
+//! - [`encoded`]: the replay tools on encoded protocol messages, for bindings.
 
 pub mod activation;
 pub mod completion;
+pub mod encoded;
 pub mod random;
 pub mod step_ids;
 
