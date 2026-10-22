@@ -1,7 +1,7 @@
 # Benchmark suite
 
 An on-demand suite that measures what a worker built on this checkout's
-`orcher-sdk-core` and `orcher-sdk-host`, and the engine it talks to, spend on
+`orcher-sdk-core`, and the engine it talks to, spend on
 a fixed set of workloads. It exists so that each kernel and governor change
 (the worker cache #36, capacity-aware polling #33, batched heartbeats #35,
 binary encoding #37, a shared connection #38) lands with before and after
@@ -70,7 +70,7 @@ orcher-bench worker ──gRPC──► counting proxy (in the suite) ─┘
   workloads as its "language")
 ```
 
-- **The worker** is a separate process running `orcher_sdk_host::Host` with
+- **The worker** is a separate process running `orcher_sdk_core::Host` with
   the workloads' code as its language, exactly as a language SDK uses the
   host: it pulls activations (`RunActivation`) and answers with the kernel
   protocol's commands, and pulls tasks and reports their outcomes. Being its

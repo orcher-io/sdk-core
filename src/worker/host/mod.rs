@@ -29,16 +29,14 @@ mod workflows;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use orcher_sdk_core::observability::{WireMetrics, WireMetricsSnapshot};
-use orcher_sdk_core::proto::host::v1::{
+use crate::observability::{WireMetrics, WireMetricsSnapshot};
+use crate::proto::host::v1::{
     ActorOperation, ActorResult, HeartbeatAnswer, TaskAssignment, TaskOutcome,
 };
-use orcher_sdk_core::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
-use orcher_sdk_core::worker::drivers::registration::DEREGISTER_TIMEOUT;
-use orcher_sdk_core::worker::{
-    ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkflowDriver,
-};
-use orcher_sdk_core::{Error, Result, WorkerRegistrationDriver};
+use crate::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
+use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
+use crate::worker::{ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkflowDriver};
+use crate::{Error, Result, WorkerRegistrationDriver};
 use tokio::task::JoinHandle;
 
 pub use actors::{ActorHandler, StateScope, StateValue};

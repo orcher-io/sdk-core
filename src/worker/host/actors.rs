@@ -11,19 +11,19 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use orcher_sdk_core::proto::host::v1::{actor_result, ActorMode, ActorOperation, ActorResult};
-use orcher_sdk_core::proto::kernel::v1::Payload;
-use orcher_sdk_core::proto::orcher::v1::actor_service_client::ActorServiceClient;
-use orcher_sdk_core::proto::orcher::v1::{
+use crate::proto::host::v1::{actor_result, ActorMode, ActorOperation, ActorResult};
+use crate::proto::kernel::v1::Payload;
+use crate::proto::orcher::v1::actor_service_client::ActorServiceClient;
+use crate::proto::orcher::v1::{
     self as engine, DeleteStateRequest, GetStateRequest, ListStateKeysRequest,
     RegisterHandlersRequest, SetStateRequest,
 };
-use orcher_sdk_core::transport::{credentialed_request, limits};
-use orcher_sdk_core::worker::{ActorWork, ActorWorkResult, RegistrationHandle};
-use orcher_sdk_core::{Error, Result, TaskFailure};
+use crate::transport::{credentialed_request, limits};
+use crate::worker::{ActorWork, ActorWorkResult, RegistrationHandle};
+use crate::{Error, Result, TaskFailure};
 use tokio::sync::mpsc;
 
-use crate::HostConfig;
+use crate::worker::host::HostConfig;
 
 /// One operation a worker runs for an actor type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +108,7 @@ impl StateScope {
 /// The host's calls to the actor service, with the worker's credentials.
 #[derive(Clone)]
 pub(crate) struct ActorService {
-    client: ActorServiceClient<orcher_sdk_core::transport::instrument::WireChannel>,
+    client: ActorServiceClient<crate::transport::instrument::WireChannel>,
     api_key: Option<String>,
     organization_id: Option<String>,
 }
@@ -116,9 +116,9 @@ pub(crate) struct ActorService {
 impl ActorService {
     pub(crate) async fn connect(
         config: &HostConfig,
-        wire: &std::sync::Arc<orcher_sdk_core::observability::WireMetrics>,
+        wire: &std::sync::Arc<crate::observability::WireMetrics>,
     ) -> Result<Self> {
-        let channel = orcher_sdk_core::transport::channel::connect_channel(
+        let channel = crate::transport::channel::connect_channel(
             &config.server_url,
             config.tls.as_ref(),
             wire,
@@ -301,7 +301,7 @@ pub(crate) fn follow_re_registration(
     handlers: Vec<ActorHandler>,
     metadata: HashMap<String, String>,
     registration: RegistrationHandle,
-    mut events: mpsc::Receiver<orcher_sdk_core::worker::ActorDriverEvent>,
+    mut events: mpsc::Receiver<crate::worker::ActorDriverEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while events.recv().await.is_some() {

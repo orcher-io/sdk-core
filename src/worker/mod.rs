@@ -1,18 +1,12 @@
-//! Everything a worker runs: the drivers a language SDK builds on, the pollers
-//! and completion reporting under them, task heartbeats, shutdown notices and
-//! worker metrics.
-//!
-//! - [`WorkflowDriver`]: polls for workflow executions and exposes the work over channels.
-//! - [`TaskDriver`]: polls for task executions and exposes the work over channels.
-//! - [`ActorDriver`]: polls for actor operations.
-//! - [`WorkerRegistrationDriver`]: registers the worker with the server and heartbeats.
-//!
-//! A language SDK receives [`WorkflowWork`] and [`TaskWork`] from the drivers, runs its
-//! handlers, and sends the results back. Core handles all gRPC communication.
+//! Everything a worker runs. Its face is the [`Host`](host::Host): one worker's plumbing,
+//! which every language SDK runs its worker on, pulling work and handing back
+//! outcomes. Under it are the drivers, the pollers and completion reporting,
+//! the governor, task heartbeats, shutdown notices and worker metrics.
 
 pub mod drivers;
 pub(crate) mod governor;
 pub mod heartbeat;
+pub mod host;
 mod lifecycle;
 pub mod metrics;
 pub mod poll;

@@ -9,13 +9,16 @@ Status: agreed design for #29. Evidence: inventories of the sdk-py native module
 **It is not the governor.** The governor (`sdk-core/src/worker/governor`) decides *how much work the worker takes*; it stays in core, and the host uses it through the drivers. **It is not the kernel.** Resolution, step identity and determinism stay in `sdk-core/src/kernel`; the host carries their messages.
 
 ```
-sdk-core repo (workspace)
-├── orcher-sdk-core   kernel (resolution, step ids, random) + worker (drivers, poll, governor)
-└── orcher-sdk-host   one worker: config → drivers, lifecycle, work hand-off, running tasks,
-                      sessions, registration, actor service, shutdown/drain
+orcher-sdk-core
+├── kernel            resolution, step ids, random
+└── worker            private machinery: drivers, poll, governor
+    └── host          Host: one worker — config → drivers, lifecycle, work hand-off,
+                      running tasks, sessions, registration, actor service, shutdown/drain
         ▲                       ▲                        ▲
    sdk-rust (direct)      sdk-ts (Neon binding)     sdk-py (PyO3 binding)
 ```
+
+The host began as its own crate, `orcher-sdk-host`, and now lives in core as `orcher_sdk_core::Host` (#31): it is the only consumer of the drivers and pollers, and inside core those can be private, so an SDK can run a worker only through the host.
 
 **Rust uses it too.** The Rust SDK wires core's drivers itself today, so it is the third copy; the host's native API is a Rust API, and the Python and TypeScript modules become thin bindings over the same API. One implementation, three users.
 
@@ -119,4 +122,4 @@ Each SDK switches in one release, with no period where its old wiring and the ho
 3. **Host messages as a separate `orcher.host.v1` package** rather than adding tasks and actors to the kernel protocol.
 4. **Sessions move into the host** for all three SDKs: Python and TypeScript stop implementing session semantics.
 5. **Migrate to the host and the kernel protocol in one step per SDK**, rather than two migrations.
-6. **Crate in the sdk-core workspace, versioned with core**: the host and core change together.
+6. **Released with core**: the host and core change together. It started as a crate in the sdk-core workspace and was folded into core itself (#31).

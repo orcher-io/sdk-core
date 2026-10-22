@@ -2,13 +2,11 @@
 //! tasks never reach the language, and a session's queue is polled from its
 //! creation to its end.
 
-mod common;
-
 use std::time::{Duration, Instant};
 
-use common::{task, Engine};
+use crate::common::{task, Engine};
 use orcher_sdk_core::proto::orcher::v1::PollTaskExecutionResponse;
-use orcher_sdk_host::{Host, HostConfig, Registrations};
+use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn session_worker(engine: &Engine, max_sessions: usize) -> Host {
     let addr = engine.serve().await;

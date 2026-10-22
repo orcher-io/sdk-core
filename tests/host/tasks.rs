@@ -1,13 +1,11 @@
 //! Tasks handed to the language by pull, against a fake engine.
 
-mod common;
-
 use std::time::Duration;
 
-use common::{task, Engine};
+use crate::common::{task, Engine};
 use orcher_sdk_core::proto::host::v1::{task_outcome, TaskOutcome};
 use orcher_sdk_core::proto::kernel::v1::{Failure, Payload};
-use orcher_sdk_host::{Host, HostConfig, Registrations};
+use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn task_worker(engine: &Engine) -> Host {
     let addr = engine.serve().await;
