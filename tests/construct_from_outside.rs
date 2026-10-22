@@ -10,15 +10,26 @@ use orcher_sdk_core::client::workflow::{CancelWorkflowOpts, StartWorkflowOpts};
 use orcher_sdk_core::types::RetryPolicy;
 use orcher_sdk_core::{
     ConnectOptions, Error, HostConfig, ListWorkflowsOptions, ListWorkflowsSortOrder, Registrations,
-    SearchWorkflowsOptions, TlsConfig, WorkflowStatus,
+    SearchWorkflowsOptions, TlsConfig, WorkflowIdReusePolicy, WorkflowRetryPolicy, WorkflowStatus,
 };
 
 #[test]
 fn options_build_with_their_methods() {
     let opts = StartWorkflowOpts::new("wf-1", "Order", "orders", b"{}".to_vec())
         .with_cron_schedule("* * * * *")
-        .with_execution_timeout(Duration::from_secs(60));
+        .with_execution_timeout(Duration::from_secs(60))
+        .with_id_reuse_policy(WorkflowIdReusePolicy::RejectDuplicate)
+        .with_retry_policy(WorkflowRetryPolicy {
+            max_attempts: 3,
+            initial_interval: Some(Duration::from_millis(500)),
+            ..Default::default()
+        });
     assert_eq!(opts.workflow_id, "wf-1");
+    assert_eq!(
+        opts.id_reuse_policy,
+        Some(WorkflowIdReusePolicy::RejectDuplicate)
+    );
+    assert_eq!(opts.retry_policy.unwrap().max_attempts, 3);
     assert_eq!(opts.execution_timeout, Some(Duration::from_secs(60)));
 
     let cancel = CancelWorkflowOpts::default().with_cleanup_timeout(Duration::from_secs(30));

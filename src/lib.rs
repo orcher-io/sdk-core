@@ -119,7 +119,8 @@ pub use worker::{TaskExecutionTask, WorkflowExecutionTask};
 // The connection to the engine, and the clients for workflows, namespaces
 // and actors that share it.
 pub use client::{
-    ActorClient, ConnectOptions, Connection, NamespaceClient, WorkflowClient, WorkflowHandle,
+    ActorClient, ConnectOptions, Connection, NamespaceClient, StartWorkflowOpts, WorkflowClient,
+    WorkflowHandle,
 };
 pub use transport::TlsConfig;
 
@@ -132,8 +133,9 @@ pub use payload::{Payload, Payloads};
 
 // Shared vocabulary.
 pub use types::{
-    ListWorkflowsOptions, ListWorkflowsSortOrder, SearchWorkflowsOptions, WorkflowExecution,
-    WorkflowExecutionDescription, WorkflowExecutionInfo, WorkflowListPage, WorkflowStatus,
+    ListWorkflowsOptions, ListWorkflowsSortOrder, Namespace, SearchWorkflowsOptions,
+    WorkflowExecution, WorkflowExecutionDescription, WorkflowExecutionInfo, WorkflowIdReusePolicy,
+    WorkflowListPage, WorkflowRetryPolicy, WorkflowStatus,
 };
 
 // What workflow code produces, as the kernel hands it to the worker.
