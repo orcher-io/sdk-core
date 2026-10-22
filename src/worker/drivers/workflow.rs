@@ -8,12 +8,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
-use crate::proto::orcher::v1::{self as proto};
-use crate::protocol::{
-    validate_execution_result, Command as BridgeCommand, ExecutionErrorType, ExecutionResult,
-    QueryResponse, QueryResult as BridgeQueryResult, UpdateResponse,
-    UpdateResult as BridgeUpdateResult, WorkflowRetryPolicy,
-};
+use crate::protocol::{validate_execution_result, ExecutionErrorType, ExecutionResult};
 use crate::state::replayer::{JournalSteps, ReplayConfig, Replayer, NON_DETERMINISM_FAILURE_TYPE};
 use crate::transport::channel::ChannelManager;
 use crate::types::WorkflowExecution;
@@ -216,24 +211,6 @@ pub struct WorkflowWorkResult {
 
     /// The execution result: commands or an error.
     pub result: Result<ExecutionResult>,
-}
-
-/// An activation to hand back, named by the token its poll carried.
-/// A workflow retry policy as the engine reads it. A delay left unset stays
-/// unset, so the engine applies its own workflow-retry default.
-fn workflow_retry_policy(policy: &WorkflowRetryPolicy) -> proto::RetryPolicy {
-    let duration = |d: Duration| crate::proto::prost_types::Duration {
-        seconds: d.as_secs() as i64,
-        nanos: d.subsec_nanos() as i32,
-    };
-    proto::RetryPolicy {
-        initial_interval: policy.initial_interval.map(duration),
-        backoff_coefficient: policy.backoff_coefficient,
-        maximum_interval: policy.max_interval.map(duration),
-        maximum_attempts: i32::try_from(policy.max_attempts).unwrap_or(i32::MAX),
-        non_retryable_error_types: policy.non_retryable_errors.clone(),
-        ..Default::default()
-    }
 }
 
 fn leftover(task: WorkflowExecutionTask) -> Leftover {
@@ -1027,12 +1004,14 @@ impl WorkflowDriver {
         }
         self.forget_non_deterministic(&run_id);
 
-        let query_results =
-            self.convert_query_responses_to_proto(&execution_result.query_responses);
-        let update_results =
-            self.convert_update_responses_to_proto(&execution_result.update_results);
+        let query_results = crate::wire::engine::query_answers(&execution_result.query_responses);
+        let update_results = crate::wire::engine::update_answers(&execution_result.update_results);
 
-        match self.convert_commands_to_proto(execution_result.commands, &self.config.task_queue) {
+        match crate::wire::engine::commands(
+            execution_result.commands,
+            &self.config.task_queue,
+            &self.config.namespace,
+        ) {
             Ok(commands) => Report::Complete {
                 workflow_id,
                 run_id,
@@ -1101,372 +1080,13 @@ impl WorkflowDriver {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(run_id);
     }
-
-    /// Convert bridge commands to proto commands.
-    fn convert_commands_to_proto(
-        &self,
-        commands: Vec<BridgeCommand>,
-        default_task_queue: &str,
-    ) -> Result<Vec<crate::proto::orcher::v1::Command>> {
-        use crate::proto::orcher::v1::{
-            command::Attributes, CancelChildWorkflowCommandAttributes,
-            CancelTimerCommandAttributes, CancelWorkflowCommandAttributes, Command as ProtoCommand,
-            CommandType, CompleteWorkflowCommandAttributes, FailWorkflowCommandAttributes,
-            OrphanPolicy as ProtoOrphanPolicy, RecordStepResultCommandAttributes,
-            RestartFreshCommandAttributes, RetryPolicy, ScheduleTaskCommandAttributes,
-            SendEventCommandAttributes, StartChildWorkflowCommandAttributes,
-            StartTimerCommandAttributes,
-        };
-
-        let mut proto_commands = Vec::new();
-
-        for command in commands {
-            let proto_command = match command {
-                BridgeCommand::RecordStepResult(cmd) => ProtoCommand {
-                    command_type: CommandType::RecordStepResult as i32,
-                    attributes: Some(Attributes::RecordStepResult(
-                        RecordStepResultCommandAttributes {
-                            step_name: cmd.step_name,
-                            step_type: cmd.step_type,
-                            result: cmd.result,
-                            failure: cmd.failure.map(|f| crate::proto::orcher::v1::Failure {
-                                message: f.message,
-                                source: f.source,
-                                stack_trace: f.stack_trace,
-                                cause: None,
-                                failure_type: f.failure_type,
-                                details: vec![],
-                                non_retryable: false,
-                                ..Default::default()
-                            }),
-                            execution_attempt: cmd.execution_attempt,
-                            ..Default::default()
-                        },
-                    )),
-                    ..Default::default()
-                },
-
-                BridgeCommand::ScheduleTask(cmd) => {
-                    let retry_policy = cmd.retry_policy.as_ref().map(|rp| RetryPolicy {
-                        initial_interval: Some(prost_types::Duration {
-                            seconds: rp.initial_interval.as_secs() as i64,
-                            nanos: (rp.initial_interval.as_nanos() % 1_000_000_000) as i32,
-                        }),
-                        backoff_coefficient: rp.backoff_coefficient,
-                        maximum_interval: Some(prost_types::Duration {
-                            seconds: rp.max_interval.as_secs() as i64,
-                            nanos: (rp.max_interval.as_nanos() % 1_000_000_000) as i32,
-                        }),
-                        maximum_attempts: rp.max_attempts as i32,
-                        non_retryable_error_types: rp.non_retryable_errors.clone(),
-                        ..Default::default()
-                    });
-
-                    let headers = cmd
-                        .headers
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.data.clone()))
-                        .collect();
-
-                    ProtoCommand {
-                        command_type: CommandType::ScheduleTask as i32,
-                        attributes: Some(Attributes::ScheduleTask(ScheduleTaskCommandAttributes {
-                            task_id: cmd.task_id,
-                            task_type: cmd.task_type,
-                            task_queue: if cmd.task_queue.is_empty() {
-                                default_task_queue.to_string()
-                            } else {
-                                cmd.task_queue
-                            },
-                            input: {
-                                let mut all_data = Vec::new();
-                                for payload in &cmd.input {
-                                    all_data.extend(&payload.data);
-                                }
-                                all_data
-                            },
-                            // The queue-wait limit is a separate option. Absent, the task
-                            // waits in the queue as long as it needs to. Inheriting the
-                            // run limit here would double the effective total timeout.
-                            schedule_to_start_timeout: cmd.queue_timeout.map(|q| {
-                                prost_types::Duration {
-                                    seconds: q.as_secs() as i64,
-                                    nanos: (q.as_nanos() % 1_000_000_000) as i32,
-                                }
-                            }),
-                            start_to_close_timeout: Some(prost_types::Duration {
-                                seconds: cmd.timeout.as_secs() as i64,
-                                nanos: (cmd.timeout.as_nanos() % 1_000_000_000) as i32,
-                            }),
-                            heartbeat_timeout: cmd.heartbeat_timeout.map(|hb| {
-                                prost_types::Duration {
-                                    seconds: hb.as_secs() as i64,
-                                    nanos: (hb.as_nanos() % 1_000_000_000) as i32,
-                                }
-                            }),
-                            retry_policy,
-                            headers,
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    }
-                }
-
-                BridgeCommand::StartTimer(cmd) => ProtoCommand {
-                    command_type: CommandType::StartTimer as i32,
-                    attributes: Some(Attributes::StartTimer(StartTimerCommandAttributes {
-                        timer_id: cmd.timer_id,
-                        start_to_fire_timeout: Some(prost_types::Duration {
-                            seconds: cmd.duration.as_secs() as i64,
-                            nanos: (cmd.duration.as_nanos() % 1_000_000_000) as i32,
-                        }),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-
-                BridgeCommand::CancelTimer(cmd) => ProtoCommand {
-                    command_type: CommandType::CancelTimer as i32,
-                    attributes: Some(Attributes::CancelTimer(CancelTimerCommandAttributes {
-                        timer_id: cmd.timer_id,
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-
-                BridgeCommand::CompleteWorkflow(cmd) => ProtoCommand {
-                    command_type: CommandType::CompleteWorkflow as i32,
-                    attributes: Some(Attributes::CompleteWorkflow(
-                        CompleteWorkflowCommandAttributes {
-                            result: cmd.result.data,
-                            ..Default::default()
-                        },
-                    )),
-                    ..Default::default()
-                },
-
-                BridgeCommand::FailWorkflow(cmd) => ProtoCommand {
-                    command_type: CommandType::FailWorkflow as i32,
-                    attributes: Some(Attributes::FailWorkflow(FailWorkflowCommandAttributes {
-                        failure: Some(crate::proto::orcher::v1::Failure {
-                            message: cmd.message,
-                            source: "WorkflowHandler".to_string(),
-                            stack_trace: String::new(),
-                            cause: None,
-                            failure_type: cmd.error_type,
-                            details: cmd.details.map(|d| d.data).unwrap_or_default(),
-                            non_retryable: false,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-
-                BridgeCommand::CancelWorkflowExecution(cmd) => ProtoCommand {
-                    command_type: CommandType::CancelWorkflow as i32,
-                    attributes: Some(Attributes::CancelWorkflow(
-                        CancelWorkflowCommandAttributes {
-                            details: cmd.details.map(|d| d.data).unwrap_or_default(),
-                            ..Default::default()
-                        },
-                    )),
-                    ..Default::default()
-                },
-
-                BridgeCommand::RestartFresh(cmd) => ProtoCommand {
-                    command_type: CommandType::RestartFresh as i32,
-                    attributes: Some(Attributes::RestartFresh(RestartFreshCommandAttributes {
-                        workflow_type: cmd.workflow_type,
-                        task_queue: cmd
-                            .task_queue
-                            .unwrap_or_else(|| default_task_queue.to_string()),
-                        input: {
-                            let mut all_data = Vec::new();
-                            for payload in &cmd.input {
-                                all_data.extend(&payload.data);
-                            }
-                            all_data
-                        },
-                        execution_timeout: cmd.timeout.map(|t| prost_types::Duration {
-                            seconds: t.as_secs() as i64,
-                            nanos: (t.as_nanos() % 1_000_000_000) as i32,
-                        }),
-                        run_timeout: None,
-                        task_timeout: None,
-                        retry_policy: cmd.retry_policy.as_ref().map(workflow_retry_policy),
-                        annotations: Default::default(),
-                        labels: Default::default(),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-
-                // WaitForEvent is a client-side parking hint with no proto command.
-                // The engine keeps the workflow claimed while it waits; delivering
-                // the event releases the claim and the workflow is dispatched again.
-                BridgeCommand::WaitForEvent(_) => continue,
-
-                BridgeCommand::SendEvent(cmd) => {
-                    let payload: Vec<u8> = cmd.payload.data;
-                    ProtoCommand {
-                        command_type: CommandType::SendEvent as i32,
-                        attributes: Some(Attributes::SendEvent(SendEventCommandAttributes {
-                            workflow_id: cmd.workflow_id,
-                            run_id: cmd.run_id.unwrap_or_default(),
-                            event_name: cmd.event_name,
-                            payload,
-                            headers: Default::default(),
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    }
-                }
-
-                BridgeCommand::StartChildWorkflow(cmd) => {
-                    let orphan_policy = match cmd.orphan_policy {
-                        crate::protocol::OrphanPolicy::Terminate => ProtoOrphanPolicy::Terminate,
-                        crate::protocol::OrphanPolicy::Cancel => ProtoOrphanPolicy::Cancel,
-                        crate::protocol::OrphanPolicy::Abandon => ProtoOrphanPolicy::Abandon,
-                    };
-
-                    ProtoCommand {
-                        command_type: CommandType::StartChildWorkflow as i32,
-                        attributes: Some(Attributes::StartChildWorkflow(
-                            StartChildWorkflowCommandAttributes {
-                                workflow_id: cmd.workflow_id,
-                                workflow_type: cmd.workflow_type,
-                                task_queue: if cmd.task_queue.is_empty() {
-                                    default_task_queue.to_string()
-                                } else {
-                                    cmd.task_queue
-                                },
-                                input: {
-                                    let mut all_data = Vec::new();
-                                    for payload in &cmd.input {
-                                        all_data.extend(&payload.data);
-                                    }
-                                    all_data
-                                },
-                                execution_timeout: cmd.timeout.map(|t| prost_types::Duration {
-                                    seconds: t.as_secs() as i64,
-                                    nanos: (t.as_nanos() % 1_000_000_000) as i32,
-                                }),
-                                run_timeout: None,
-                                task_timeout: None,
-                                orphan_policy: orphan_policy as i32,
-                                retry_policy: cmd.retry_policy.as_ref().map(workflow_retry_policy),
-                                // A child runs in its parent worker's
-                                // namespace. Left empty, the server would file
-                                // the child under a namespace named "default",
-                                // where no worker in this namespace could ever
-                                // claim it.
-                                namespace: self.config.namespace.clone(),
-                                annotations: Default::default(),
-                                labels: Default::default(),
-                                ..Default::default()
-                            },
-                        )),
-                        ..Default::default()
-                    }
-                }
-
-                BridgeCommand::CancelChildWorkflow(cmd) => ProtoCommand {
-                    command_type: CommandType::CancelChildWorkflow as i32,
-                    attributes: Some(Attributes::CancelChildWorkflow(
-                        CancelChildWorkflowCommandAttributes {
-                            workflow_id: cmd.workflow_id,
-                            run_id: cmd.run_id,
-                            ..Default::default()
-                        },
-                    )),
-                    ..Default::default()
-                },
-
-                other => {
-                    tracing::warn!(
-                        command_type = other.command_type(),
-                        "Unsupported command type in conversion"
-                    );
-                    return Err(Error::internal(format!(
-                        "Unsupported command type: {}",
-                        other.command_type()
-                    )));
-                }
-            };
-
-            proto_commands.push(proto_command);
-        }
-
-        Ok(proto_commands)
-    }
-
-    /// Convert bridge query responses to proto `QueryResult`s.
-    fn convert_query_responses_to_proto(
-        &self,
-        responses: &[QueryResponse],
-    ) -> Vec<proto::QueryResult> {
-        responses
-            .iter()
-            .map(|resp| {
-                let (result_type, result) = match &resp.result {
-                    BridgeQueryResult::Success { output } => (
-                        proto::QueryResultType::Answered as i32,
-                        Some(proto::query_result::Result::Answer(output.data.clone())),
-                    ),
-                    BridgeQueryResult::Failed { message, .. } => (
-                        proto::QueryResultType::Failed as i32,
-                        Some(proto::query_result::Result::ErrorMessage(message.clone())),
-                    ),
-                };
-
-                proto::QueryResult {
-                    query_id: resp.query_id.clone(),
-                    result_type,
-                    result,
-                    ..Default::default()
-                }
-            })
-            .collect()
-    }
-
-    /// Convert bridge update responses to proto `UpdateResult`s.
-    fn convert_update_responses_to_proto(
-        &self,
-        responses: &[UpdateResponse],
-    ) -> Vec<proto::UpdateResult> {
-        responses
-            .iter()
-            .map(|resp| {
-                let (result_type, result) = match &resp.result {
-                    BridgeUpdateResult::Completed { output } => (
-                        proto::UpdateResultType::Completed as i32,
-                        Some(proto::update_result::Result::Answer(output.data.clone())),
-                    ),
-                    BridgeUpdateResult::Rejected { message } => (
-                        proto::UpdateResultType::Rejected as i32,
-                        Some(proto::update_result::Result::ErrorMessage(message.clone())),
-                    ),
-                    BridgeUpdateResult::Failed { message, .. } => (
-                        proto::UpdateResultType::Failed as i32,
-                        Some(proto::update_result::Result::ErrorMessage(message.clone())),
-                    ),
-                };
-
-                proto::UpdateResult {
-                    update_id: resp.update_id.clone(),
-                    result_type,
-                    result,
-                    ..Default::default()
-                }
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::orcher::v1 as proto;
+    use crate::protocol::{Command as BridgeCommand, WorkflowRetryPolicy};
 
     /// A driver connected to a bare HTTP/2 server that is sent nothing.
     async fn idle_driver() -> WorkflowDriver {
@@ -1571,34 +1191,33 @@ mod tests {
             non_retryable_error_types: vec!["Declined".into()],
             ..Default::default()
         };
-        let driver = idle_driver().await;
-        let commands = driver
-            .convert_commands_to_proto(
-                vec![
-                    BridgeCommand::StartChildWorkflow(StartChildWorkflowCommand {
-                        workflow_id: "order-7-child-0".into(),
-                        workflow_type: "ship".into(),
-                        retry_policy: Some(policy.clone()),
-                        ..Default::default()
-                    }),
-                    BridgeCommand::StartChildWorkflow(StartChildWorkflowCommand {
-                        workflow_id: "order-7-child-1".into(),
-                        workflow_type: "ship".into(),
-                        ..Default::default()
-                    }),
-                    BridgeCommand::RestartFresh(RestartFreshCommand {
-                        workflow_type: "checkout".into(),
-                        retry_policy: Some(policy),
-                        ..Default::default()
-                    }),
-                    BridgeCommand::RestartFresh(RestartFreshCommand {
-                        workflow_type: "checkout".into(),
-                        ..Default::default()
-                    }),
-                ],
-                "default",
-            )
-            .unwrap();
+        let commands = crate::wire::engine::commands(
+            vec![
+                BridgeCommand::StartChildWorkflow(StartChildWorkflowCommand {
+                    workflow_id: "order-7-child-0".into(),
+                    workflow_type: "ship".into(),
+                    retry_policy: Some(policy.clone()),
+                    ..Default::default()
+                }),
+                BridgeCommand::StartChildWorkflow(StartChildWorkflowCommand {
+                    workflow_id: "order-7-child-1".into(),
+                    workflow_type: "ship".into(),
+                    ..Default::default()
+                }),
+                BridgeCommand::RestartFresh(RestartFreshCommand {
+                    workflow_type: "checkout".into(),
+                    retry_policy: Some(policy),
+                    ..Default::default()
+                }),
+                BridgeCommand::RestartFresh(RestartFreshCommand {
+                    workflow_type: "checkout".into(),
+                    ..Default::default()
+                }),
+            ],
+            "default",
+            "default",
+        )
+        .unwrap();
         let sent: Vec<Option<proto::RetryPolicy>> = commands
             .into_iter()
             .map(|command| match command.attributes {

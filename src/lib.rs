@@ -105,6 +105,7 @@ pub mod protocol;
 pub(crate) mod state;
 pub mod transport;
 pub mod types;
+mod wire;
 pub mod worker;
 
 // The worker host: the one way a language SDK runs a worker.

@@ -30,29 +30,10 @@ pub(crate) fn proto_task_to_task_work(
     default_queue: &str,
     heartbeats: Option<&TaskHeartbeats>,
 ) -> TaskWork {
-    let task_queue = if proto.task_queue.is_empty() {
-        default_queue.to_string()
-    } else {
-        proto.task_queue
-    };
-    let task = TaskExecutionTask {
-        execution: crate::types::WorkflowExecution {
-            workflow_id: proto.workflow_id,
-            run_id: proto.execution_id,
-        },
-        task_id: proto.task_id,
-        task_type: proto.task_type,
-        task_queue,
-        input: proto.input,
-        task_token: proto.task_token,
-        attempt: proto.attempt,
-        start_to_close_timeout: proto
-            .start_to_close_timeout
-            .map(|d| Duration::new(d.seconds as u64, d.nanos as u32)),
-        heartbeat_timeout: proto
-            .heartbeat_timeout
-            .map(|d| Duration::new(d.seconds as u64, d.nanos as u32)),
-    };
+    let mut task = TaskExecutionTask::from(proto);
+    if task.task_queue.is_empty() {
+        task.task_queue = default_queue.to_string();
+    }
     let heartbeat = match heartbeats {
         Some(heartbeats) => heartbeats.start(&task),
         None => TaskHeartbeat::detached(),
