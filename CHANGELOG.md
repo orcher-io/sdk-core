@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.20.0](https://github.com/orcher-io/sdk-core/compare/v0.19.0...v0.20.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* narrow core's protocol re-export to the kernel and host protocols ([#132](https://github.com/orcher-io/sdk-core/issues/132))
+* start workflows and manage namespaces with core's own types ([#131](https://github.com/orcher-io/sdk-core/issues/131))
+* connect clients and workers with core's own options ([#130](https://github.com/orcher-io/sdk-core/issues/130))
+* report refused calls with core's own status ([#129](https://github.com/orcher-io/sdk-core/issues/129))
+* drivers, pollers, the state module, the request types and the old module paths are no longer public; use orcher_sdk_core::Host, the kernel and the clients. kernel::check_activation replaces
+* orcher-sdk-host is no longer published; depend on orcher-sdk-core and use orcher_sdk_core::Host instead.
+
+### Features
+
+* give language bindings the host's work as encoded messages ([#128](https://github.com/orcher-io/sdk-core/issues/128)) ([e21ab77](https://github.com/orcher-io/sdk-core/commit/e21ab7702b03e7fdc3c3f9702627466001751f00))
+
+
+### Bug Fixes
+
+* report a worker's load in its heartbeat ([#125](https://github.com/orcher-io/sdk-core/issues/125)) ([481242c](https://github.com/orcher-io/sdk-core/commit/481242cdb4a04adb959f8d5f2539f69fe8700ff8))
+
+
+### Changes
+
+* connect clients and workers with core's own options ([#130](https://github.com/orcher-io/sdk-core/issues/130)) ([672a0fd](https://github.com/orcher-io/sdk-core/commit/672a0fdd51132914c890b1dd5fa0a4c0c8f1b2ad))
+* convert to and from the wire in one module ([#127](https://github.com/orcher-io/sdk-core/issues/127)) ([e7f8023](https://github.com/orcher-io/sdk-core/commit/e7f802399d0985f634f2aec588df6270d55d7fde))
+* make the worker machinery private to core ([#126](https://github.com/orcher-io/sdk-core/issues/126)) ([da5fff0](https://github.com/orcher-io/sdk-core/commit/da5fff0966dfce352497adf2e6e6122a116ddcf7))
+* narrow core's protocol re-export to the kernel and host protocols ([#132](https://github.com/orcher-io/sdk-core/issues/132)) ([a9dbf31](https://github.com/orcher-io/sdk-core/commit/a9dbf315077d3725a54590c1a86ac665ffb293f5))
+* report refused calls with core's own status ([#129](https://github.com/orcher-io/sdk-core/issues/129)) ([99a71d5](https://github.com/orcher-io/sdk-core/commit/99a71d58dbbbb660ef39be690b2fd62bbbb041a5))
+* run the worker host from core ([#123](https://github.com/orcher-io/sdk-core/issues/123)) ([d9edc5f](https://github.com/orcher-io/sdk-core/commit/d9edc5fd92f4ea37275fb7770245f77f5a19d1a6))
+* start workflows and manage namespaces with core's own types ([#131](https://github.com/orcher-io/sdk-core/issues/131)) ([37a989d](https://github.com/orcher-io/sdk-core/commit/37a989d70b0a86ea7145464d5b20838a49867b02))
+
+
+### Documentation
+
+* add an upgrade guide for 0.20 and bring the README up to date ([#133](https://github.com/orcher-io/sdk-core/issues/133)) ([d3a74a3](https://github.com/orcher-io/sdk-core/commit/d3a74a30f76e571dd5d0d0e68149f5f736559056))
+
 ## [0.19.0](https://github.com/orcher-io/sdk-core/compare/v0.18.0...v0.19.0) (2026-10-21)
 
 
