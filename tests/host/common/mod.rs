@@ -55,6 +55,8 @@ pub struct Script {
     /// authorization header and organization.
     pub actor_credentials: Vec<(&'static str, String, String)>,
     pub deregistrations: Vec<DeregisterWorkerRequest>,
+    /// The worker heartbeats that arrived, with the load each reported.
+    pub worker_heartbeats: Vec<WorkerHeartbeatRequest>,
 }
 
 #[derive(Clone, Default)]
@@ -120,8 +122,9 @@ impl WorkerService for Engine {
 
     async fn worker_heartbeat(
         &self,
-        _: Request<WorkerHeartbeatRequest>,
+        request: Request<WorkerHeartbeatRequest>,
     ) -> Result<Response<WorkerHeartbeatResponse>, Status> {
+        self.script().worker_heartbeats.push(request.into_inner());
         Ok(Response::new(WorkerHeartbeatResponse {
             success: true,
             ..Default::default()
