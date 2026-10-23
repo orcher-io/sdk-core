@@ -33,6 +33,10 @@ use tracing::debug;
 /// at the cost of one cheap round-trip per window.
 const RESULT_POLL_WINDOW: Duration = Duration::from_secs(20);
 
+/// How much longer than the window a result call may take: the engine's
+/// answer, and the trip back.
+const RESULT_CALL_MARGIN: Duration = Duration::from_secs(10);
+
 /// Options for starting a workflow with extended configuration.
 ///
 /// The struct is `#[non_exhaustive]` so that adding an option is not a
@@ -253,10 +257,22 @@ impl WorkflowClient {
         self
     }
 
-    /// Sets the default timeout for operations.
+    /// Sets how long each call may take before it fails with
+    /// [`Error::Timeout`]: 180 seconds unless set.
+    ///
+    /// A wait for a workflow's result is made of calls the engine holds for
+    /// up to 20 seconds each, so each of those may take that long whatever
+    /// this says; the wait itself is bounded by its own deadline.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// `body` as a call with the client's timeout as its deadline.
+    fn call<T>(&self, body: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(body);
+        request.set_timeout(self.timeout);
+        request
     }
 
     /// Waits for a workflow's result, without a deadline, and returns its raw
@@ -340,6 +356,10 @@ impl WorkflowClient {
                 ..Default::default()
             };
 
+            // The engine holds the call for up to the window, so the call's
+            // deadline covers it whatever the client's timeout.
+            let mut request = self.call(request);
+            request.set_timeout(self.timeout.max(window + RESULT_CALL_MARGIN));
             let inner = match self.client.clone().get_workflow_result(request).await {
                 Ok(r) => r.into_inner(),
                 Err(status) => {
@@ -508,7 +528,7 @@ impl WorkflowClient {
         let response = self
             .client
             .clone()
-            .start_workflow(request)
+            .start_workflow(self.call(request))
             .await
             .map_err(|status| start_error(status, &requested_id))?;
         let inner = response.into_inner();
@@ -566,7 +586,7 @@ impl WorkflowClient {
         let response = self
             .client
             .clone()
-            .batch_start_workflow(batch_request)
+            .batch_start_workflow(self.call(batch_request))
             .await
             // No single workflow to attribute a NOT_FOUND to here, so the status
             // stays opaque rather than being misfiled against an arbitrary id.
@@ -615,7 +635,7 @@ impl WorkflowClient {
 
         self.client
             .clone()
-            .send_event(request)
+            .send_event(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -655,7 +675,7 @@ impl WorkflowClient {
         let response = self
             .client
             .clone()
-            .query_workflow(request)
+            .query_workflow(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -705,7 +725,7 @@ impl WorkflowClient {
         let response = self
             .client
             .clone()
-            .update_workflow(request)
+            .update_workflow(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -745,7 +765,7 @@ impl WorkflowClient {
         let response = self
             .client
             .clone()
-            .get_workflow_status(request)
+            .get_workflow_status(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -786,7 +806,7 @@ impl WorkflowClient {
 
         self.client
             .clone()
-            .cancel_workflow(request)
+            .cancel_workflow(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -818,7 +838,7 @@ impl WorkflowClient {
         let response = self
             .query_client
             .clone()
-            .describe_workflow_execution(request)
+            .describe_workflow_execution(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -893,7 +913,7 @@ impl WorkflowClient {
         let response = self
             .query_client
             .clone()
-            .list_workflows(request)
+            .list_workflows(self.call(request))
             .await
             // No single workflow to attribute a NOT_FOUND to here, so the status
             // stays opaque rather than being misfiled against an arbitrary id.
@@ -948,7 +968,7 @@ impl WorkflowClient {
         let response = self
             .query_client
             .clone()
-            .search_workflows(request)
+            .search_workflows(self.call(request))
             .await
             // No single workflow to attribute a NOT_FOUND to here, so the status
             // stays opaque rather than being misfiled against an arbitrary id.
@@ -984,7 +1004,7 @@ impl WorkflowClient {
 
         self.client
             .clone()
-            .terminate_workflow(request)
+            .terminate_workflow(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -1014,7 +1034,7 @@ impl WorkflowClient {
         let response = self
             .client
             .clone()
-            .reset_workflow(request)
+            .reset_workflow(self.call(request))
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
@@ -1435,5 +1455,39 @@ mod tests {
     fn other_start_refusals_stay_opaque() {
         let err = start_error(tonic::Status::not_found("namespace"), "order-1");
         assert!(matches!(err, Error::Status(ref s) if s.code() == crate::error::Code::NotFound));
+    }
+
+    /// A call the engine does not answer in the client's timeout fails at
+    /// the timeout, as a timeout, not when the connection's own limit runs
+    /// out.
+    #[tokio::test]
+    async fn a_call_ends_at_the_clients_timeout() {
+        // Accepts connections and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = crate::client::Connection::lazy(crate::client::ConnectOptions::new(format!(
+            "http://{addr}"
+        )))
+        .unwrap()
+        .workflow_client()
+        .with_timeout(Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.get_workflow_status("wf", None),
+        )
+        .await
+        .expect("the call outlived its timeout")
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(matches!(error, Error::Timeout { .. }), "{error:?}");
+        assert!(error.is_retryable());
     }
 }
