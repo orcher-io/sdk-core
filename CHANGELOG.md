@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/orcher-io/sdk-core/compare/v0.20.0...v0.20.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* honour the workflow client's timeout on every call ([#134](https://github.com/orcher-io/sdk-core/issues/134)) ([1706708](https://github.com/orcher-io/sdk-core/commit/17067080f519f249fef300f187bd99a9a5b12858))
+
 ## [0.20.0](https://github.com/orcher-io/sdk-core/compare/v0.19.0...v0.20.0) (2026-10-22)
 
 
