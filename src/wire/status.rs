@@ -8,7 +8,17 @@ use crate::error::{Code, Error, Status, EXECUTION_ID_METADATA_KEY, WORKFLOW_ID_M
 /// actually happened: a message over a size limit, or an answer from
 /// something other than the engine.
 pub(crate) fn error(status: tonic::Status) -> Error {
+    if is_own_deadline(&status) {
+        return Error::timeout("request");
+    }
     Error::Status(self::status(crate::transport::clarify(status)))
+}
+
+/// Whether the call ran out of the deadline the client gave it: tonic ends
+/// such a call itself, as CANCELLED "Timeout expired", whatever the engine
+/// was doing.
+fn is_own_deadline(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Cancelled && status.message().starts_with("Timeout expired")
 }
 
 /// The status as the crate's own.
