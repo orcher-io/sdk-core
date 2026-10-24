@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/orcher-io/sdk-core/compare/v0.20.1...v0.21.0) (2026-10-24)
+
+
+### Features
+
+* answer client calls as encoded client protocol messages ([#136](https://github.com/orcher-io/sdk-core/issues/136)) ([5e14156](https://github.com/orcher-io/sdk-core/commit/5e141562319de0c2495a57ca6a9fb045bc438a76))
+
 ## [0.20.1](https://github.com/orcher-io/sdk-core/compare/v0.20.0...v0.20.1) (2026-10-23)
 
 
