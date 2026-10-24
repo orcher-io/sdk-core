@@ -619,10 +619,21 @@ impl WorkflowClient {
         event_name: impl Into<String>,
         input: T,
     ) -> Result<()> {
-        let workflow_id: String = workflow_id.into();
         let input_bytes = serde_json::to_vec(&input)
             .map_err(|e| Error::serialization(format!("Failed to serialize input: {}", e)))?;
+        self.send_event_raw(workflow_id, run_id, event_name, input_bytes)
+            .await
+    }
 
+    /// Sends an event whose payload is already encoded to a running workflow.
+    pub async fn send_event_raw(
+        &self,
+        workflow_id: impl Into<String>,
+        run_id: Option<String>,
+        event_name: impl Into<String>,
+        input_bytes: Vec<u8>,
+    ) -> Result<()> {
+        let workflow_id: String = workflow_id.into();
         let request = SendEventRequest {
             workflow_id: workflow_id.clone(),
             execution_id: run_id.unwrap_or_default(),
@@ -661,7 +672,22 @@ impl WorkflowClient {
     ) -> Result<R> {
         let args_bytes = serde_json::to_vec(&args)
             .map_err(|e| Error::serialization(format!("Failed to serialize args: {}", e)))?;
+        let result_bytes = self
+            .query_workflow_raw(workflow_id, run_id, query_name, args_bytes)
+            .await?;
+        serde_json::from_slice(&result_bytes)
+            .map_err(|e| Error::deserialization(format!("Failed to deserialize result: {}", e)))
+    }
 
+    /// Queries a running workflow with arguments already encoded, and returns
+    /// the answer as it was encoded.
+    pub async fn query_workflow_raw(
+        &self,
+        workflow_id: impl Into<String>,
+        run_id: Option<String>,
+        query_name: impl Into<String>,
+        args_bytes: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let workflow_id: String = workflow_id.into();
         let request = QueryWorkflowRequest {
             workflow_id: workflow_id.clone(),
@@ -679,10 +705,7 @@ impl WorkflowClient {
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
-        let result_bytes = response.into_inner().result;
-
-        serde_json::from_slice(&result_bytes)
-            .map_err(|e| Error::deserialization(format!("Failed to deserialize result: {}", e)))
+        Ok(response.into_inner().result)
     }
 
     /// Sends an update to a running workflow and waits for its result.
@@ -710,7 +733,28 @@ impl WorkflowClient {
     ) -> Result<R> {
         let args_bytes = serde_json::to_vec(&args)
             .map_err(|e| Error::serialization(format!("Failed to serialize args: {}", e)))?;
+        let result_bytes = self
+            .update_workflow_raw(workflow_id, run_id, update_name, args_bytes)
+            .await?;
+        serde_json::from_slice(&result_bytes).map_err(|e| {
+            Error::deserialization(format!("Failed to deserialize update result: {}", e))
+        })
+    }
 
+    /// Sends an update with arguments already encoded to a running workflow,
+    /// and returns its result as it was encoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error carrying the handler's message if the
+    /// workflow rejects the update.
+    pub async fn update_workflow_raw(
+        &self,
+        workflow_id: impl Into<String>,
+        run_id: Option<String>,
+        update_name: impl Into<String>,
+        args_bytes: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let workflow_id: String = workflow_id.into();
         let request = UpdateWorkflowRequest {
             workflow_id: workflow_id.clone(),
@@ -731,11 +775,7 @@ impl WorkflowClient {
 
         let inner = response.into_inner();
         match inner.outcome {
-            Some(update_workflow_response::Outcome::Result(result_bytes)) => {
-                serde_json::from_slice(&result_bytes).map_err(|e| {
-                    Error::deserialization(format!("Failed to deserialize update result: {}", e))
-                })
-            }
+            Some(update_workflow_response::Outcome::Result(result_bytes)) => Ok(result_bytes),
             Some(update_workflow_response::Outcome::Failure(failure)) => Err(Error::internal(
                 format!("Update rejected: {}", failure.message),
             )),

@@ -10,9 +10,11 @@
 pub mod actor;
 pub mod connection;
 pub mod namespace;
+pub mod protocol;
 pub mod workflow;
 
 pub use actor::ActorClient;
 pub use connection::{ConnectOptions, Connection};
 pub use namespace::NamespaceClient;
+pub use protocol::ProtocolClient;
 pub use workflow::{CancelWorkflowOpts, StartWorkflowOpts, WorkflowClient, WorkflowHandle};
