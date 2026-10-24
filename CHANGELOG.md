@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.22.0](https://github.com/orcher-io/sdk-core/compare/v0.21.0...v0.22.0) (2026-10-24)
+
+
+### Features
+
+* report step-id schemes and assign the kernel's ids to runs bound to it ([#138](https://github.com/orcher-io/sdk-core/issues/138)) ([2096c74](https://github.com/orcher-io/sdk-core/commit/2096c74727fb1a5074ab167f624a03a9cfd1d4a1))
+
+
+### Chores
+
+* release 0.22.0 ([37fc290](https://github.com/orcher-io/sdk-core/commit/37fc290e8a045aed7ad4ee7b9adacb29a72c6965))
+
 ## [0.21.0](https://github.com/orcher-io/sdk-core/compare/v0.20.1...v0.21.0) (2026-10-24)
 
 
