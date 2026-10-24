@@ -36,6 +36,7 @@ ALLOWED = {
     "src/worker/host/tasks.rs": "host protocol messages (Phase B)",
     "src/worker/host/actors.rs": "host protocol messages, actor service calls (Phase B)",
     "src/worker/host/workflows.rs": "kernel protocol messages (Phase B)",
+    "src/client/protocol.rs": "client protocol messages (Phase B)",
     # Calls to the engine, built where they are made.
     "src/client/actor.rs": "actor service calls",
     "src/client/namespace.rs": "namespace service calls",

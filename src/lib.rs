@@ -104,7 +104,7 @@
 /// The engine's own protocol (`orcher.v1`) is not here: it is what this crate
 /// speaks to the engine on a language SDK's behalf.
 pub mod proto {
-    pub use orcher_proto::{host, kernel, prost, prost_types};
+    pub use orcher_proto::{client, host, kernel, prost, prost_types};
 }
 
 pub mod client;
@@ -129,8 +129,8 @@ pub use worker::host::{
 // The connection to the engine, and the clients for workflows, namespaces
 // and actors that share it.
 pub use client::{
-    ActorClient, ConnectOptions, Connection, NamespaceClient, StartWorkflowOpts, WorkflowClient,
-    WorkflowHandle,
+    ActorClient, ConnectOptions, Connection, NamespaceClient, ProtocolClient, StartWorkflowOpts,
+    WorkflowClient, WorkflowHandle,
 };
 pub use transport::TlsConfig;
 

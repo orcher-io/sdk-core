@@ -7,6 +7,7 @@
 //! check-wire-boundary.sh` keeps generated types from spreading elsewhere.
 
 pub(crate) mod client;
+pub(crate) mod client_protocol;
 pub(crate) mod engine;
 pub(crate) mod host;
 pub(crate) mod status;
