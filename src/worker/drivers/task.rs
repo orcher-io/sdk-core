@@ -436,6 +436,8 @@ impl TaskDriver {
                 organization_id: config.organization_id.clone(),
                 api_key: config.api_key.clone(),
                 version_id: config.version_id.clone(),
+                // Task polls carry no runs to bind.
+                supported_step_ids: Vec::new(),
                 auto_heartbeat: config.auto_heartbeat,
                 tls_config: config.tls_config.clone(),
                 connect_timeout: config.connect_timeout,
@@ -1022,6 +1024,8 @@ async fn session_poller(
         organization_id: config.organization_id.clone(),
         api_key: config.api_key.clone(),
         version_id: config.version_id.clone(),
+        // Task polls carry no runs to bind.
+        supported_step_ids: Vec::new(),
         auto_heartbeat: config.auto_heartbeat,
         tls_config: config.tls_config.clone(),
         connect_timeout: config.connect_timeout,

@@ -109,6 +109,10 @@ pub struct WorkflowDriverConfig {
     /// The engine reads it on the activation it answers, so it must match
     /// what the language SDK really does with every activation it is given.
     pub protocol_version: u32,
+    /// Every step-id scheme the language SDK can replay, reported on every
+    /// poll; see [`HostConfig::supported_step_ids`](crate::HostConfig::supported_step_ids).
+    /// Empty (the default) reports none.
+    pub supported_step_ids: Vec<crate::types::StepIdScheme>,
     /// Where this driver's calls to the engine are recorded: the worker's
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
@@ -137,6 +141,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             non_determinism_retry,
             non_determinism_retry_max,
             protocol_version,
+            supported_step_ids,
             wire: _,
         } = self;
         f.debug_struct("WorkflowDriverConfig")
@@ -157,6 +162,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             .field("non_determinism_retry", non_determinism_retry)
             .field("non_determinism_retry_max", non_determinism_retry_max)
             .field("protocol_version", protocol_version)
+            .field("supported_step_ids", supported_step_ids)
             .finish()
     }
 }
@@ -181,6 +187,7 @@ impl Default for WorkflowDriverConfig {
             non_determinism_retry: Duration::from_secs(2),
             non_determinism_retry_max: Duration::from_secs(60),
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
+            supported_step_ids: Vec::new(),
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -359,6 +366,7 @@ impl WorkflowDriver {
                 organization_id: config.organization_id.clone(),
                 api_key: config.api_key.clone(),
                 version_id: config.version_id.clone(),
+                supported_step_ids: config.supported_step_ids.clone(),
                 auto_heartbeat: false,
                 tls_config: config.tls_config.clone(),
                 connect_timeout: config.connect_timeout,
@@ -1157,7 +1165,10 @@ mod tests {
                 run_id: "run-1".into(),
                 task_token: b"act-1".to_vec(),
                 stream_entry_id: None,
-                result: crate::kernel::execution_result("run-1", answer),
+                result: crate::kernel::execution_result(
+                    &crate::kernel::RunBinding::sdk_ids("run-1"),
+                    answer,
+                ),
             });
             match report {
                 Report::Fail {

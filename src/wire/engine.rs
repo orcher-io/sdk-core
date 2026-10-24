@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use crate::types::WorkflowExecution;
+use crate::types::{StepIdScheme, WorkflowExecution};
 use crate::worker::{TaskExecutionTask, WorkflowExecutionTask};
 
 use crate::error::{Error, Result};
@@ -385,6 +385,31 @@ pub(crate) fn retry_policy(policy: &WorkflowRetryPolicy) -> proto::RetryPolicy {
     }
 }
 
+/// A step-id scheme as the engine and the kernel number it.
+impl From<StepIdScheme> for i32 {
+    fn from(scheme: StepIdScheme) -> Self {
+        (match scheme {
+            StepIdScheme::Kernel => proto::StepIdScheme::Kernel,
+            StepIdScheme::RustV0 => proto::StepIdScheme::RustV0,
+            StepIdScheme::PythonV0 => proto::StepIdScheme::PythonV0,
+            StepIdScheme::TypescriptV0 => proto::StepIdScheme::TypescriptV0,
+        }) as i32
+    }
+}
+
+/// The scheme the engine numbers `number`; `None` for none bound. A number no
+/// scheme has cannot have been bound: the engine binds only schemes the worker
+/// reported.
+pub(crate) fn step_id_scheme(number: i32) -> Option<StepIdScheme> {
+    match proto::StepIdScheme::try_from(number).ok()? {
+        proto::StepIdScheme::Unspecified => None,
+        proto::StepIdScheme::Kernel => Some(StepIdScheme::Kernel),
+        proto::StepIdScheme::RustV0 => Some(StepIdScheme::RustV0),
+        proto::StepIdScheme::PythonV0 => Some(StepIdScheme::PythonV0),
+        proto::StepIdScheme::TypescriptV0 => Some(StepIdScheme::TypescriptV0),
+    }
+}
+
 /// The work an activation the engine sent asks for. This is what a poll
 /// hands the driver, and what a recorded activation (see
 /// [`crate::worker::record`]) is replayed as.
@@ -422,6 +447,8 @@ impl From<proto::PollWorkflowExecutionResponse> for WorkflowExecutionTask {
             // Pending queries and updates from the server.
             queries: poll_response.queries,
             updates: poll_response.updates,
+            step_ids: step_id_scheme(poll_response.step_ids),
+            history_lineage: poll_response.history_lineage,
         }
     }
 }

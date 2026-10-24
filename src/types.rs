@@ -221,6 +221,25 @@ pub enum WorkflowIdReusePolicy {
     TerminateIfRunning,
 }
 
+/// A rule a run's step ids are made by: the key that matches each durable
+/// call to its recorded outcome (`docs/kernel-protocol-v1.md` §8.3).
+///
+/// The engine binds a run to one at its first activation, from the schemes
+/// the worker reports, and hands the run only to workers reporting it after.
+/// Schemes are frozen: a different rule is a new scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum StepIdScheme {
+    /// The kernel's: the kernel assigns every id, the same in every SDK.
+    Kernel,
+    /// The Rust SDK's ids from before the kernel assigned them.
+    RustV0,
+    /// The Python SDK's ids from before the kernel assigned them.
+    PythonV0,
+    /// The TypeScript SDK's ids from before the kernel assigned them.
+    TypescriptV0,
+}
+
 /// A namespace, as the engine reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

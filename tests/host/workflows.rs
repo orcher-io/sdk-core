@@ -7,7 +7,7 @@ use crate::common::{activation, Engine};
 use orcher_proto::orcher::v1::command::Attributes;
 use orcher_sdk_core::proto::kernel::v1::{
     command, resolution, run_activation_result, Command, Commands, Failure, ProtocolError,
-    RunActivationResult, RunTask,
+    RunActivationResult, RunTask, StartChild, StepIdScheme,
 };
 use orcher_sdk_core::{Host, HostConfig, Registrations};
 
@@ -289,5 +289,101 @@ async fn an_answer_to_no_held_activation_is_refused() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("no activation"), "{error}");
+    host.shutdown().await;
+}
+
+/// A worker that reports the kernel's step-id scheme says so on every poll;
+/// a run the engine bound to it starts with the scheme, its lineage and the
+/// seed derived from it, and the kernel names its steps: a task by its call
+/// sequence, a child started without a workflow id from the lineage.
+#[tokio::test]
+async fn a_run_under_the_kernel_scheme_gets_its_ids_from_the_kernel() {
+    let engine = Engine::default();
+    let mut fresh = activation("act-1");
+    fresh.journal.truncate(1);
+    fresh.step_ids = StepIdScheme::Kernel as i32;
+    fresh.history_lineage = "lineage-1".into();
+    engine.script().activations.push_back(fresh);
+    let addr = engine.serve().await;
+    let host = Host::start(
+        HostConfig::new(format!("http://{addr}"), "orders")
+            .with_shutdown_grace(Duration::from_millis(300))
+            .with_step_ids([
+                orcher_sdk_core::StepIdScheme::Kernel,
+                orcher_sdk_core::StepIdScheme::RustV0,
+            ]),
+        Registrations::new(["checkout"], [] as [&str; 0], [] as [&str; 0]),
+    )
+    .await
+    .unwrap();
+
+    let run = host.next_activation().await.expect("an activation");
+    assert_eq!(
+        engine.script().polled_step_ids[0],
+        [StepIdScheme::Kernel as i32, StepIdScheme::RustV0 as i32]
+    );
+    let Some(resolution::What::Started(started)) = &run.resolutions[0].what else {
+        panic!("the run does not start first: {:?}", run.resolutions);
+    };
+    assert_eq!(started.step_ids, StepIdScheme::Kernel as i32);
+    assert_eq!(started.history_lineage, "lineage-1");
+    assert_eq!(
+        started.random_seed,
+        orcher_sdk_core::kernel::random::seed_for_lineage("lineage-1")
+    );
+
+    host.complete_activation(RunActivationResult {
+        activation_id: run.activation_id,
+        outcome: Some(run_activation_result::Outcome::Commands(Commands {
+            commands: vec![
+                call(0, false, "", "charge"),
+                Command {
+                    seq: 1,
+                    what: Some(command::What::StartChild(StartChild {
+                        workflow_type: "ship".into(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    eventually("the completion", || {
+        !engine.script().workflow_completions.is_empty()
+    })
+    .await;
+    let completion = engine.script().workflow_completions[0].clone();
+    let Some(Attributes::ScheduleTask(task)) = &completion.commands[0].attributes else {
+        panic!("{:?}", completion.commands);
+    };
+    assert_eq!(task.task_id, "task-0");
+    let Some(Attributes::StartChildWorkflow(child)) = &completion.commands[1].attributes else {
+        panic!("{:?}", completion.commands);
+    };
+    assert_eq!(child.workflow_id, "lineage-1-child-1");
+    host.shutdown().await;
+}
+
+/// A worker that reports no scheme reports none, and a run the engine bound
+/// to none starts with no seed, its SDK supplying its ids as before.
+#[tokio::test]
+async fn a_worker_reporting_no_scheme_runs_as_before() {
+    let engine = Engine::default();
+    engine.script().activations.push_back(activation("act-1"));
+    let host = workflow_worker(&engine).await;
+
+    let run = host.next_activation().await.expect("an activation");
+    assert!(engine.script().polled_step_ids[0].is_empty());
+    let Some(resolution::What::Started(started)) = &run.resolutions[0].what else {
+        panic!("the run does not start first: {:?}", run.resolutions);
+    };
+    assert_eq!(started.step_ids, StepIdScheme::Unspecified as i32);
+    assert!(started.random_seed.is_empty());
+    assert!(started.history_lineage.is_empty());
     host.shutdown().await;
 }

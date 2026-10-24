@@ -23,12 +23,16 @@
 //! **Step ids.** A run bound to a legacy step-id scheme keeps the ids its SDK
 //! supplies, in the command's own fields (a task's id, a timer's id, a child's
 //! workflow id) or in `Command.step_id`; the conversion is one to one, so the
-//! engine receives exactly what the SDK sent before the kernel protocol. Ids
-//! under the kernel's own scheme come with the engine's binding of a scheme
-//! per run.
+//! engine receives exactly what the SDK sent before the kernel protocol. A
+//! run bound to the kernel's own scheme gets its ids from the kernel
+//! ([`super::step_ids`]): every step's from its kind and call sequence, and a
+//! child started without a workflow id one from the run's history lineage. An
+//! SDK that supplies an id there must supply the kernel's; any other is
+//! refused rather than sent, since history written under it would not replay.
 
 use std::time::Duration;
 
+use super::RunBinding;
 use crate::error::{Error, Result};
 use crate::payload::Payload;
 use crate::proto::kernel::v1::{
@@ -61,15 +65,28 @@ pub const DEFAULT_RETRY_MULTIPLIER: f64 = 2.0;
 /// The step type a recorded value is journaled under (`StepType::Closure`).
 const CLOSURE_STEP: i32 = 2;
 
-/// Turns the language SDK's answer to an activation of run `run_id` into the
-/// result the workflow driver checks and sends.
+/// Turns the language SDK's answer to an activation of the run `run` names
+/// into the result the workflow driver checks and sends.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Protocol`] when the SDK reported it could not process the
 /// activation, or answered with something the kernel cannot carry (no
-/// outcome, a command of no kind, a command the engine does not take yet).
-pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<ExecutionResult> {
+/// outcome, a command of no kind, a command the engine does not take yet, a
+/// step id other than the kernel's for a run under the kernel's scheme).
+pub(crate) fn execution_result(
+    run: &RunBinding,
+    mut answer: RunActivationResult,
+) -> Result<ExecutionResult> {
+    if run.kernel_assigns() {
+        if let Some(run_activation_result::Outcome::Commands(commands)) = &mut answer.outcome {
+            assign_step_ids(&mut commands.commands, &run.history_lineage)?;
+        }
+        if let Some(calls) = &mut answer.calls_before_failure {
+            assign_step_ids(&mut calls.commands, &run.history_lineage)?;
+        }
+    }
+    let run_id = run.run_id.as_str();
     let mut result =
         match answer.outcome {
             Some(run_activation_result::Outcome::Commands(commands)) => {
@@ -155,6 +172,45 @@ pub fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<Exe
         })
         .collect();
     Ok(result)
+}
+
+/// Gives every call the ids the kernel's scheme assigns it, for a run whose
+/// history lineage is `lineage`: each step's from its kind and call sequence,
+/// and a child started without a workflow id one from the lineage.
+fn assign_step_ids(calls: &mut [KernelCommand], lineage: &str) -> Result<()> {
+    for call in calls {
+        let seq = call.seq;
+        let Some(what) = call.what.as_mut() else {
+            continue;
+        };
+        if let command::What::StartChild(child) = what {
+            if child.workflow_id.is_empty() {
+                // Every run's children would share the ids made from no
+                // lineage. The engine binds one with the scheme, so this is
+                // an engine that did not.
+                if lineage.is_empty() {
+                    return Err(Error::Protocol(format!(
+                        "call {seq} starts a child without a workflow id, but the run has no \
+                         history lineage to derive one from"
+                    )));
+                }
+                child.workflow_id = super::step_ids::default_child_workflow_id(lineage, seq);
+            }
+        }
+        let Some(id) = super::step_ids::step_id(what, seq) else {
+            continue;
+        };
+        if !call.step_id.is_empty() && call.step_id != id {
+            return Err(Error::Protocol(format!(
+                "call {seq} carries step id {:?}, but the run is under the kernel's step-id \
+                 scheme, which assigns it {id:?}: an SDK supplies ids only for a run under its \
+                 own scheme",
+                call.step_id
+            )));
+        }
+        call.step_id = id;
+    }
+    Ok(())
 }
 
 /// Every step the calls reached, in issue order. A call to a step is a step
@@ -381,6 +437,11 @@ mod tests {
         outcome, AwaitEvent, CancelTimer, Commands, CompleteRun, Failure, ProtocolError,
         QueryAnswer, RecordValue, RunTask, StartChild, StartTimer, UpdateAnswer, UpsertLabels,
     };
+
+    /// The answer for run `run_id`, whose SDK supplies its step ids.
+    fn execution_result(run_id: &str, answer: RunActivationResult) -> Result<ExecutionResult> {
+        super::execution_result(&RunBinding::sdk_ids(run_id), answer)
+    }
 
     fn call(seq: u64, satisfied: bool, step_id: &str, what: command::What) -> KernelCommand {
         KernelCommand {
@@ -1093,5 +1154,115 @@ mod tests {
         );
         let violations = crate::state::replayer::Replayer::check_activation(&journal, &result);
         assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    fn under_the_kernel(answer: RunActivationResult) -> Result<ExecutionResult> {
+        super::execution_result(
+            &RunBinding {
+                run_id: "run-1".into(),
+                step_ids: Some(crate::types::StepIdScheme::Kernel),
+                history_lineage: "lineage-1".into(),
+            },
+            answer,
+        )
+    }
+
+    /// Under the kernel's scheme every step is named by its kind and call
+    /// sequence, the names the determinism check compares too, and a child
+    /// started without a workflow id is named from the lineage.
+    #[test]
+    fn the_kernel_names_the_steps_of_a_run_under_its_scheme() {
+        let result = under_the_kernel(answered(vec![
+            call(0, true, "", command::What::RunTask(RunTask::default())),
+            call(
+                1,
+                false,
+                "",
+                command::What::StartTimer(StartTimer::default()),
+            ),
+            call(
+                2,
+                false,
+                "",
+                command::What::StartChild(StartChild::default()),
+            ),
+            call(
+                3,
+                false,
+                "",
+                command::What::StartChild(StartChild {
+                    workflow_id: "chosen".into(),
+                    ..Default::default()
+                }),
+            ),
+            call(
+                4,
+                false,
+                "",
+                command::What::RecordValue(RecordValue::default()),
+            ),
+            call(
+                5,
+                false,
+                "",
+                command::What::AwaitEvent(AwaitEvent::default()),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            result.reached_steps,
+            Some(vec![
+                "task-0".to_string(),
+                "timer-1".into(),
+                "lineage-1-child-2".into(),
+                "chosen".into(),
+            ])
+        );
+        let ids: Vec<String> = result
+            .commands
+            .iter()
+            .map(|command| match command {
+                Command::StartTimer(timer) => timer.timer_id.clone(),
+                Command::StartChildWorkflow(child) => child.workflow_id.clone(),
+                Command::RecordStepResult(record) => record.step_name.clone(),
+                Command::WaitForEvent(wait) => wait.step_id.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "timer-1",
+                "lineage-1-child-2",
+                "chosen",
+                "value-4",
+                "await-5"
+            ]
+        );
+    }
+
+    /// An SDK may send the kernel's id itself, but not another: history
+    /// written under it would never replay.
+    #[test]
+    fn a_run_under_the_kernel_scheme_refuses_an_id_of_the_sdks_own() {
+        let same = under_the_kernel(answered(vec![call(
+            0,
+            false,
+            "task-0",
+            command::What::RunTask(RunTask::default()),
+        )]));
+        assert!(same.is_ok(), "{same:?}");
+
+        let other = under_the_kernel(answered(vec![call(
+            0,
+            false,
+            "charge_0",
+            command::What::RunTask(RunTask::default()),
+        )]));
+        assert!(
+            matches!(&other, Err(Error::Protocol(message)) if message.contains("task-0")),
+            "{other:?}"
+        );
     }
 }

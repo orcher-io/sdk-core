@@ -22,7 +22,7 @@ pub mod encoded;
 pub mod random;
 pub mod step_ids;
 
-pub(crate) use activation::resolve;
+pub(crate) use activation::{resolve, RunBinding};
 pub(crate) use completion::execution_result;
 
 use crate::protocol::ExecutionResult;
