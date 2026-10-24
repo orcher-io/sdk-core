@@ -28,14 +28,47 @@
 use crate::proto::kernel::v1::command;
 
 /// The kind of step a durable call makes, as its id names it.
-fn kind_of(call: &command::What) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StepKind {
+    /// A task run: `task-{seq}`.
+    Task,
+    /// A timer started: `timer-{seq}`.
+    Timer,
+    /// A child workflow started: `child-{seq}`. The child's workflow id is
+    /// separate; see [`default_child_workflow_id`].
+    Child,
+    /// An event sent to another run: `send-{seq}`.
+    SendEvent,
+    /// A recorded value: `value-{seq}`.
+    Value,
+    /// An event waited for: `await-{seq}`.
+    AwaitEvent,
+}
+
+impl StepKind {
+    /// The kind's name in a step id.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Timer => "timer",
+            Self::Child => "child",
+            Self::SendEvent => "send",
+            Self::Value => "value",
+            Self::AwaitEvent => "await",
+        }
+    }
+}
+
+/// The kind of step `call` makes, or `None` for a command that is not a step.
+fn kind_of(call: &command::What) -> Option<StepKind> {
     Some(match call {
-        command::What::RunTask(_) => "task",
-        command::What::StartTimer(_) => "timer",
-        command::What::StartChild(_) => "child",
-        command::What::SendEvent(_) => "send",
-        command::What::RecordValue(_) => "value",
-        command::What::AwaitEvent(_) => "await",
+        command::What::RunTask(_) => StepKind::Task,
+        command::What::StartTimer(_) => StepKind::Timer,
+        command::What::StartChild(_) => StepKind::Child,
+        command::What::SendEvent(_) => StepKind::SendEvent,
+        command::What::RecordValue(_) => StepKind::Value,
+        command::What::AwaitEvent(_) => StepKind::AwaitEvent,
         command::What::CancelTimer(_)
         | command::What::CancelChild(_)
         | command::What::CompleteRun(_)
@@ -46,10 +79,17 @@ fn kind_of(call: &command::What) -> Option<&'static str> {
     })
 }
 
+/// The step id of a step of kind `kind` made by the durable call issued
+/// `seq`-th: what a language SDK matches the call's outcome by, in a run
+/// under this scheme.
+pub fn id_for(kind: StepKind, seq: u64) -> String {
+    format!("{}-{seq}", kind.name())
+}
+
 /// The step id of the durable call issued `seq`-th, or `None` for a command
 /// that is not a step.
 pub fn step_id(call: &command::What, seq: u64) -> Option<String> {
-    kind_of(call).map(|kind| format!("{kind}-{seq}"))
+    kind_of(call).map(|kind| id_for(kind, seq))
 }
 
 /// The workflow id of a child started without one, by the call issued
@@ -115,6 +155,18 @@ mod tests {
         ];
         for (call, seq, expected) in calls {
             assert_eq!(step_id(&call, seq).as_deref(), expected, "{call:?}");
+        }
+        // And the same ids by kind, as a language SDK asks for them.
+        let by_kind = [
+            (StepKind::Task, "task-0"),
+            (StepKind::Timer, "timer-0"),
+            (StepKind::Child, "child-0"),
+            (StepKind::SendEvent, "send-0"),
+            (StepKind::Value, "value-0"),
+            (StepKind::AwaitEvent, "await-0"),
+        ];
+        for (kind, expected) in by_kind {
+            assert_eq!(id_for(kind, 0), expected);
         }
         assert_eq!(
             default_child_workflow_id("3f2a9c1e-7b4d-4e8a-9c2f-1d6b5a4e3c21", 2),
