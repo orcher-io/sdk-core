@@ -24,8 +24,50 @@ use crate::proto::kernel::v1::{
     StepSettled, TimerElapsed, UpdateArrived,
 };
 use crate::proto::prost_types::Timestamp;
+use crate::types::StepIdScheme;
 use crate::worker::poll::polling::WorkflowExecutionTask;
 use orcher_proto::orcher::v1::{journal_entry::Attributes, EntryType, JournalEntry};
+
+/// What the engine bound a run to at its first activation: how its step ids
+/// are made, and the history lineage its default child ids and random seed
+/// derive from (`docs/kernel-protocol-v1.md` §8.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunBinding {
+    /// The run.
+    pub run_id: String,
+    /// The scheme its step ids are made under. `None`, bound to none: the
+    /// SDK supplies them, as under its own scheme.
+    pub step_ids: Option<StepIdScheme>,
+    /// Its history lineage, as the engine bound it. Empty from an engine
+    /// that binds none, which binds no scheme either, so the run's SDK
+    /// supplies its ids and the kernel derives nothing from it.
+    pub history_lineage: String,
+}
+
+impl RunBinding {
+    /// The binding an activation of `task` carries.
+    pub(crate) fn of(task: &WorkflowExecutionTask) -> Self {
+        Self {
+            run_id: task.execution.run_id.clone(),
+            step_ids: task.step_ids,
+            history_lineage: task.history_lineage.clone(),
+        }
+    }
+
+    /// A run whose SDK supplies its step ids.
+    pub(crate) fn sdk_ids(run_id: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            step_ids: None,
+            history_lineage: String::new(),
+        }
+    }
+
+    /// Whether the kernel assigns the run's step ids.
+    pub(crate) fn kernel_assigns(&self) -> bool {
+        self.step_ids == Some(StepIdScheme::Kernel)
+    }
+}
 
 /// Resolves the history an activation carries into the [`RunActivation`] the
 /// language SDK runs the workflow against.
@@ -69,6 +111,7 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
         }
     });
 
+    let binding = RunBinding::of(task);
     let started = Resolution {
         step_id: String::new(),
         at: started_at,
@@ -79,6 +122,16 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
             )],
             attempt: u32::try_from(task.attempt).unwrap_or(0),
             started_at,
+            // Under the kernel's scheme every SDK draws from the one
+            // generator, seeded from the lineage; a run under an SDK's own
+            // scheme keeps that SDK's generator, and gets no seed.
+            random_seed: if binding.kernel_assigns() {
+                super::random::seed_for_lineage(&binding.history_lineage).to_vec()
+            } else {
+                Vec::new()
+            },
+            step_ids: binding.step_ids.map_or(0, i32::from),
+            history_lineage: binding.history_lineage,
             ..Default::default()
         })),
         ..Default::default()
@@ -397,6 +450,8 @@ mod tests {
             stream_entry_id: None,
             queries: vec![],
             updates: vec![],
+            step_ids: None,
+            history_lineage: String::new(),
         }
     }
 

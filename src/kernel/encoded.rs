@@ -43,7 +43,10 @@ pub fn resolve_recorded(recorded: &[u8], namespace: &str) -> Result<Vec<u8>> {
 /// worker would refuse to send.
 pub fn check_recorded(recorded: &[u8], answer: &[u8]) -> Result<Vec<DeterminismViolation>> {
     let task = WorkflowExecutionTask::from(wire::recorded_activation(recorded)?);
-    let result = super::execution_result(&task.execution.run_id, wire::activation_result(answer)?)?;
+    let result = super::execution_result(
+        &super::RunBinding::of(&task),
+        wire::activation_result(answer)?,
+    )?;
     crate::protocol::validate_execution_result(&result)?;
     Ok(super::check_activation(&task, &result))
 }
@@ -57,5 +60,8 @@ pub fn check_recorded(recorded: &[u8], answer: &[u8]) -> Result<Vec<DeterminismV
 /// `RunActivationResult`, and an answer the kernel cannot carry: one with
 /// no outcome, or a command it cannot express.
 pub fn execution_result(run_id: &str, answer: &[u8]) -> Result<ExecutionResult> {
-    super::execution_result(run_id, wire::activation_result(answer)?)
+    super::execution_result(
+        &super::RunBinding::sdk_ids(run_id),
+        wire::activation_result(answer)?,
+    )
 }

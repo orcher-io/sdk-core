@@ -103,6 +103,12 @@ pub struct PollerConfig {
     /// nothing is declared, which is the default and changes no behavior.
     pub version_id: Option<String>,
 
+    /// Every step-id scheme the language SDK can replay, sent on every
+    /// workflow poll: the engine hands this worker only runs bound to one of
+    /// them, and binds the runs it activates first. Empty reports none, and
+    /// the worker gets only runs no scheme is bound to.
+    pub supported_step_ids: Vec<crate::types::StepIdScheme>,
+
     /// Whether to tell the engine that this poller's tasks are heartbeated automatically.
     ///
     /// When set, each task poll tells the engine that the tasks it brings back
@@ -138,6 +144,7 @@ impl std::fmt::Debug for PollerConfig {
             tls_config,
             connect_timeout,
             version_id,
+            supported_step_ids,
             auto_heartbeat,
             max_message_bytes,
             wire: _,
@@ -153,6 +160,7 @@ impl std::fmt::Debug for PollerConfig {
             .field("tls_config", tls_config)
             .field("connect_timeout", connect_timeout)
             .field("version_id", version_id)
+            .field("supported_step_ids", supported_step_ids)
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
             .finish()
@@ -174,6 +182,7 @@ impl Default for PollerConfig {
             organization_id: None,
             api_key: None,
             version_id: None,
+            supported_step_ids: Vec::new(),
             tls_config: None,
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             auto_heartbeat: false,
@@ -230,6 +239,15 @@ pub struct WorkflowExecutionTask {
 
     /// Pending updates to process during this execution step.
     pub updates: Vec<UpdateRequest>,
+
+    /// The step-id scheme the engine bound the run to. `None` for a poll
+    /// that reported no schemes, and from an engine that binds none.
+    pub step_ids: Option<crate::types::StepIdScheme>,
+
+    /// The run's history lineage, bound with the scheme: what its default
+    /// child workflow ids and random seed derive from. Empty from an engine
+    /// that binds none.
+    pub history_lineage: String,
 }
 
 /// A task execution polled from the server, waiting to be processed.
@@ -383,6 +401,12 @@ impl WorkflowExecutionPoller {
             // Which process this is, so a shutdown it announces stops its own
             // polls and not those of a later process reusing its identity.
             worker_instance_id: crate::worker::lifecycle::worker_instance_id().to_string(),
+            // What the run's step ids may be; the engine routes and binds by it.
+            supported_step_ids: config
+                .supported_step_ids
+                .iter()
+                .map(|&scheme| i32::from(scheme))
+                .collect(),
             ..Default::default()
         };
 
@@ -2067,6 +2091,7 @@ mod tests {
             identity: "test-identity".to_string(),
             organization_id: Some("org-123".to_string()),
             version_id: None,
+            supported_step_ids: vec![],
             api_key: None,
             tls_config: None,
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,

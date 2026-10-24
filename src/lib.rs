@@ -143,7 +143,7 @@ pub use payload::{Payload, Payloads};
 
 // Shared vocabulary.
 pub use types::{
-    ListWorkflowsOptions, ListWorkflowsSortOrder, Namespace, SearchWorkflowsOptions,
+    ListWorkflowsOptions, ListWorkflowsSortOrder, Namespace, SearchWorkflowsOptions, StepIdScheme,
     WorkflowExecution, WorkflowExecutionDescription, WorkflowExecutionInfo, WorkflowIdReusePolicy,
     WorkflowListPage, WorkflowRetryPolicy, WorkflowStatus,
 };

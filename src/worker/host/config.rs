@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::client::ConnectOptions;
 use crate::transport::TlsConfig;
+use crate::types::StepIdScheme;
 use crate::worker::drivers::actor::ActorDriverConfig;
 use crate::worker::drivers::registration::WorkerRegistrationConfig;
 use crate::worker::drivers::task::TaskDriverConfig;
@@ -91,6 +92,14 @@ pub struct HostConfig {
     /// version says. Default:
     /// [`CANCEL_REQUEST`](crate::worker_protocol::CANCEL_REQUEST).
     pub protocol_version: u32,
+    /// Every step-id scheme the language SDK can replay, reported on each
+    /// poll. The engine hands the worker only runs bound to one of them, and
+    /// binds a run it activates for the first time: to the kernel's scheme
+    /// when it is listed and the run is new, otherwise to the SDK's own.
+    /// Empty (the default) reports none, and the worker gets only runs no
+    /// scheme is bound to, as before schemes; see
+    /// `docs/kernel-protocol-v1.md` §8.3.
+    pub supported_step_ids: Vec<StepIdScheme>,
 }
 
 impl HostConfig {
@@ -116,6 +125,7 @@ impl HostConfig {
             sdk_name: String::new(),
             sdk_version: String::new(),
             protocol_version: crate::worker_protocol::CANCEL_REQUEST,
+            supported_step_ids: Vec::new(),
         }
     }
 
@@ -215,6 +225,14 @@ impl HostConfig {
         self
     }
 
+    /// Reports the step-id schemes `schemes` as the ones the language SDK
+    /// can replay: set by an SDK that replays every one of them, since the
+    /// engine binds runs to them for good.
+    pub fn with_step_ids(mut self, schemes: impl IntoIterator<Item = StepIdScheme>) -> Self {
+        self.supported_step_ids = schemes.into_iter().collect();
+        self
+    }
+
     /// The workflow driver's configuration.
     pub(crate) fn workflow_driver(&self) -> WorkflowDriverConfig {
         WorkflowDriverConfig {
@@ -232,6 +250,7 @@ impl HostConfig {
             connect_timeout: self.connection.connect_timeout,
             version_id: self.version_id.clone(),
             protocol_version: self.protocol_version,
+            supported_step_ids: self.supported_step_ids.clone(),
             max_message_bytes: self.connection.max_message_bytes,
             ..WorkflowDriverConfig::default()
         }

@@ -16,7 +16,7 @@ workspace = true
 # the suite measures.
 orcher-sdk-core = { path = ".." }
 # The proxy reads the engine's messages.
-orcher-proto = "0.13"
+orcher-proto = "0.14"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"

@@ -28,6 +28,8 @@ pub struct Script {
     pub polled_queues: Vec<String>,
     /// Workflow activations to hand out, one per poll.
     pub activations: VecDeque<PollWorkflowExecutionResponse>,
+    /// The step-id schemes each workflow poll reported.
+    pub polled_step_ids: Vec<Vec<i32>>,
     pub workflow_completions: Vec<CompleteWorkflowExecutionRequest>,
     pub workflow_failures: Vec<FailWorkflowExecutionRequest>,
     pub releases: Vec<ReleaseWorkflowExecutionRequest>,
@@ -169,9 +171,15 @@ impl ExecutionService for Engine {
     }
     async fn poll_workflow_execution(
         &self,
-        _: Request<PollWorkflowExecutionRequest>,
+        request: Request<PollWorkflowExecutionRequest>,
     ) -> Result<Response<PollWorkflowExecutionResponse>, Status> {
-        let next = self.script().activations.pop_front();
+        let next = {
+            let mut script = self.script();
+            script
+                .polled_step_ids
+                .push(request.into_inner().supported_step_ids);
+            script.activations.pop_front()
+        };
         match next {
             Some(activation) => Ok(Response::new(activation)),
             None => {

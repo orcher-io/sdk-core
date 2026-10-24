@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 /// An activation the language holds, and what its answer is sent with.
 struct Held {
     workflow_id: String,
-    run_id: String,
+    run: kernel::RunBinding,
     task_token: Vec<u8>,
     stream_entry_id: Option<String>,
 }
@@ -56,7 +56,7 @@ impl Workflows {
             activation.activation_id.clone(),
             Held {
                 workflow_id: work.task.execution.workflow_id.clone(),
-                run_id: work.task.execution.run_id.clone(),
+                run: kernel::RunBinding::of(&work.task),
                 task_token: work.task.task_token.clone(),
                 stream_entry_id: work.stream_entry_id.clone(),
             },
@@ -76,11 +76,11 @@ impl Workflows {
                     .to_string(),
             ));
         };
-        let result = kernel::execution_result(&held.run_id, answer);
+        let result = kernel::execution_result(&held.run, answer);
         self.results
             .send(WorkflowWorkResult {
                 workflow_id: held.workflow_id,
-                run_id: held.run_id,
+                run_id: held.run.run_id,
                 task_token: held.task_token,
                 stream_entry_id: held.stream_entry_id,
                 result,
@@ -109,7 +109,7 @@ impl Workflows {
                 .results
                 .send(WorkflowWorkResult {
                     workflow_id: held.workflow_id,
-                    run_id: held.run_id,
+                    run_id: held.run.run_id,
                     task_token: held.task_token,
                     stream_entry_id: held.stream_entry_id,
                     result: Err(Error::Protocol(
