@@ -24,6 +24,7 @@ with the core and host APIs it uses.
 bench/run.sh my-change                       # every scenario, engine :latest
 bench/run.sh my-change --only sequential-100,heartbeat-100
 bench/run.sh my-change --engine-version 0.5.5
+bench/run.sh my-change --engine-image orcher-local/engine:abc1234   # an unreleased engine build
 bench/run.sh my-change-shared --upstream shared   # see "#38" below
 bench/compare.sh bench/results/baseline-2026-10-18.json bench/results/my-change.json
 ```
@@ -34,6 +35,8 @@ shared with other work, run the `Benchmark` workflow
 `gh workflow run bench.yml -f label=my-change [-f only=a,b] [-f engine_version=0.5.5]`;
 the results are the run's artifact. The committed baseline was made this
 way; compare it only with runs made on the same kind of runner.
+
+To measure an engine change before it is released, build its image locally and pass it with `--engine-image`; it is used as it is, never pulled, and its version and revision labels are recorded like a release's.
 
 `run.sh` needs `docker`, `curl` and `cargo`. It starts Postgres 17 with
 `pg_stat_statements` and the engine image
