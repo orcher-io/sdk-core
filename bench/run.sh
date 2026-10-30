@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Runs the benchmark suite against an isolated engine and Postgres.
 #
-#   bench/run.sh LABEL [--engine-version V] [--only a,b] [--upstream mirror|shared]
+#   bench/run.sh LABEL [--engine-version V | --engine-image IMAGE] [--only a,b]
+#                      [--upstream mirror|shared]
 #
 # Starts Postgres 17 (with pg_stat_statements) and the engine image
 # ghcr.io/orcher-io/orcher:V (default: latest, the latest release) in Docker,
+# or IMAGE, an engine image already on this machine (an unreleased build), as is,
 # on a network of their own and on free localhost ports, so no existing
 # database or engine is touched. Builds the worker from this checkout, runs
 # every scenario (or those named with --only), writes
@@ -27,10 +29,12 @@ shift
 case "$LABEL" in -*) usage ;; esac
 
 ENGINE_VERSION=latest
+ENGINE_IMAGE=
 SUITE_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --engine-version) ENGINE_VERSION=$2; shift 2 ;;
+    --engine-image) ENGINE_IMAGE=$2; shift 2 ;;
     --only) SUITE_ARGS+=(--only "$2"); shift 2 ;;
     --upstream) SUITE_ARGS+=(--upstream "$2"); shift 2 ;;
     -h|--help) usage ;;
@@ -39,7 +43,7 @@ while [ $# -gt 0 ]; do
 done
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IMAGE=ghcr.io/orcher-io/orcher:$ENGINE_VERSION
+IMAGE=${ENGINE_IMAGE:-ghcr.io/orcher-io/orcher:$ENGINE_VERSION}
 PG_IMAGE=postgres:17-alpine
 RUN=orcher-bench-$(date +%s)-$$
 NET=$RUN
@@ -61,8 +65,15 @@ trap cleanup EXIT INT TERM
 
 port_of() { docker port "$1" "$2" | head -n1 | sed 's/.*://'; }
 
-echo "bench: pulling $IMAGE and $PG_IMAGE"
-docker pull -q "$IMAGE" >/dev/null
+if [ -n "$ENGINE_IMAGE" ]; then
+  # A local build, not a release: used as it is, never pulled.
+  docker image inspect "$IMAGE" >/dev/null 2>&1 \
+    || { echo "bench: no image $IMAGE on this machine" >&2; exit 2; }
+  echo "bench: using the local image $IMAGE; pulling $PG_IMAGE"
+else
+  echo "bench: pulling $IMAGE and $PG_IMAGE"
+  docker pull -q "$IMAGE" >/dev/null
+fi
 docker pull -q "$PG_IMAGE" >/dev/null
 
 docker network create "$NET" >/dev/null
@@ -90,8 +101,12 @@ PG_PORT=$(port_of "$PG" 5432/tcp)
 echo "bench: starting the engine"
 # Every database setting is given explicitly, so nothing falls back to a
 # default that could point at another database.
+# ORCHER_INSECURE: the ports are published on this machine's loopback only,
+# and an engine that refuses to serve without authentication on an address
+# other machines could reach needs to be told that is intended.
 docker run -d --name "$ENGINE" --network "$NET" \
   -p 127.0.0.1::50051 -p 127.0.0.1::8080 \
+  -e ORCHER_INSECURE=true \
   -e DATABASE_URL="postgresql://$DB_USER:$DB_PASSWORD@$PG:5432/$DB_NAME" \
   -e PGHOST="$PG" -e PGPORT=5432 -e PGUSER="$DB_USER" -e PGPASSWORD="$DB_PASSWORD" -e PGDATABASE="$DB_NAME" \
   -e ORCHER_PG_MAX_CONNECTIONS=20 -e ORCHER_PG_MIN_CONNECTIONS=2 \
