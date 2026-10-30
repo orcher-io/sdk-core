@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
-use crate::pg::{Pg, PgStats};
+use crate::pg::{Percentiles, Pg, PgStats};
 use crate::program::{self, Program, TaskSpec};
 use crate::proxy::{Proxy, ProxyStats, Upstream};
 use crate::worker::{Snapshot, WorkerSetup, LINE_PREFIX};
@@ -37,10 +37,9 @@ pub struct Scenario {
     pub runs: u64,
     pub program: Program,
     /// Events each run waits for. One is sent to it every `event_every_ms`
-    /// until it ends: an event that arrives before the run waits for it is
-    /// journaled but does not wake the run on engine 0.5.5
-    /// (orcher-io/orcher#376), so sending exactly as many can leave a run
-    /// waiting forever.
+    /// until it ends. Sending each exactly once also completes every run
+    /// (orcher-io/orcher#376 found no stall, on 0.5.5 or later); sending until
+    /// the end is kept so results stay comparable with earlier ones.
     pub events_per_run: u64,
     pub event_every_ms: u64,
     /// Tasks run on a second, task-only worker, which is the one measured;
@@ -48,6 +47,16 @@ pub struct Scenario {
     pub split_tasks: bool,
     pub task_concurrency: u32,
     pub deadline_secs: u64,
+    /// Sustained load instead of `runs` started together: this many runs in
+    /// flight for this long, each started as another ends.
+    pub sustain: Option<Sustain>,
+}
+
+/// Sustained load: `concurrency` runs in flight for `secs` seconds.
+#[derive(Debug, Clone, Copy)]
+pub struct Sustain {
+    pub concurrency: u64,
+    pub secs: u64,
 }
 
 impl Scenario {
@@ -63,7 +72,13 @@ impl Scenario {
             split_tasks: false,
             task_concurrency: 100,
             deadline_secs: 1200,
+            sustain: None,
         }
+    }
+
+    fn sustain(mut self, concurrency: u64, secs: u64) -> Self {
+        self.sustain = Some(Sustain { concurrency, secs });
+        self
     }
 
     fn runs(mut self, runs: u64) -> Self {
@@ -140,8 +155,9 @@ pub fn all() -> Vec<Scenario> {
         payload("payload-10k", 10 << 10),
         payload("payload-100k", 100 << 10),
         payload("payload-1m", 1 << 20),
-        // 1 s, not shorter: a timer shorter than the engine's delay in storing
-        // it fails the completion on engine 0.5.5 (orcher-io/orcher#375).
+        // 1 s, not shorter: before orcher-io/orcher#400, a timer shorter than
+        // the engine's delay in storing it failed the completion, which
+        // engines up to 0.5.5 still do.
         Scenario::new(
             "timers",
             "20 runs of 10 timers of 1 s in sequence",
@@ -202,6 +218,24 @@ pub fn all() -> Vec<Scenario> {
         },
         heartbeat("heartbeat-100", 100),
         heartbeat("heartbeat-1000", 1000),
+        Scenario::new(
+            "throughput-1",
+            "sustained load: 100 runs in flight for 60 s, each of one no-op task",
+            Program::Sequence {
+                n: 1,
+                task: noop(),
+            },
+        )
+        .sustain(100, 60),
+        Scenario::new(
+            "throughput-10",
+            "sustained load: 50 runs in flight for 60 s, each of 10 no-op tasks in sequence",
+            Program::Sequence {
+                n: 10,
+                task: noop(),
+            },
+        )
+        .sustain(50, 60),
     ]
 }
 
@@ -231,6 +265,23 @@ pub struct ScenarioResult {
     pub helper_rpc: Option<ProxyStats>,
     pub claimed_waiting: ClaimedWaiting,
     pub pg: PgStats,
+    /// Set for a sustained-load scenario.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput: Option<Throughput>,
+}
+
+/// What a sustained-load scenario achieved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Throughput {
+    /// The window runs were started in.
+    pub secs: f64,
+    pub concurrency: u64,
+    pub runs_per_s: f64,
+    pub tasks_per_s: f64,
+    /// From a run's start request to its result, as the client saw it.
+    pub end_to_end: Percentiles,
+    /// From a task being scheduled to being started, from the engine's rows.
+    pub schedule_to_start: Percentiles,
 }
 
 /// What the measured worker did and cost over one phase.
@@ -408,18 +459,63 @@ impl Bench {
         let input = serde_json::to_vec(program).map_err(|e| e.to_string())?;
         let mut runs = Vec::new();
         let events_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        for i in 0..scenario.runs {
-            let client = client.clone();
-            let input = input.clone();
-            let workflow_id = format!("{queue}-{i}");
-            let queue = queue.to_string();
-            let events = (scenario.events_per_run > 0)
-                .then(|| (scenario.event_every_ms, events_sent.clone()));
-            runs.push(tokio::spawn(async move {
-                run_one(client, workflow_id, queue, input, events, deadline).await
-            }));
+        let latencies = Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
+        let started_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        match scenario.sustain {
+            None => {
+                for i in 0..scenario.runs {
+                    let client = client.clone();
+                    let input = input.clone();
+                    let workflow_id = format!("{queue}-{i}");
+                    let queue = queue.to_string();
+                    let events = (scenario.events_per_run > 0)
+                        .then(|| (scenario.event_every_ms, events_sent.clone()));
+                    runs.push(tokio::spawn(async move {
+                        vec![run_one(client, workflow_id, queue, input, events, deadline).await]
+                    }));
+                }
+                started_count.store(scenario.runs, std::sync::atomic::Ordering::Relaxed);
+            }
+            // A closed loop per slot: each starts a run, waits for its end,
+            // and starts the next, until the window closes.
+            Some(sustain) => {
+                let window_ends = Instant::now() + Duration::from_secs(sustain.secs);
+                for slot in 0..sustain.concurrency {
+                    let client = client.clone();
+                    let input = input.clone();
+                    let queue = queue.to_string();
+                    let latencies = latencies.clone();
+                    let started_count = started_count.clone();
+                    runs.push(tokio::spawn(async move {
+                        let mut ends = Vec::new();
+                        let mut n = 0u64;
+                        while Instant::now() < window_ends {
+                            let workflow_id = format!("{queue}-{slot}-{n}");
+                            n += 1;
+                            started_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let began = Instant::now();
+                            let end = run_one(
+                                client.clone(),
+                                workflow_id,
+                                queue.clone(),
+                                input.clone(),
+                                None,
+                                deadline,
+                            )
+                            .await;
+                            if matches!(end, RunEnd::Completed) {
+                                latencies
+                                    .lock()
+                                    .expect("latencies")
+                                    .push(began.elapsed().as_secs_f64() * 1000.0);
+                            }
+                            ends.push(end);
+                        }
+                        ends
+                    }));
+                }
+            }
         }
-        result.runs_started = scenario.runs;
 
         let sampling = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let sampler = {
@@ -458,11 +554,19 @@ impl Bench {
 
         for run in runs {
             match run.await {
-                Ok(RunEnd::Completed) => result.runs_completed += 1,
-                Ok(RunEnd::Failed) => result.runs_failed += 1,
-                Ok(RunEnd::Unfinished) | Err(_) => result.runs_unfinished += 1,
+                Ok(ends) => {
+                    for end in ends {
+                        match end {
+                            RunEnd::Completed => result.runs_completed += 1,
+                            RunEnd::Failed => result.runs_failed += 1,
+                            RunEnd::Unfinished => result.runs_unfinished += 1,
+                        }
+                    }
+                }
+                Err(_) => result.runs_unfinished += 1,
             }
         }
+        result.runs_started = started_count.load(std::sync::atomic::Ordering::Relaxed);
         result.wall_ms = started.elapsed().as_millis() as u64;
         result.events_sent = events_sent.load(std::sync::atomic::Ordering::Relaxed);
         sampling.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -480,6 +584,19 @@ impl Bench {
             result.runs_completed as f64 / result.runs_started as f64
         };
         result.pg = self.pg.read().await?;
+        if let Some(sustain) = scenario.sustain {
+            let window = result.busy.secs.max(f64::EPSILON);
+            let end_to_end =
+                Percentiles::of(std::mem::take(&mut *latencies.lock().expect("latencies")));
+            result.throughput = Some(Throughput {
+                secs: window,
+                concurrency: sustain.concurrency,
+                runs_per_s: result.runs_completed as f64 / window,
+                tasks_per_s: result.busy.worker.tasks as f64 / window,
+                end_to_end,
+                schedule_to_start: self.pg.schedule_to_start(queue).await?,
+            });
+        }
         Ok(())
     }
 }

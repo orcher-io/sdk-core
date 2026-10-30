@@ -25,6 +25,7 @@ bench/run.sh my-change                       # every scenario, engine :latest
 bench/run.sh my-change --only sequential-100,heartbeat-100
 bench/run.sh my-change --engine-version 0.5.5
 bench/run.sh my-change --engine-image orcher-local/engine:abc1234   # an unreleased engine build
+bench/run.sh my-change --only throughput-1,throughput-10   # sustained load: runs/s, latency
 bench/run.sh my-change-shared --upstream shared   # see "#38" below
 bench/compare.sh bench/results/baseline-2026-10-18.json bench/results/my-change.json
 ```
@@ -110,12 +111,13 @@ one engine and database for the whole run, in a fixed order.
 | `idle` | a worker with a workflow and a task type registered, nothing to do, 10 s | the cost of waiting: polls, heartbeats, CPU, heap, tokio tasks, connections |
 | `sequential-10/100/300/1000` | one run of n no-op tasks in sequence | the O(n²) journal reads: every activation reads and ships the whole journal (#36) |
 | `payload-1k/10k/100k/1m` | one run of 5 tasks in sequence, each returning a result of that size | boundary encoding and payload shipping per activation (#37) |
-| `timers` | 20 runs of 10 timers of 1 s in sequence | timer-heavy runs: activations with no task. The timers are 1 s, not shorter, because on engine 0.5.5 a timer shorter than the engine's delay in storing it fails the completion (orcher-io/orcher#375) |
-| `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends because on engine 0.5.5 an event that arrives before the run waits for it does not wake the run (orcher-io/orcher#376) |
+| `timers` | 20 runs of 10 timers of 1 s in sequence | timer-heavy runs: activations with no task. The timers are 1 s, not shorter: before orcher-io/orcher#400 (engines up to 0.5.5), a timer shorter than the engine's delay in storing it failed the completion |
+| `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends so results stay comparable with earlier ones (sending each once also completes every run: orcher-io/orcher#376 found no stall) |
 | `fanout-1000`, `fanout-10000` | one run issuing n no-op tasks at once and waiting for all | one run's activations as its tasks complete; eager dispatch; claims in bulk (#33) |
 | `concurrent-100x10` | 100 runs at once of 10 tasks each | many runs at once against 100 slots |
 | `footprint-task-worker` | a task-only worker, 10 s idle, then 1,000 tasks of 20 ms through 100 slots | a task-only worker's footprint idle and busy, and claimed-but-not-started tasks (#33) |
 | `heartbeat-100/1000` | k tasks running at once for 15 s, heartbeat timeout 3 s, on a task-only worker | heartbeat RPC rate and Postgres writes per heartbeat against concurrency (#35) |
+| `throughput-1`, `throughput-10` | sustained load: 100 (or 50) runs kept in flight for 60 s, each of 1 (or 10) no-op tasks, a new run started as each ends | runs/s and tasks/s at saturation, end-to-end p50/p99 from the client, and schedule-to-start p50/p99 from the engine's task rows (#108). Rates are a laptop's wall clock: compare them only on a hosted runner |
 
 In the footprint and heartbeat scenarios the runs' workflows are run by a
 second worker that is not measured (its RPCs are recorded as `helper_rpc`, for diagnosis); the

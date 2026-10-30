@@ -101,6 +101,32 @@ impl PgStats {
     }
 }
 
+/// A latency distribution, in milliseconds.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Percentiles {
+    pub count: u64,
+    pub p50_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+impl Percentiles {
+    /// The distribution of `samples`, in milliseconds.
+    pub fn of(mut samples: Vec<f64>) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+        samples.sort_by(|a, b| a.total_cmp(b));
+        let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
+        Self {
+            count: samples.len() as u64,
+            p50_ms: at(0.5),
+            p99_ms: at(0.99),
+            max_ms: samples[samples.len() - 1],
+        }
+    }
+}
+
 /// A connection to the bench's Postgres.
 pub struct Pg {
     client: Client,
@@ -129,6 +155,32 @@ impl Pg {
             .batch_execute("SELECT pg_stat_statements_reset(); SELECT pg_stat_reset();")
             .await
             .map_err(|e| format!("could not reset the statistics: {e}"))
+    }
+
+    /// How long the tasks of `task_queue` waited from being scheduled to being
+    /// started, from the engine's own timestamps: what a worker sees as
+    /// queueing delay.
+    pub async fn schedule_to_start(&self, task_queue: &str) -> Result<Percentiles, String> {
+        let row = self
+            .client
+            .query_one(
+                "SELECT COUNT(*)::bigint, \
+                        COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY ms), 0)::float8, \
+                        COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY ms), 0)::float8, \
+                        COALESCE(MAX(ms), 0)::float8 \
+                 FROM (SELECT EXTRACT(EPOCH FROM (started_at - scheduled_at)) * 1000 AS ms \
+                       FROM task_executions \
+                       WHERE task_queue = $1 AND started_at IS NOT NULL) t",
+                &[&task_queue],
+            )
+            .await
+            .map_err(|e| format!("could not read schedule-to-start times: {e}"))?;
+        Ok(Percentiles {
+            count: row.get::<_, i64>(0).max(0) as u64,
+            p50_ms: row.get(1),
+            p99_ms: row.get(2),
+            max_ms: row.get(3),
+        })
     }
 
     /// Reads what the engine did since the last reset.
@@ -270,6 +322,16 @@ fn shorten(query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn percentiles_of_samples() {
+        let p = super::Percentiles::of((1..=100).map(f64::from).collect());
+        assert_eq!(p.count, 100);
+        assert_eq!(p.p50_ms, 51.0);
+        assert_eq!(p.p99_ms, 99.0);
+        assert_eq!(p.max_ms, 100.0);
+        assert_eq!(super::Percentiles::of(Vec::new()).count, 0);
+    }
+
     use super::classify;
 
     #[test]

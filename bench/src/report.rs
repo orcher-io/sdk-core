@@ -170,6 +170,20 @@ pub fn derive(result: &ScenarioResult) -> BTreeMap<String, f64> {
             idle.worker.tokio_alive_tasks as f64,
         );
     }
+    if let Some(t) = &result.throughput {
+        d.insert("runs_per_s".into(), t.runs_per_s);
+        d.insert("tasks_per_s".into(), t.tasks_per_s);
+        d.insert("end_to_end_p50_ms".into(), t.end_to_end.p50_ms);
+        d.insert("end_to_end_p99_ms".into(), t.end_to_end.p99_ms);
+        d.insert(
+            "schedule_to_start_p50_ms".into(),
+            t.schedule_to_start.p50_ms,
+        );
+        d.insert(
+            "schedule_to_start_p99_ms".into(),
+            t.schedule_to_start.p99_ms,
+        );
+    }
     d.retain(|_, v| v.is_finite());
     d
 }
@@ -210,7 +224,12 @@ pub fn summary(results: &Results) -> String {
     let workflow: Vec<&Scenario> = results
         .scenarios
         .iter()
-        .filter(|s| s.result.busy.worker.activations > 0)
+        .filter(|s| s.result.busy.worker.activations > 0 && s.result.throughput.is_none())
+        .collect();
+    let sustained: Vec<&Scenario> = results
+        .scenarios
+        .iter()
+        .filter(|s| s.result.throughput.is_some())
         .collect();
     let task_only: Vec<&Scenario> = results
         .scenarios
@@ -219,6 +238,22 @@ pub fn summary(results: &Results) -> String {
         .collect();
     out.push_str("\n## Workflow workloads\n\n");
     out.push_str(&table(&workflow, SUMMARY));
+    if !sustained.is_empty() {
+        out.push_str("\n## Sustained load\n\n");
+        out.push_str(&table(
+            &sustained,
+            &[
+                ("success_rate", "success"),
+                ("runs_per_s", "runs/s"),
+                ("tasks_per_s", "tasks/s"),
+                ("end_to_end_p50_ms", "end-to-end p50 ms"),
+                ("end_to_end_p99_ms", "end-to-end p99 ms"),
+                ("schedule_to_start_p50_ms", "schedule-to-start p50 ms"),
+                ("schedule_to_start_p99_ms", "schedule-to-start p99 ms"),
+                ("pg_blocks_per_activation", "PG blocks/activation"),
+            ],
+        ));
+    }
     out.push_str("\n## Task-only, idle and heartbeat workloads\n\n");
     out.push_str(&table(&task_only, TASK_SUMMARY));
     let idle: Vec<&Scenario> = results
