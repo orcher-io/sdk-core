@@ -194,7 +194,7 @@ impl Default for PollerConfig {
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             auto_heartbeat: false,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
-            history_cache_bytes: crate::worker::poll::history::DEFAULT_HISTORY_CACHE_BYTES,
+            history_cache_bytes: crate::wire::history::DEFAULT_HISTORY_CACHE_BYTES,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -333,7 +333,7 @@ pub struct WorkflowExecutionPoller {
 
     /// The process's journals of the runs it activates, which an activation
     /// carrying only new entries is joined to. `None` when it keeps none.
-    histories: Option<&'static super::history::RunHistories>,
+    histories: Option<&'static crate::wire::history::RunHistories>,
 
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
@@ -422,7 +422,7 @@ impl WorkflowExecutionPoller {
             ..Default::default()
         };
         let histories = (config.history_cache_bytes > 0)
-            .then(|| super::history::RunHistories::of_process(config.history_cache_bytes))
+            .then(|| crate::wire::history::RunHistories::of_process(config.history_cache_bytes))
             .filter(|histories| histories.keeps());
         // The engine sends only a run's new entries to a process that says
         // it keeps the rest.
