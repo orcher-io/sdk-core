@@ -42,6 +42,7 @@ ALLOWED = {
     "src/client/namespace.rs": "namespace service calls",
     "src/client/workflow.rs": "workflow service calls",
     "src/worker/poll/polling.rs": "execution service polls",
+    "src/worker/poll/history.rs": "execution service polls, their journals kept between activations",
     "src/worker/poll/completion.rs": "execution service completions",
     "src/worker/drivers/workflow.rs": "execution service calls",
     "src/worker/drivers/task.rs": "execution service calls",
