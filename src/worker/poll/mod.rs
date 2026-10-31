@@ -5,7 +5,6 @@
 //!   hands the tasks the engine returns eagerly to the task driver.
 
 pub(crate) mod completion;
-pub(crate) mod history;
 pub mod polling;
 pub mod scaler;
 
