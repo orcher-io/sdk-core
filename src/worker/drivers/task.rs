@@ -442,6 +442,7 @@ impl TaskDriver {
                 tls_config: config.tls_config.clone(),
                 connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
+                history_cache_bytes: 0,
                 wire: std::sync::Arc::clone(&config.wire),
             };
 
@@ -1030,6 +1031,7 @@ async fn session_poller(
         tls_config: config.tls_config.clone(),
         connect_timeout: config.connect_timeout,
         max_message_bytes: config.max_message_bytes,
+        history_cache_bytes: 0,
         wire: std::sync::Arc::clone(&config.wire),
     };
     TaskExecutionPoller::new(

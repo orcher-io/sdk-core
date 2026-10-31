@@ -124,6 +124,11 @@ pub struct PollerConfig {
     /// receive. [`crate::transport::limits::default_max_message_bytes`] unless set.
     pub max_message_bytes: usize,
 
+    /// How much of the journals of the runs it activates the process keeps;
+    /// see `WorkflowDriverConfig::history_cache_bytes`. Read by workflow
+    /// pollers only.
+    pub history_cache_bytes: usize,
+
     /// Where this poller's calls are recorded: the worker's wire
     /// measurements, shared with its other connections.
     pub wire: Arc<crate::observability::WireMetrics>,
@@ -147,6 +152,7 @@ impl std::fmt::Debug for PollerConfig {
             supported_step_ids,
             auto_heartbeat,
             max_message_bytes,
+            history_cache_bytes,
             wire: _,
         } = self;
         f.debug_struct("PollerConfig")
@@ -163,6 +169,7 @@ impl std::fmt::Debug for PollerConfig {
             .field("supported_step_ids", supported_step_ids)
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
+            .field("history_cache_bytes", history_cache_bytes)
             .finish()
     }
 }
@@ -187,6 +194,7 @@ impl Default for PollerConfig {
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             auto_heartbeat: false,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            history_cache_bytes: crate::worker::poll::history::DEFAULT_HISTORY_CACHE_BYTES,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -323,6 +331,10 @@ pub struct WorkflowExecutionPoller {
     /// the engine answers that it hands out only one.
     batch_polls: bool,
 
+    /// The process's journals of the runs it activates, which an activation
+    /// carrying only new entries is joined to. `None` when it keeps none.
+    histories: Option<&'static super::history::RunHistories>,
+
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 
@@ -409,6 +421,13 @@ impl WorkflowExecutionPoller {
                 .collect(),
             ..Default::default()
         };
+        let histories = (config.history_cache_bytes > 0)
+            .then(|| super::history::RunHistories::of_process(config.history_cache_bytes))
+            .filter(|histories| histories.keeps());
+        // The engine sends only a run's new entries to a process that says
+        // it keeps the rest.
+        let mut poll_request_template = poll_request_template;
+        poll_request_template.history_cached = histories.is_some();
 
         let poller = Self {
             client: crate::transport::limits::sized!(
@@ -422,6 +441,7 @@ impl WorkflowExecutionPoller {
             scaler: None,
             credits: None,
             batch_polls: true,
+            histories,
             index: 0,
             server_url: address,
             consecutive_idle_polls: 0,
@@ -829,6 +849,7 @@ impl WorkflowExecutionPoller {
                 run_id: task.execution.run_id,
                 token,
                 retried: false,
+                history_missing: false,
             },
             crate::worker::lifecycle::SHUTDOWN_NOTICE_TIMEOUT,
         )
@@ -852,16 +873,14 @@ impl WorkflowExecutionPoller {
             stamp_poll(&mut request, &self.config);
             match self.client.poll_workflow_executions(request).await {
                 Ok(response) => {
-                    return Ok(response
-                        .into_inner()
-                        .executions
-                        .into_iter()
-                        .filter(|execution| !execution.workflow_id.is_empty())
-                        .map(|execution| {
-                            crate::worker::record::activation(&execution);
-                            WorkflowExecutionTask::from(execution)
-                        })
-                        .collect());
+                    let mut tasks = Vec::new();
+                    for execution in response.into_inner().executions {
+                        if execution.workflow_id.is_empty() {
+                            continue;
+                        }
+                        tasks.extend(self.accept(execution).await);
+                    }
+                    return Ok(tasks);
                 }
                 Err(e) if e.code() == tonic::Code::Unimplemented => {
                     tracing::info!(
@@ -954,17 +973,59 @@ impl WorkflowExecutionPoller {
             return Ok(None);
         }
 
-        crate::worker::record::activation(&poll_response);
+        let Some(task) = self.accept(poll_response).await else {
+            return Ok(None);
+        };
 
         tracing::debug!(
-            workflow_id = %poll_response.workflow_id,
-            execution_id = %poll_response.execution_id,
-            workflow_type = %poll_response.workflow_type,
+            workflow_id = %task.execution.workflow_id,
+            execution_id = %task.execution.run_id,
+            workflow_type = %task.workflow_type,
             elapsed_ms = elapsed.as_millis(),
             "Polled workflow execution task"
         );
 
-        Ok(Some(WorkflowExecutionTask::from(poll_response)))
+        Ok(Some(task))
+    }
+
+    /// The activation `response` as the task the driver runs: carrying its
+    /// run's whole journal, joined from the entries the process holds when it
+    /// carries only the new ones. `None` when those are not held, after
+    /// handing it back so the engine sends the whole journal next time.
+    async fn accept(
+        &self,
+        mut response: orcher_proto::orcher::v1::PollWorkflowExecutionResponse,
+    ) -> Option<WorkflowExecutionTask> {
+        let joined = match self.histories {
+            Some(histories) => histories.join(&mut response),
+            // Keeping nothing, this poller said so: every activation carries
+            // the whole journal.
+            None => Ok(()),
+        };
+        if joined.is_err() {
+            crate::worker::lifecycle::release_on(
+                self.client.clone(),
+                &self.config.namespace,
+                &self.config.identity,
+                self.config.api_key.as_deref(),
+                self.config.organization_id.as_deref(),
+                crate::worker::lifecycle::Leftover {
+                    token: crate::worker::poll::completion::activation_token(
+                        response.stream_entry_id.clone().into_bytes(),
+                        Some(response.stream_entry_id.as_str()).filter(|t| !t.is_empty()),
+                    ),
+                    workflow_id: response.workflow_id,
+                    run_id: response.execution_id,
+                    retried: false,
+                    history_missing: true,
+                },
+                crate::worker::lifecycle::SHUTDOWN_NOTICE_TIMEOUT,
+            )
+            .await;
+            return None;
+        }
+        crate::worker::record::activation(&response);
+        Some(WorkflowExecutionTask::from(response))
     }
 }
 
@@ -2097,6 +2158,7 @@ mod tests {
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             auto_heartbeat: false,
             max_message_bytes: 1024,
+            history_cache_bytes: 0,
             wire: crate::observability::WireMetrics::new(),
         };
 

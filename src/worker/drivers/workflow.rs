@@ -113,6 +113,13 @@ pub struct WorkflowDriverConfig {
     /// poll; see [`HostConfig::supported_step_ids`](crate::HostConfig::supported_step_ids).
     /// Empty (the default) reports none.
     pub supported_step_ids: Vec<crate::types::StepIdScheme>,
+    /// How much of the journals of the runs it activates this worker process
+    /// keeps between activations, in encoded bytes, so the engine can send
+    /// only a run's new entries; the least recently used run is dropped
+    /// first. Default: 64 MiB. 0 keeps nothing, and every activation carries
+    /// the run's whole journal. The process keeps one store, sized by the
+    /// first workflow driver to start.
+    pub history_cache_bytes: usize,
     /// Where this driver's calls to the engine are recorded: the worker's
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
@@ -142,6 +149,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             non_determinism_retry_max,
             protocol_version,
             supported_step_ids,
+            history_cache_bytes,
             wire: _,
         } = self;
         f.debug_struct("WorkflowDriverConfig")
@@ -163,6 +171,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             .field("non_determinism_retry_max", non_determinism_retry_max)
             .field("protocol_version", protocol_version)
             .field("supported_step_ids", supported_step_ids)
+            .field("history_cache_bytes", history_cache_bytes)
             .finish()
     }
 }
@@ -188,6 +197,7 @@ impl Default for WorkflowDriverConfig {
             non_determinism_retry_max: Duration::from_secs(60),
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
             supported_step_ids: Vec::new(),
+            history_cache_bytes: crate::worker::poll::history::DEFAULT_HISTORY_CACHE_BYTES,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -226,12 +236,26 @@ pub struct WorkflowWorkResult {
     pub result: Result<ExecutionResult>,
 }
 
+/// Whether `command` ends its run: it completes, fails or cancels the
+/// workflow, or restarts it fresh as a new run.
+fn ends_run(command: &orcher_proto::orcher::v1::Command) -> bool {
+    use orcher_proto::orcher::v1::CommandType;
+    matches!(
+        CommandType::try_from(command.command_type),
+        Ok(CommandType::CompleteWorkflow
+            | CommandType::FailWorkflow
+            | CommandType::CancelWorkflow
+            | CommandType::RestartFresh)
+    )
+}
+
 fn leftover(task: WorkflowExecutionTask) -> Leftover {
     Leftover {
         token: activation_token(task.task_token, task.stream_entry_id.as_deref()),
         workflow_id: task.execution.workflow_id,
         run_id: task.execution.run_id,
         retried: false,
+        history_missing: false,
     }
 }
 
@@ -371,6 +395,7 @@ impl WorkflowDriver {
                 tls_config: config.tls_config.clone(),
                 connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
+                history_cache_bytes: config.history_cache_bytes,
                 wire: std::sync::Arc::clone(&config.wire),
             };
 
@@ -523,6 +548,20 @@ impl WorkflowDriver {
             async move {
                 // An activation released or held to be retried is handed back, not
                 // reported.
+                // A run its commands end will not be activated again: what
+                // the process holds of its journal goes.
+                if let Report::Complete {
+                    run_id, commands, ..
+                } = &report
+                {
+                    if commands.iter().any(ends_run) {
+                        if let Some(histories) =
+                            crate::worker::poll::history::RunHistories::of_process_if_any()
+                        {
+                            histories.forget(run_id);
+                        }
+                    }
+                }
                 let reported = match &report {
                     Report::Complete { commands, .. } => Some((commands.len(), false)),
                     Report::Fail { .. } => Some((0, true)),
@@ -923,6 +962,7 @@ impl WorkflowDriver {
                     run_id: run_id.clone(),
                     token: token.clone(),
                     retried: true,
+                    history_missing: false,
                 },
                 workflow_type,
                 found,
@@ -947,6 +987,7 @@ impl WorkflowDriver {
                     run_id: run_id.clone(),
                     token: token.clone(),
                     retried: false,
+                    history_missing: false,
                 });
             }
             Err(e) => {

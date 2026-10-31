@@ -161,6 +161,10 @@ pub(crate) struct Leftover {
     pub(crate) token: Vec<u8>,
     /// Run, and handed back to be tried again rather than applied.
     pub(crate) retried: bool,
+    /// Not run: it carried only the run's new journal entries, and the
+    /// earlier ones are not held. The next activation of the run carries
+    /// the whole journal.
+    pub(crate) history_missing: bool,
 }
 
 /// Hand an activation back to the engine over the driver's connection. One
@@ -212,6 +216,7 @@ pub(crate) async fn release_on(
         namespace: namespace.to_string(),
         identity: identity.to_string(),
         task_token: leftover.token.clone(),
+        history_missing: leftover.history_missing,
         ..Default::default()
     };
     let mut request =
@@ -219,6 +224,12 @@ pub(crate) async fn release_on(
     request.set_timeout(timeout);
     let sent = tokio::time::timeout(timeout, client.release_workflow_execution(request)).await;
     match sent {
+        Ok(Ok(_)) if leftover.history_missing => tracing::debug!(
+            workflow_id = %leftover.workflow_id,
+            run_id = %leftover.run_id,
+            "Workflow activation carried only new journal entries this worker does not hold the \
+             rest of; handed back for the whole journal"
+        ),
         Ok(Ok(_)) if leftover.retried => tracing::info!(
             workflow_id = %leftover.workflow_id,
             run_id = %leftover.run_id,
