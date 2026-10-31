@@ -79,6 +79,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 A language SDK runs its worker on `Host` instead: the host polls the engine, resolves each workflow activation's history in the kernel, and hands the SDK activations, tasks and actor operations as kernel and host protocol messages, typed or encoded (`Host::encoded`), checking every answer before it reports it. The same `ConnectOptions` configure the host (`HostConfig`) and the clients. See [docs/worker-host.md](docs/worker-host.md) and [docs.rs](https://docs.rs/orcher-sdk-core) for the full API, and [UPGRADING.md](UPGRADING.md) when moving between minor releases.
 
+To check a language runtime against the kernel protocol without an engine, run it under [`orcher-verify`](verify/README.md), which hands it the activations recorded from every SDK's contract suite and judges each answer with the kernel's own checks.
+
 <br />
 
 ### <img height="16" src="https://octicons-col.vercel.app/stack/38BDF0"> How it fits

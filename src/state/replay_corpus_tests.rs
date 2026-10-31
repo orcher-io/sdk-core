@@ -1,6 +1,6 @@
 //! Replays recorded runs (see `crate::worker::record`).
 //!
-//! `tests/fixtures/replay` holds runs recorded from each SDK's contract
+//! `verify/vectors/replay` holds runs recorded from each SDK's contract
 //! suite (worker identities replaced), and is always replayed. Set
 //! `ORCHER_REPLAY_CORPUS` to a directory recorded with
 //! `ORCHER_RECORD_ACTIVATIONS` to replay a larger corpus as well.
@@ -20,7 +20,7 @@ use orcher_proto::orcher::v1::EntryType;
 /// The committed runs, one directory per SDK.
 #[test]
 fn every_committed_recording_replays() {
-    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("verify/vectors/replay");
     for sdk in ["rust", "python", "typescript"] {
         replay_all(&fixtures.join(sdk));
     }

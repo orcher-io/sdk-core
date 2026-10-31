@@ -1,0 +1,27 @@
+[package]
+name = "orcher-verify"
+version = "0.22.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["ORCHER Contributors"]
+repository = "https://github.com/orcher-io/sdk-core"
+readme = "README.md"
+description = "Checks a workflow runtime in any language against the ORCHER kernel protocol's recorded replay vectors"
+keywords = ["orchestration", "workflow", "conformance", "replay"]
+categories = ["development-tools::testing"]
+# Published, so a runtime author can `cargo install orcher-verify` and check
+# a runtime in any language without this repository: the vectors under
+# vectors/ are built into the binary.
+
+# Protocol messages are built with `..Default::default()` (see the workspace
+# lints in ../Cargo.toml).
+[lints]
+workspace = true
+
+[dependencies]
+# The kernel judges the answers, with the checks the worker runs before it
+# sends one to the engine.
+orcher-sdk-core = { path = "..", version = "0.22" }
+orcher-proto = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

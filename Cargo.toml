@@ -9,9 +9,6 @@ readme = "README.md"
 description = "Core SDK for ORCHER orchestration platform - handles gRPC communication, state machines, and replay engine"
 keywords = ["orchestration", "workflow", "distributed", "sdk"]
 categories = ["asynchronous", "network-programming"]
-# Recorded runs for the replay tests: test data for this repository, not
-# part of the published crate.
-exclude = ["tests/fixtures/"]
 
 [dependencies]
 # Protocol definitions
@@ -85,9 +82,12 @@ workspace = true
 default = []
 test-utils = []
 
-# The benchmark suite is built in this workspace and never published.
+# The benchmark suite is built in this workspace and never published. The
+# verify suite (verify/README.md) is a crate of its own, published apart:
+# it holds the recorded runs the replay tests read, so they are not part of
+# this crate.
 [workspace]
-members = ["bench"]
+members = ["bench", "verify"]
 resolver = "2"
 
 [workspace.lints.clippy]
