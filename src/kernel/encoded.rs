@@ -3,11 +3,14 @@
 //! would send, and checking that answer against the history, without an
 //! engine. Every language SDK, Rust's included, replays recorded runs
 //! ([`crate::worker::record`]) with these, so a replay test or a conformance
-//! kit is the same calls in every language.
+//! kit is the same calls in every language: `orcher-verify` (`verify/` in
+//! this repository) judges any runtime's answers with [`check_recorded`] and
+//! [`recorded_answer`].
 
 use crate::error::Result;
 use crate::protocol::ExecutionResult;
 use crate::wire::host as wire;
+use crate::worker::record::Recorded;
 use crate::worker::WorkflowExecutionTask;
 use crate::DeterminismViolation;
 
@@ -64,4 +67,32 @@ pub fn execution_result(run_id: &str, answer: &[u8]) -> Result<ExecutionResult> 
         &super::RunBinding::sdk_ids(run_id),
         wire::activation_result(answer)?,
     )
+}
+
+/// What the worker would send the engine for the language's answer to a
+/// recorded activation (an encoded `orcher.kernel.v1.RunActivationResult`),
+/// as [`crate::worker::record`] records it: a
+/// [`Recorded::Completion`] carrying the answer's commands, query answers and
+/// update answers, or a [`Recorded::Failure`] for a workflow its code failed.
+/// An answer that replays the recorded run gives the message recorded after
+/// the activation, but for the fields that are the worker's own (its
+/// identity, its protocol version), which are left empty.
+///
+/// `namespace` is the worker's: a child workflow is started in it.
+///
+/// # Errors
+///
+/// [`Error::Protocol`](crate::Error::Protocol) for bytes that are not the
+/// messages, [`Error::DeterminismViolation`](crate::Error::DeterminismViolation)
+/// for an answer reporting that the code no longer replays its history (the
+/// worker sends nothing for it), and the errors of [`check_recorded`] for an
+/// answer the worker would refuse to send.
+pub fn recorded_answer(recorded: &[u8], answer: &[u8], namespace: &str) -> Result<Recorded> {
+    let task = WorkflowExecutionTask::from(wire::recorded_activation(recorded)?);
+    let result = super::execution_result(
+        &super::RunBinding::of(&task),
+        wire::activation_result(answer)?,
+    )?;
+    crate::protocol::validate_execution_result(&result)?;
+    crate::wire::engine::recorded_answer(&task, result, namespace)
 }
