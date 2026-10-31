@@ -15,8 +15,8 @@
 //! - [`framing`]: the messages on the runtime's stdin and stdout.
 //! - [`judge`]: whether an answer is the recorded one.
 //! - [`runner`]: runs a runtime against the vectors.
-//! - [`reference`]: a runtime that answers with the recorded answers, right
-//!   or wrong on purpose, which the runner's own tests run.
+//! - [`reference`](mod@reference): a runtime that answers with the recorded
+//!   answers, right or wrong on purpose, which the runner's own tests run.
 //!
 //! The vectors and the framing are documented for runtime authors in
 //! `verify/README.md`.
