@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.22.1](https://github.com/orcher-io/sdk-core/compare/v0.22.0...v0.22.1) (2026-10-31)
+
+
+### Features
+
+* **bench:** set the engine's log level for a run ([#144](https://github.com/orcher-io/sdk-core/issues/144)) ([a988d81](https://github.com/orcher-io/sdk-core/commit/a988d8127f109807109161c314080b5e8426d0e1))
+* **bench:** sustained throughput and latency scenarios ([#142](https://github.com/orcher-io/sdk-core/issues/142)) ([4640164](https://github.com/orcher-io/sdk-core/commit/464016464b8d5c6c7e75676b7ab9be89ca3f9dbf))
+* keep run journals between activations ([#145](https://github.com/orcher-io/sdk-core/issues/145)) ([07d8424](https://github.com/orcher-io/sdk-core/commit/07d8424b9c282542034124bbb1075840999c214c))
+
+
+### Bug Fixes
+
+* keep the run journal store behind the wire ([#147](https://github.com/orcher-io/sdk-core/issues/147)) ([b5f6432](https://github.com/orcher-io/sdk-core/commit/b5f6432454ed2ba034f09252193ad0f3dedad4ce))
+
 ## [0.22.0](https://github.com/orcher-io/sdk-core/compare/v0.21.0...v0.22.0) (2026-10-24)
 
 
