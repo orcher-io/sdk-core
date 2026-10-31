@@ -278,7 +278,7 @@ The same messages, different carriers:
 
 The test that matters: **given the same recorded history and the same workflow code, every SDK produces the same commands, and the kernel rejects any stream that disagrees with history without sending anything.**
 
-- Recorded-activation tests: feed the same `RunActivation`s to each SDK and compare its `RunActivationResult` byte for byte; no engine needed. Built **before** any SDK is ported.
+- Recorded-activation tests: feed the same `RunActivation`s to each SDK and compare its `RunActivationResult` byte for byte; no engine needed. Built **before** any SDK is ported. `orcher-verify` ([verify/README.md](../verify/README.md)) runs them against any runtime, comparing what the worker would send the engine for each answer with what it sent when the run was recorded.
 - `scenarios.json` stays the end-to-end suite every implementation must pass (#42), plus the missing scenarios: saga compensation failure, changed child id on replay, falsy results, array and multi-argument inputs, cancellation at each kind of wait, event waits with and without timeouts, a task inserted before another kind of step, a changed timer duration (must be rejected).
 - Legacy schemes replayed against the real persisted journals (§8.3).
 

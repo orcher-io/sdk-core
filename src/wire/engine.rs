@@ -5,12 +5,14 @@
 use std::time::Duration;
 
 use crate::types::{StepIdScheme, WorkflowExecution};
+use crate::worker::record::Recorded;
 use crate::worker::{TaskExecutionTask, WorkflowExecutionTask};
 
 use crate::error::{Error, Result};
 use crate::protocol::{
-    Command as BridgeCommand, QueryResponse, QueryResult as BridgeQueryResult, UpdateResponse,
-    UpdateResult as BridgeUpdateResult, WorkflowRetryPolicy,
+    Command as BridgeCommand, ExecutionErrorType, ExecutionResult, QueryResponse,
+    QueryResult as BridgeQueryResult, UpdateResponse, UpdateResult as BridgeUpdateResult,
+    WorkflowRetryPolicy,
 };
 use orcher_proto::orcher::v1 as proto;
 
@@ -365,6 +367,69 @@ pub(crate) fn update_answers(responses: &[UpdateResponse]) -> Vec<proto::UpdateR
             }
         })
         .collect()
+}
+
+/// What the worker sends the engine for the result of an activation of
+/// `task`, as [`crate::worker::record`] records it: the completion carrying
+/// the result's commands, query answers and update answers, or the report of
+/// a workflow its code failed, as the workflow driver builds them. Only what
+/// the activation and its result decide is set: who sends it (identity,
+/// protocol version) is the worker's and is left empty.
+///
+/// # Errors
+///
+/// [`Error::DeterminismViolation`] for a result reporting that the code no
+/// longer replays its history, for which the worker sends neither and hands
+/// the activation back; and the errors of [`commands`].
+pub(crate) fn recorded_answer(
+    task: &WorkflowExecutionTask,
+    result: ExecutionResult,
+    namespace: &str,
+) -> Result<Recorded> {
+    use prost::Message;
+
+    let workflow_id = task.execution.workflow_id.clone();
+    let execution_id = task.execution.run_id.clone();
+    if !result.successful {
+        let (message, non_retryable) = match result.error {
+            Some(error) if error.error_type == ExecutionErrorType::NonDeterminism => {
+                return Err(Error::determinism_violation(error.message));
+            }
+            Some(error) => (error.message, !error.retryable),
+            None => ("Unknown error".to_string(), false),
+        };
+        return Ok(Recorded::Failure(
+            proto::FailWorkflowExecutionRequest {
+                workflow_id,
+                execution_id,
+                namespace: namespace.to_string(),
+                task_token: task.task_token.clone(),
+                failure: Some(proto::Failure {
+                    message,
+                    source: "WorkflowDriver".to_string(),
+                    failure_type: "WorkflowExecutionError".to_string(),
+                    non_retryable,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ));
+    }
+    Ok(Recorded::Completion(
+        proto::CompleteWorkflowExecutionRequest {
+            workflow_id,
+            execution_id,
+            namespace: namespace.to_string(),
+            task_token: task.task_token.clone(),
+            stream_entry_id: task.stream_entry_id.clone().unwrap_or_default(),
+            query_results: query_answers(&result.query_responses),
+            update_results: update_answers(&result.update_results),
+            commands: commands(result.commands, &task.task_queue, namespace)?,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    ))
 }
 
 /// An activation to hand back, named by the token its poll carried.

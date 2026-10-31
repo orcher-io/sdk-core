@@ -2,7 +2,7 @@
 //! uses: every recorded activation resolves as it is expected to, and an
 //! answer is checked against the history it answers.
 //!
-//! `tests/fixtures/replay/<sdk>/resolutions.json` holds, for each activation
+//! `verify/vectors/replay/<sdk>/resolutions.json` holds, for each activation
 //! recorded from that SDK's contract suite, the `RunActivation` the kernel
 //! resolves it to, encoded. They were first written when the kernel was
 //! proven to resolve each recording exactly as the SDKs did before it
@@ -25,7 +25,7 @@ const NAMESPACE: &str = "contract";
 
 #[test]
 fn the_kernel_resolves_every_committed_recording_as_expected() {
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("verify/vectors/replay");
     let checked: usize = ["rust", "python", "typescript"]
         .iter()
         .map(|sdk| check(&fixtures.join(sdk)))
@@ -155,6 +155,69 @@ fn an_answer_is_checked_against_the_recorded_history() {
     let violations = encoded::check_recorded(&charged(), &changed.encode_to_vec()).unwrap();
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert_eq!(violations[0].step_id.as_deref(), Some("charge_0"));
+}
+
+/// What the worker would send for an answer: its new calls as commands for
+/// the engine, satisfied ones sending nothing; a failure report for a
+/// workflow the code failed; and nothing for code that no longer replays.
+#[test]
+fn an_answer_becomes_what_the_worker_sends() {
+    use orcher_proto::orcher::v1::{
+        command::Attributes, CompleteWorkflowExecutionRequest, FailWorkflowExecutionRequest,
+    };
+    use orcher_sdk_core::proto::kernel::v1::{run_activation_result, Failure, FailureCode};
+
+    let replays = answer(vec![
+        call(0, true, "charge_0", "charge"),
+        call(1, false, "ship_1", "ship"),
+    ]);
+    let sent = encoded::recorded_answer(&charged(), &replays.encode_to_vec(), NAMESPACE).unwrap();
+    let Recorded::Completion(sent) = sent else {
+        panic!("not a completion: {sent:?}");
+    };
+    let sent = CompleteWorkflowExecutionRequest::decode(sent.as_slice()).unwrap();
+    assert_eq!(
+        (sent.workflow_id.as_str(), sent.execution_id.as_str()),
+        ("order-7", "run-1")
+    );
+    assert_eq!(sent.namespace, NAMESPACE);
+    assert_eq!(sent.commands.len(), 1, "{sent:?}");
+    let Some(Attributes::ScheduleTask(task)) = &sent.commands[0].attributes else {
+        panic!("not a task: {sent:?}");
+    };
+    assert_eq!(
+        (task.task_id.as_str(), task.task_type.as_str()),
+        ("ship_1", "ship")
+    );
+    // A task given no queue runs on the run's.
+    assert_eq!(task.task_queue, "orders");
+
+    let failing = |code: FailureCode| {
+        let mut failed = answer(vec![]);
+        failed.outcome = Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+            message: "out of stock".into(),
+            non_retryable: true,
+            code: code as i32,
+            ..Default::default()
+        }));
+        failed.encode_to_vec()
+    };
+    let sent = encoded::recorded_answer(&charged(), &failing(FailureCode::Application), NAMESPACE)
+        .unwrap();
+    let Recorded::Failure(sent) = sent else {
+        panic!("not a failure: {sent:?}");
+    };
+    let failure = FailWorkflowExecutionRequest::decode(sent.as_slice())
+        .unwrap()
+        .failure
+        .unwrap();
+    assert_eq!(failure.message, "out of stock");
+    assert!(failure.non_retryable);
+
+    assert!(matches!(
+        encoded::recorded_answer(&charged(), &failing(FailureCode::NonDeterminism), NAMESPACE),
+        Err(orcher_sdk_core::Error::DeterminismViolation { .. })
+    ));
 }
 
 /// A recorded activation of a run whose history scheduled task `charge_0`
