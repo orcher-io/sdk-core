@@ -4,14 +4,14 @@
 use std::time::Duration;
 
 use crate::common::{activation, task, Engine};
-use orcher_sdk_core::proto::host::v1::{
+use orcher_proto::host::v1::{
     task_outcome, HeartbeatAnswer, TaskAssignment, TaskHeartbeat, TaskOutcome,
 };
-use orcher_sdk_core::proto::kernel::v1::{
+use orcher_proto::kernel::v1::{
     command, run_activation_result, Command, Commands, Payload, RunActivation, RunActivationResult,
     RunTask,
 };
-use orcher_sdk_core::proto::prost::Message;
+use orcher_proto::prost::Message;
 use orcher_sdk_core::{Error, Host, HostConfig, Registrations};
 
 async fn worker(engine: &Engine) -> Host {

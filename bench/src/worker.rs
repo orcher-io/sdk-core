@@ -10,8 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use orcher_sdk_core::proto::host::v1::{task_outcome, TaskAssignment, TaskOutcome};
-use orcher_sdk_core::{Host, HostConfig, Registrations};
+use orcher_proto::host::v1::{task_outcome, TaskAssignment, TaskHeartbeat, TaskOutcome};
+use orcher_proto::kernel::v1::RunActivation;
+use orcher_proto::prost::Message;
+use orcher_sdk_core::{EncodedHost, Host, HostConfig, Registrations};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -138,9 +140,15 @@ fn print_line(kind: &str, snapshot: &Snapshot) {
     );
 }
 
+// The worker pulls its work as encoded messages and decodes them with its own
+// generated code, as a language SDK does.
+
 async fn run_workflows(host: Host, counters: Arc<Counters>) {
-    while let Some(activation) = host.next_activation().await {
+    let host = host.encoded();
+    while let Some(bytes) = host.next_activation().await {
         counters.activations.fetch_add(1, Ordering::Relaxed);
+        let activation =
+            RunActivation::decode(bytes.as_slice()).expect("the host sends a RunActivation");
         let answer = program::answer(&activation);
         if answer.ended {
             counters.runs_ended.fetch_add(1, Ordering::Relaxed);
@@ -148,17 +156,24 @@ async fn run_workflows(host: Host, counters: Arc<Counters>) {
         if answer.failed {
             counters.runs_failed.fetch_add(1, Ordering::Relaxed);
         }
-        if host.complete_activation(answer.result).await.is_err() {
+        if host
+            .complete_activation(&answer.result.encode_to_vec())
+            .await
+            .is_err()
+        {
             counters.completion_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 async fn run_tasks(host: Host, counters: Arc<Counters>) {
-    while let Some(task) = host.next_task().await {
+    let host = host.encoded();
+    while let Some(bytes) = host.next_task().await {
         counters.tasks_started.fetch_add(1, Ordering::Relaxed);
+        let task =
+            TaskAssignment::decode(bytes.as_slice()).expect("the host sends a TaskAssignment");
         let outcome = run_task(&host, &counters, &task).await;
-        if host.complete_task(outcome).await.is_ok() {
+        if host.complete_task(&outcome.encode_to_vec()).await.is_ok() {
             counters.tasks_completed.fetch_add(1, Ordering::Relaxed);
         } else {
             counters.completion_errors.fetch_add(1, Ordering::Relaxed);
@@ -166,7 +181,7 @@ async fn run_tasks(host: Host, counters: Arc<Counters>) {
     }
 }
 
-async fn run_task(host: &Host, counters: &Counters, task: &TaskAssignment) -> TaskOutcome {
+async fn run_task(host: &EncodedHost, counters: &Counters, task: &TaskAssignment) -> TaskOutcome {
     let spec: TaskSpec = task
         .input
         .first()
@@ -178,7 +193,11 @@ async fn run_task(host: &Host, counters: &Counters, task: &TaskAssignment) -> Ta
         let until = tokio::time::Instant::now() + run_for;
         while tokio::time::Instant::now() < until {
             tokio::time::sleep(every.min(until - tokio::time::Instant::now())).await;
-            host.heartbeat(&task.token, None);
+            let heartbeat = TaskHeartbeat {
+                token: task.token.clone(),
+                ..Default::default()
+            };
+            let _ = host.heartbeat(&heartbeat.encode_to_vec());
             counters.heartbeats_recorded.fetch_add(1, Ordering::Relaxed);
         }
     } else if !run_for.is_zero() {

@@ -1,10 +1,11 @@
 //! Tasks handed to the language by pull, against a fake engine.
 
+use crate::common::typed::TypedWork;
 use std::time::Duration;
 
 use crate::common::{task, Engine};
-use orcher_sdk_core::proto::host::v1::{task_outcome, TaskOutcome};
-use orcher_sdk_core::proto::kernel::v1::{Failure, Payload};
+use orcher_proto::host::v1::{task_outcome, TaskOutcome};
+use orcher_proto::kernel::v1::{Failure, Payload};
 use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn task_worker(engine: &Engine) -> Host {
@@ -45,7 +46,7 @@ async fn a_task_reaches_the_language_whole() {
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     let host = task_worker(&engine).await;
 
-    let assignment = host.next_task().await.expect("a task");
+    let assignment = host.typed().next_task().await.expect("a task");
     assert_eq!(assignment.token, b"token-1");
     assert_eq!(assignment.task_id, "charge_0");
     assert_eq!(assignment.task_type, "charge");
@@ -59,13 +60,14 @@ async fn a_task_reaches_the_language_whole() {
     assert_eq!(assignment.input[0].data, br#"{"amount":7}"#);
     assert_eq!(assignment.attempt_timeout.as_ref().unwrap().seconds, 30);
 
-    host.complete_task(TaskOutcome {
-        token: assignment.token.clone(),
-        result: value(b"\"charged\""),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    host.typed()
+        .complete_task(TaskOutcome {
+            token: assignment.token.clone(),
+            result: value(b"\"charged\""),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     eventually("the completion", || !engine.script().completed.is_empty()).await;
     assert_eq!(engine.script().completed[0].task_token, b"token-1");
     host.shutdown().await;
@@ -80,19 +82,20 @@ async fn a_task_failure_is_reported_as_the_tasks_own() {
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     let host = task_worker(&engine).await;
 
-    let assignment = host.next_task().await.unwrap();
-    host.complete_task(TaskOutcome {
-        token: assignment.token,
-        result: Some(task_outcome::Result::Failure(Failure {
-            message: "card declined".into(),
-            error_type: "Declined".into(),
-            non_retryable: true,
+    let assignment = host.typed().next_task().await.unwrap();
+    host.typed()
+        .complete_task(TaskOutcome {
+            token: assignment.token,
+            result: Some(task_outcome::Result::Failure(Failure {
+                message: "card declined".into(),
+                error_type: "Declined".into(),
+                non_retryable: true,
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     eventually("the failure", || !engine.script().failed.is_empty()).await;
     let failure = engine.script().failed[0].failure.clone().unwrap();
@@ -110,7 +113,7 @@ async fn a_cancellation_request_reaches_a_heartbeating_task() {
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     engine.script().cancel_requested = true;
     let host = task_worker(&engine).await;
-    let assignment = host.next_task().await.unwrap();
+    let assignment = host.typed().next_task().await.unwrap();
 
     let waiting = {
         let host = host.clone();
@@ -125,6 +128,7 @@ async fn a_cancellation_request_reaches_a_heartbeating_task() {
     let mut answered = false;
     for _ in 0..200 {
         if host
+            .typed()
             .heartbeat(&assignment.token, Some(details.clone()))
             .cancel_requested
         {
@@ -159,7 +163,7 @@ async fn a_reported_task_is_no_longer_held() {
     let engine = Engine::default();
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     let host = task_worker(&engine).await;
-    let assignment = host.next_task().await.unwrap();
+    let assignment = host.typed().next_task().await.unwrap();
 
     let waiting = {
         let host = host.clone();
@@ -167,19 +171,25 @@ async fn a_reported_task_is_no_longer_held() {
         tokio::spawn(async move { host.task_cancelled(&token).await })
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
-    host.complete_task(TaskOutcome {
-        token: assignment.token.clone(),
-        result: value(b"1"),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    host.typed()
+        .complete_task(TaskOutcome {
+            token: assignment.token.clone(),
+            result: value(b"1"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert!(!tokio::time::timeout(Duration::from_secs(2), waiting)
         .await
         .unwrap()
         .unwrap());
     assert!(!host.task_cancelled(&assignment.token).await);
-    assert!(!host.heartbeat(&assignment.token, None).cancel_requested);
+    assert!(
+        !host
+            .typed()
+            .heartbeat(&assignment.token, None)
+            .cancel_requested
+    );
     host.shutdown().await;
 }
 
@@ -190,8 +200,9 @@ async fn an_empty_outcome_is_refused() {
     let engine = Engine::default();
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     let host = task_worker(&engine).await;
-    let assignment = host.next_task().await.unwrap();
+    let assignment = host.typed().next_task().await.unwrap();
     let error = host
+        .typed()
         .complete_task(TaskOutcome {
             token: assignment.token,
             result: None,
@@ -218,7 +229,7 @@ async fn a_worker_without_tasks_hands_out_none() {
     .await
     .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), host.next_task())
+        tokio::time::timeout(Duration::from_millis(100), host.typed().next_task())
             .await
             .unwrap()
             .is_none()
@@ -233,7 +244,7 @@ async fn pulls_end_after_shutdown() {
     let host = task_worker(&engine).await;
     host.shutdown().await;
     assert!(
-        tokio::time::timeout(Duration::from_secs(5), host.next_task())
+        tokio::time::timeout(Duration::from_secs(5), host.typed().next_task())
             .await
             .expect("a pull after shutdown waited forever")
             .is_none()
@@ -257,14 +268,15 @@ async fn calls_to_the_engine_are_measured_by_method() {
     }
     let host = task_worker(&engine).await;
 
-    let assignment = host.next_task().await.expect("a task");
-    host.complete_task(TaskOutcome {
-        token: assignment.token.clone(),
-        result: value(b"\"charged\""),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    let assignment = host.typed().next_task().await.expect("a task");
+    host.typed()
+        .complete_task(TaskOutcome {
+            token: assignment.token.clone(),
+            result: value(b"\"charged\""),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     eventually("the completion", || !engine.script().completed.is_empty()).await;
     // The engine holds the completion before the call that carried it has
     // returned and been measured.
@@ -317,14 +329,15 @@ async fn a_completed_task_is_counted_in_the_worker_heartbeat() {
     .await
     .unwrap();
 
-    let assignment = host.next_task().await.expect("a task");
-    host.complete_task(TaskOutcome {
-        token: assignment.token.clone(),
-        result: value(b"{}"),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    let assignment = host.typed().next_task().await.expect("a task");
+    host.typed()
+        .complete_task(TaskOutcome {
+            token: assignment.token.clone(),
+            result: value(b"{}"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     eventually("a heartbeat counting the completed task", || {
         engine.script().worker_heartbeats.iter().any(|heartbeat| {
             heartbeat

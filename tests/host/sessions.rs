@@ -2,6 +2,7 @@
 //! tasks never reach the language, and a session's queue is polled from its
 //! creation to its end.
 
+use crate::common::typed::TypedWork;
 use std::time::{Duration, Instant};
 
 use crate::common::{task, Engine};
@@ -21,7 +22,7 @@ async fn session_worker(engine: &Engine, max_sessions: usize) -> Host {
     // The language pulls tasks all along, as a worker does: the host runs a
     // session task when it reaches the front.
     let puller = host.clone();
-    tokio::spawn(async move { while puller.next_task().await.is_some() {} });
+    tokio::spawn(async move { while puller.typed().next_task().await.is_some() {} });
     host
 }
 
@@ -122,7 +123,7 @@ async fn a_session_is_opened_used_and_completed_by_the_host() {
     .await
     .unwrap();
     let language = host.clone();
-    let first = tokio::spawn(async move { language.next_task().await });
+    let first = tokio::spawn(async move { language.typed().next_task().await });
 
     let info = opened(&engine, "create-1").await;
     let queue = info["session_queue"].as_str().unwrap().to_string();
@@ -155,7 +156,7 @@ async fn a_session_is_opened_used_and_completed_by_the_host() {
         .tasks
         .push_back(complete("complete-1", "session_0"));
     let puller = host.clone();
-    tokio::spawn(async move { while puller.next_task().await.is_some() {} });
+    tokio::spawn(async move { while puller.typed().next_task().await.is_some() {} });
     assert_eq!(opened(&engine, "complete-1").await, serde_json::json!({}));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(

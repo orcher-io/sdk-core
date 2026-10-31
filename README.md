@@ -92,9 +92,9 @@ To check a language runtime against the kernel protocol without an engine, run i
 | Rust SDK | [`orcher-sdk`](https://crates.io/crates/orcher-sdk) | [orcher-io/sdk-rust](https://github.com/orcher-io/sdk-rust) |
 | TypeScript SDK | [`@orcher/sdk`](https://www.npmjs.com/package/@orcher/sdk) | [orcher-io/sdk-ts](https://github.com/orcher-io/sdk-ts) |
 
-The core polls and the language SDK executes: the engine never sees your handlers, and your handlers never see gRPC. The generated protocol types are re-exported as `orcher_sdk_core::proto`.
+The core polls and the language SDK executes: the engine never sees your handlers, and your handlers never see gRPC. A language SDK exchanges the kernel, host and client protocols with the core as encoded messages (`Host::encoded()`, `kernel::encoded`, `ProtocolClient`) and decodes them with generated code of its own, at the protocol version it implements; the public API names no generated type.
 
-Because those types are re-exported, a release that moves to a newer `orcher-proto` is a minor release of this crate: a crate that also depends on `orcher-proto` must move to the same version. The core asks the engine for several activations or tasks per poll, and sends the heartbeats of tasks due together in one call; an engine older than those calls is polled for one item at a time and sent one heartbeat per call, with nothing to configure.
+So a release that moves the core to a newer `orcher-proto` changes nothing a language SDK compiles against: an SDK moves to a newer protocol when it wants something in it, not because the core did. The core asks the engine for several activations or tasks per poll, and sends the heartbeats of tasks due together in one call; an engine older than those calls is polled for one item at a time and sent one heartbeat per call, with nothing to configure.
 
 <br />
 

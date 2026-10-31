@@ -25,18 +25,21 @@ GENERATED = re.compile(
 )
 
 ALLOWED = {
-    # The protocols a language SDK speaks with this crate.
-    "src/lib.rs": "re-exports the kernel and host protocols a language SDK speaks",
-    # The kernel and host speak the kernel and host protocols' messages until
-    # #31 Phase B gives them domain types.
-    "src/kernel/activation.rs": "kernel protocol messages (Phase B)",
-    "src/kernel/completion.rs": "kernel protocol messages (Phase B)",
-    "src/kernel/step_ids.rs": "kernel protocol messages (Phase B)",
-    "src/worker/host/mod.rs": "host protocol messages (Phase B)",
-    "src/worker/host/tasks.rs": "host protocol messages (Phase B)",
-    "src/worker/host/actors.rs": "host protocol messages, actor service calls (Phase B)",
-    "src/worker/host/workflows.rs": "kernel protocol messages (Phase B)",
-    "src/client/protocol.rs": "client protocol messages (Phase B)",
+    # The crate-private alias of the generated protocols.
+    "src/lib.rs": "the crate-private alias of the kernel and host protocols",
+    # The kernel and host build and read the kernel and host protocols'
+    # messages here and hand every language SDK their encoded bytes, which
+    # each SDK decodes with generated code of its own. None of them is in the
+    # public API (scripts/check-public-surface.py keeps it so): #31 Phase B
+    # chose encoded messages over a hand-written mirror.
+    "src/kernel/activation.rs": "kernel protocol messages",
+    "src/kernel/completion.rs": "kernel protocol messages",
+    "src/kernel/step_ids.rs": "kernel protocol messages",
+    "src/worker/host/mod.rs": "host protocol messages",
+    "src/worker/host/tasks.rs": "host protocol messages",
+    "src/worker/host/actors.rs": "host protocol messages, actor service calls",
+    "src/worker/host/workflows.rs": "kernel protocol messages",
+    "src/client/protocol.rs": "client protocol messages",
     # Calls to the engine, built where they are made.
     "src/client/actor.rs": "actor service calls",
     "src/client/namespace.rs": "namespace service calls",

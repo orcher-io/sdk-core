@@ -2,12 +2,13 @@
 //! operations handed over by pull and reported with their failure types,
 //! state read and written, every call with the worker's credentials.
 
+use crate::common::typed::TypedWork;
 use std::time::Duration;
 
 use crate::common::Engine;
+use orcher_proto::host::v1::{actor_result, ActorMode, ActorResult};
+use orcher_proto::kernel::v1::{Failure, Payload};
 use orcher_proto::orcher::v1::{ActorOperation, OperationMode};
-use orcher_sdk_core::proto::host::v1::{actor_result, ActorMode, ActorResult};
-use orcher_sdk_core::proto::kernel::v1::{Failure, Payload};
 use orcher_sdk_core::{ActorHandler, Host, HostConfig, Registrations, StateScope};
 
 fn handlers() -> Registrations {
@@ -103,8 +104,16 @@ async fn operations_and_their_results_round_trip() {
     ];
     let host = actor_worker(&engine).await;
 
-    let first = host.next_actor_operation().await.expect("an operation");
-    let second = host.next_actor_operation().await.expect("an operation");
+    let first = host
+        .typed()
+        .next_actor_operation()
+        .await
+        .expect("an operation");
+    let second = host
+        .typed()
+        .next_actor_operation()
+        .await
+        .expect("an operation");
     assert_eq!(first.operation_id, "op-1");
     assert_eq!(first.mode, ActorMode::Shared as i32);
     assert_eq!(second.mode, ActorMode::Exclusive as i32);
@@ -114,29 +123,31 @@ async fn operations_and_their_results_round_trip() {
     );
     assert_eq!(first.payload.as_ref().unwrap().data, br#"{"sku":"A1"}"#);
 
-    host.complete_actor_operation(ActorResult {
-        operation_id: "op-1".into(),
-        execution_id: "op-1-exec".into(),
-        result: Some(actor_result::Result::Value(Payload {
-            data: b"42".to_vec(),
+    host.typed()
+        .complete_actor_operation(ActorResult {
+            operation_id: "op-1".into(),
+            execution_id: "op-1-exec".into(),
+            result: Some(actor_result::Result::Value(Payload {
+                data: b"42".to_vec(),
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
-    host.complete_actor_operation(ActorResult {
-        operation_id: "op-2".into(),
-        execution_id: "op-2-exec".into(),
-        result: Some(actor_result::Result::Failure(Failure {
-            message: "out of stock".into(),
-            error_type: "OutOfStock".into(),
+        })
+        .await
+        .unwrap();
+    host.typed()
+        .complete_actor_operation(ActorResult {
+            operation_id: "op-2".into(),
+            execution_id: "op-2-exec".into(),
+            result: Some(actor_result::Result::Failure(Failure {
+                message: "out of stock".into(),
+                error_type: "OutOfStock".into(),
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     eventually("both completions", || {
         engine.script().actor_completions.len() == 2
@@ -155,6 +166,7 @@ async fn operations_and_their_results_round_trip() {
 
     // An answer to an operation already answered is refused.
     let again = host
+        .typed()
         .complete_actor_operation(ActorResult {
             operation_id: "op-1".into(),
             execution_id: "op-1-exec".into(),
@@ -221,19 +233,20 @@ async fn every_actor_call_carries_the_workers_credentials() {
     let host = actor_worker(&engine).await;
     let scope = StateScope::new("Cart", "user-7", "op-1-exec");
 
-    host.next_actor_operation().await.unwrap();
+    host.typed().next_actor_operation().await.unwrap();
     host.set_actor_state(&scope, "items", b"[]".to_vec(), None)
         .await
         .unwrap();
     host.get_actor_state(&scope, "items").await.unwrap();
-    host.complete_actor_operation(ActorResult {
-        operation_id: "op-1".into(),
-        execution_id: "op-1-exec".into(),
-        result: Some(actor_result::Result::Value(Payload::default())),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    host.typed()
+        .complete_actor_operation(ActorResult {
+            operation_id: "op-1".into(),
+            execution_id: "op-1-exec".into(),
+            result: Some(actor_result::Result::Value(Payload::default())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     eventually("the completion", || {
         !engine.script().actor_completions.is_empty()
     })
@@ -284,7 +297,7 @@ async fn actor_pulls_end_after_shutdown() {
     let engine = Engine::default();
     let host = actor_worker(&engine).await;
     let pulling = host.clone();
-    let pull = tokio::spawn(async move { pulling.next_actor_operation().await });
+    let pull = tokio::spawn(async move { pulling.typed().next_actor_operation().await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     tokio::time::timeout(Duration::from_secs(15), host.shutdown())

@@ -95,16 +95,16 @@
 //! }
 //! ```
 
-/// The protocols a language SDK speaks with this crate, as generated from
-/// orcher-proto: the kernel protocol (`orcher.kernel.v1`), what a workflow's
-/// activation and its answer are, and the host protocol (`orcher.host.v1`),
-/// what a task or an actor operation and its outcome are, with the protobuf
-/// runtime to encode and decode them.
-///
-/// The engine's own protocol (`orcher.v1`) is not here: it is what this crate
-/// speaks to the engine on a language SDK's behalf.
-pub mod proto {
-    pub use orcher_proto::{client, host, kernel, prost, prost_types};
+// The generated protocol code, for this crate's own use. None of it is part
+// of the public API: a language SDK exchanges the kernel, host and client
+// protocols with this crate as encoded messages ([`EncodedHost`],
+// [`kernel::encoded`], [`ProtocolClient`]) and decodes them with generated
+// code of its own, at the protocol version it implements. That is what lets
+// this crate adopt a new orcher-proto without a breaking release, and lets an
+// SDK move to a new protocol version when it wants something in it, not
+// because this crate did. `scripts/check-public-surface.sh` keeps it so.
+pub(crate) mod proto {
+    pub use orcher_proto::{host, kernel, prost, prost_types};
 }
 
 pub mod client;

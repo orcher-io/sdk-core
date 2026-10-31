@@ -1,14 +1,15 @@
 //! Workflow activations handed to the language as the kernel protocol's
 //! messages, against a fake engine.
 
+use crate::common::typed::TypedWork;
 use std::time::Duration;
 
 use crate::common::{activation, Engine};
-use orcher_proto::orcher::v1::command::Attributes;
-use orcher_sdk_core::proto::kernel::v1::{
+use orcher_proto::kernel::v1::{
     command, resolution, run_activation_result, Command, Commands, Failure, ProtocolError,
     RunActivationResult, RunTask, StartChild, StepIdScheme,
 };
+use orcher_proto::orcher::v1::command::Attributes;
 use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn workflow_worker(engine: &Engine) -> Host {
@@ -53,7 +54,7 @@ async fn an_activation_reaches_the_language_resolved() {
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
 
-    let run = host.next_activation().await.expect("an activation");
+    let run = host.typed().next_activation().await.expect("an activation");
     assert_eq!(run.activation_id, b"act-1");
     assert_eq!(run.run.as_ref().unwrap().workflow_type, "checkout");
     let kinds: Vec<&str> = run
@@ -78,21 +79,22 @@ async fn an_answer_reaches_the_engine_as_commands() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
-    let run = host.next_activation().await.unwrap();
+    let run = host.typed().next_activation().await.unwrap();
 
-    host.complete_activation(RunActivationResult {
-        activation_id: run.activation_id,
-        outcome: Some(run_activation_result::Outcome::Commands(Commands {
-            commands: vec![
-                call(0, true, "charge_0", "charge"),
-                call(1, false, "ship_1", "ship"),
-            ],
+    host.typed()
+        .complete_activation(RunActivationResult {
+            activation_id: run.activation_id,
+            outcome: Some(run_activation_result::Outcome::Commands(Commands {
+                commands: vec![
+                    call(0, true, "charge_0", "charge"),
+                    call(1, false, "ship_1", "ship"),
+                ],
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     eventually("the completion", || {
         !engine.script().workflow_completions.is_empty()
@@ -128,20 +130,21 @@ async fn an_answer_that_disagrees_with_history_is_not_applied() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
-    let run = host.next_activation().await.unwrap();
+    let run = host.typed().next_activation().await.unwrap();
 
     // The journal recorded a `charge` task at charge_0; the code now issues a
     // `refund` there.
-    host.complete_activation(RunActivationResult {
-        activation_id: run.activation_id,
-        outcome: Some(run_activation_result::Outcome::Commands(Commands {
-            commands: vec![call(0, false, "charge_0", "refund")],
+    host.typed()
+        .complete_activation(RunActivationResult {
+            activation_id: run.activation_id,
+            outcome: Some(run_activation_result::Outcome::Commands(Commands {
+                commands: vec![call(0, false, "charge_0", "refund")],
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     eventually("the activation handed back", || {
         !engine.script().releases.is_empty()
@@ -159,20 +162,21 @@ async fn a_protocol_error_hands_the_activation_back() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
-    let run = host.next_activation().await.unwrap();
+    let run = host.typed().next_activation().await.unwrap();
 
-    host.complete_activation(RunActivationResult {
-        activation_id: run.activation_id,
-        outcome: Some(run_activation_result::Outcome::ProtocolError(
-            ProtocolError {
-                message: "unknown resolution".into(),
-                ..Default::default()
-            },
-        )),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    host.typed()
+        .complete_activation(RunActivationResult {
+            activation_id: run.activation_id,
+            outcome: Some(run_activation_result::Outcome::ProtocolError(
+                ProtocolError {
+                    message: "unknown resolution".into(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
 
     eventually("the release", || !engine.script().releases.is_empty()).await;
     assert!(engine.script().workflow_failures.is_empty());
@@ -186,18 +190,19 @@ async fn a_workflow_failure_fails_the_run() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
-    let run = host.next_activation().await.unwrap();
+    let run = host.typed().next_activation().await.unwrap();
 
-    host.complete_activation(RunActivationResult {
-        activation_id: run.activation_id,
-        outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
-            message: "out of stock".into(),
+    host.typed()
+        .complete_activation(RunActivationResult {
+            activation_id: run.activation_id,
+            outcome: Some(run_activation_result::Outcome::WorkflowFailed(Failure {
+                message: "out of stock".into(),
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     eventually("the failure", || {
         !engine.script().workflow_failures.is_empty()
@@ -236,14 +241,15 @@ async fn a_failure_after_every_recorded_step_fails_the_run() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
-    let run = host.next_activation().await.unwrap();
+    let run = host.typed().next_activation().await.unwrap();
 
-    host.complete_activation(failed(
-        run.activation_id,
-        vec![call(0, true, "charge_0", "charge")],
-    ))
-    .await
-    .unwrap();
+    host.typed()
+        .complete_activation(failed(
+            run.activation_id,
+            vec![call(0, true, "charge_0", "charge")],
+        ))
+        .await
+        .unwrap();
 
     eventually("the failure", || {
         !engine.script().workflow_failures.is_empty()
@@ -261,9 +267,10 @@ async fn a_failure_that_left_a_recorded_step_behind_is_held() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
-    let run = host.next_activation().await.unwrap();
+    let run = host.typed().next_activation().await.unwrap();
 
-    host.complete_activation(failed(run.activation_id, vec![]))
+    host.typed()
+        .complete_activation(failed(run.activation_id, vec![]))
         .await
         .unwrap();
 
@@ -282,6 +289,7 @@ async fn an_answer_to_no_held_activation_is_refused() {
     let engine = Engine::default();
     let host = workflow_worker(&engine).await;
     let error = host
+        .typed()
         .complete_activation(RunActivationResult {
             activation_id: b"never-handed-out".to_vec(),
             ..Default::default()
@@ -317,7 +325,7 @@ async fn a_run_under_the_kernel_scheme_gets_its_ids_from_the_kernel() {
     .await
     .unwrap();
 
-    let run = host.next_activation().await.expect("an activation");
+    let run = host.typed().next_activation().await.expect("an activation");
     assert_eq!(
         engine.script().polled_step_ids[0],
         [StepIdScheme::Kernel as i32, StepIdScheme::RustV0 as i32]
@@ -332,26 +340,27 @@ async fn a_run_under_the_kernel_scheme_gets_its_ids_from_the_kernel() {
         orcher_sdk_core::kernel::random::seed_for_lineage("lineage-1")
     );
 
-    host.complete_activation(RunActivationResult {
-        activation_id: run.activation_id,
-        outcome: Some(run_activation_result::Outcome::Commands(Commands {
-            commands: vec![
-                call(0, false, "", "charge"),
-                Command {
-                    seq: 1,
-                    what: Some(command::What::StartChild(StartChild {
-                        workflow_type: "ship".into(),
+    host.typed()
+        .complete_activation(RunActivationResult {
+            activation_id: run.activation_id,
+            outcome: Some(run_activation_result::Outcome::Commands(Commands {
+                commands: vec![
+                    call(0, false, "", "charge"),
+                    Command {
+                        seq: 1,
+                        what: Some(command::What::StartChild(StartChild {
+                            workflow_type: "ship".into(),
+                            ..Default::default()
+                        })),
                         ..Default::default()
-                    })),
-                    ..Default::default()
-                },
-            ],
+                    },
+                ],
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
 
     eventually("the completion", || {
         !engine.script().workflow_completions.is_empty()
@@ -377,7 +386,7 @@ async fn a_worker_reporting_no_scheme_runs_as_before() {
     engine.script().activations.push_back(activation("act-1"));
     let host = workflow_worker(&engine).await;
 
-    let run = host.next_activation().await.expect("an activation");
+    let run = host.typed().next_activation().await.expect("an activation");
     assert!(engine.script().polled_step_ids[0].is_empty());
     let Some(resolution::What::Started(started)) = &run.resolutions[0].what else {
         panic!("the run does not start first: {:?}", run.resolutions);

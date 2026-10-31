@@ -5,12 +5,12 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use orcher_proto::client::v1 as client;
+use orcher_proto::client::v1::client_answer::Answer;
+use orcher_proto::client::v1::client_call::Call;
 use orcher_proto::orcher::v1::workflow_service_server::{WorkflowService, WorkflowServiceServer};
 use orcher_proto::orcher::v1::*;
-use orcher_sdk_core::proto::client::v1 as client;
-use orcher_sdk_core::proto::client::v1::client_answer::Answer;
-use orcher_sdk_core::proto::client::v1::client_call::Call;
-use orcher_sdk_core::proto::prost::Message;
+use orcher_proto::prost::Message;
 use orcher_sdk_core::{ConnectOptions, Connection, ProtocolClient};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;

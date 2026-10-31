@@ -88,7 +88,7 @@ pub fn id_for(kind: StepKind, seq: u64) -> String {
 
 /// The step id of the durable call issued `seq`-th, or `None` for a command
 /// that is not a step.
-pub fn step_id(call: &command::What, seq: u64) -> Option<String> {
+pub(crate) fn step_id(call: &command::What, seq: u64) -> Option<String> {
     kind_of(call).map(|kind| id_for(kind, seq))
 }
 

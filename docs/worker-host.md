@@ -64,22 +64,25 @@ Sessions are split three ways: Rust runs them natively; Python and TypeScript ke
 4. **One config, one set of defaults.** The host owns every default listed in §2, the stable identity (generated once), TLS normalization, credentials for every connection it opens, and registration metadata (the binding supplies the SDK name and version).
 5. **Nothing claimed is stranded.** Every piece of work the host takes is either handed to the language, completed, failed, or released back to the engine at once (conversion failure, shutdown), never left to a claim timeout.
 
-## 4. The host API (Rust, which the bindings mirror)
+## 4. The host API (one API for every language, Rust's included)
+
+Work crosses as encoded kernel and host messages; each SDK decodes and encodes them with generated code of its own, at the protocol version it implements. The public API names no generated type (`scripts/check-public-surface.py`), so a new `orcher-proto` in core changes nothing an SDK compiles against.
 
 ```rust
 let host = Host::start(HostConfig { … }, Registrations { workflow_types, task_types, actor_types }).await?;
 // decides drivers with NeededDrivers; refuses to start when nothing is registered
+let work = host.encoded();
 
-host.next_activation().await -> Option<RunActivation>          // None: draining, no more
-host.complete_activation(RunActivationResult).await?
+work.next_activation().await -> Option<Vec<u8>>                // a RunActivation; None: draining, no more
+work.complete_activation(&RunActivationResult bytes).await?
 
-host.next_task().await      -> Option<TaskAssignment>
-host.heartbeat(&token, details) -> HeartbeatAnswer             // { cancel_requested }
-host.task_cancelled(&token).await -> bool                       // true: cancel; false: already reported
-host.complete_task(&token, TaskOutcome).await?                  // value | TaskFailure (type, non-retryable)
+work.next_task().await      -> Option<Vec<u8>>                  // a TaskAssignment
+work.heartbeat(&TaskHeartbeat bytes) -> Vec<u8>                 // a HeartbeatAnswer { cancel_requested }
+work.task_cancelled(&token).await -> bool                       // true: cancel; false: already reported
+work.complete_task(&TaskOutcome bytes).await?                   // value | Failure (type, non-retryable)
 
-host.next_actor_operation().await -> Option<ActorOperation>
-host.complete_actor_operation(ActorResult).await?               // value | Failure (type kept as the error code)
+work.next_actor_operation().await -> Option<Vec<u8>>            // an ActorOperation
+work.complete_actor_operation(&ActorResult bytes).await?        // value | Failure (type kept as the error code)
 host.get_actor_state(&scope, key) / set_actor_state(…, expected_version) / delete_actor_state / actor_state_keys
                                                                 // on the host's channel, with the worker's credentials
 

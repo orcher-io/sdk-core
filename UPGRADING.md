@@ -4,6 +4,26 @@ What a language SDK, or any other user of this crate, changes when it moves to
 a new minor release. Every breaking change is also listed in
 [CHANGELOG.md](CHANGELOG.md).
 
+## 0.22 to 0.23
+
+0.23 takes the last generated protocol types out of the public API. A
+language SDK exchanges the kernel and host protocols with core as encoded
+messages and decodes them with generated code of its own, at the protocol
+version it implements, as the Python and TypeScript SDKs already did. From
+here, core moving to a newer `orcher-proto` changes nothing an SDK compiles
+against, so a proto release no longer makes every SDK release.
+
+| Before | Now |
+| --- | --- |
+| `orcher_sdk_core::proto::{kernel, host, client, prost, prost_types}` | depend on `orcher-proto` yourself, at the protocol version you implement |
+| `Host::{next_activation, complete_activation, next_task, heartbeat, complete_task, next_actor_operation, complete_actor_operation}` with generated types | the same calls on `host.encoded()` (`EncodedHost`), with encoded messages; `Host::task_cancelled` is unchanged |
+| `StateScope::of(&operation)` | `StateScope::new(operation.actor_name, operation.key, operation.execution_id)` |
+| `kernel::step_ids::step_id(&command::What, seq)` | map your call to a `StepKind` and use `kernel::step_ids::id_for(kind, seq)` |
+
+A runtime built against a newer protocol than core's is handled the way
+protobuf handles it: a field core does not know is ignored, and a command of a
+kind core does not know is refused as a protocol error, never dropped.
+
 ## 0.19 to 0.20
 
 0.20 runs the worker host from core and takes the engine's own protocol

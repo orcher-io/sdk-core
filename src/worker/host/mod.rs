@@ -6,19 +6,20 @@
 //!
 //! One worker's plumbing, written once: building core's drivers from one
 //! configuration, running the worker's lifecycle, and registering and
-//! deregistering it. The Rust SDK uses this crate directly; the Python and
+//! deregistering it. Every language SDK runs its workers on it; the Python and
 //! TypeScript native modules are bindings over it. Before it, each of the
 //! three did this itself, with different bugs.
 //!
 //! The design is `docs/worker-host.md` in the sdk-core repository. The host
-//! hands work to the language by pull: the language asks for the next piece
-//! of work when it has room to run one, and returns its outcome. Tasks are
-//! handed over this way ([`Host::next_task`]), and workflow activations as the
-//! kernel protocol's messages ([`Host::next_activation`]). Sessions are run
-//! by the host itself: the built-in session tasks never reach the language.
-//! Actor operations are handed over by pull too
-//! ([`Host::next_actor_operation`]), and the actors' state is read and written
-//! through the host, on its connection, with the worker's credentials.
+//! hands work to the language by pull, as encoded protocol messages
+//! ([`EncodedHost`]): the language asks for the next piece of work when it has
+//! room to run one, and returns its outcome. Workflow activations cross as the
+//! kernel protocol's messages ([`EncodedHost::next_activation`]), tasks and
+//! actor operations as the host protocol's ([`EncodedHost::next_task`],
+//! [`EncodedHost::next_actor_operation`]). Sessions are run by the host
+//! itself: the built-in session tasks never reach the language. The actors'
+//! state is read and written through the host, on its connection, with the
+//! worker's credentials.
 
 mod actors;
 pub mod config;
@@ -321,7 +322,7 @@ impl Host {
     /// history resolved into the outcomes its code observes. `None` once the
     /// worker has stopped and every activation it took has been handed over,
     /// and at once for a worker that runs no workflows.
-    pub async fn next_activation(&self) -> Option<RunActivation> {
+    pub(crate) async fn next_activation(&self) -> Option<RunActivation> {
         self.inner.workflows.as_ref()?.next().await
     }
 
@@ -335,7 +336,7 @@ impl Host {
     /// Returns [`Error::Protocol`] for an answer to an activation the host
     /// does not hold (already answered, or the worker stopped), and an error
     /// once the worker has stopped.
-    pub async fn complete_activation(&self, answer: RunActivationResult) -> Result<()> {
+    pub(crate) async fn complete_activation(&self, answer: RunActivationResult) -> Result<()> {
         match &self.inner.workflows {
             Some(workflows) => workflows.complete(answer).await,
             None => Err(Error::Configuration(
@@ -347,13 +348,13 @@ impl Host {
     /// The next task to run, once there is one. `None` once the worker has
     /// stopped and every task it took has been handed over, and at once for
     /// a worker that runs no tasks.
-    pub async fn next_task(&self) -> Option<TaskAssignment> {
+    pub(crate) async fn next_task(&self) -> Option<TaskAssignment> {
         self.inner.tasks.as_ref()?.next().await
     }
 
     /// Records a heartbeat for a running task, with progress details, and
     /// says whether the task has been asked to cancel.
-    pub fn heartbeat(&self, token: &[u8], details: Option<Payload>) -> HeartbeatAnswer {
+    pub(crate) fn heartbeat(&self, token: &[u8], details: Option<Payload>) -> HeartbeatAnswer {
         match &self.inner.tasks {
             Some(tasks) => tasks.heartbeat(token, details),
             None => HeartbeatAnswer::default(),
@@ -375,7 +376,7 @@ impl Host {
     ///
     /// Returns an error for an outcome with neither a value nor a failure, or
     /// once the worker has stopped.
-    pub async fn complete_task(&self, outcome: TaskOutcome) -> Result<()> {
+    pub(crate) async fn complete_task(&self, outcome: TaskOutcome) -> Result<()> {
         match &self.inner.tasks {
             Some(tasks) => tasks.complete(outcome).await,
             None => Err(Error::Configuration("the worker runs no tasks".to_string())),
@@ -384,7 +385,7 @@ impl Host {
 
     /// The next actor operation to run, once there is one. `None` once the
     /// worker has stopped, and at once for a worker that runs no actors.
-    pub async fn next_actor_operation(&self) -> Option<ActorOperation> {
+    pub(crate) async fn next_actor_operation(&self) -> Option<ActorOperation> {
         self.inner.actors.as_ref()?.next().await
     }
 
@@ -396,7 +397,7 @@ impl Host {
     /// Returns [`Error::Protocol`] for a result of an operation the host does
     /// not hold, an error for a result with neither a value nor a failure,
     /// and an error once the worker has stopped.
-    pub async fn complete_actor_operation(&self, result: ActorResult) -> Result<()> {
+    pub(crate) async fn complete_actor_operation(&self, result: ActorResult) -> Result<()> {
         self.actors()?.complete(result).await
     }
 
