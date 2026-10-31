@@ -14,6 +14,9 @@
 # as bench/results/LABEL.engine.log, not committed), and removes the
 # containers, their volumes and the network on the way out.
 #
+# BENCH_ENGINE_LOG_LEVEL sets the engine's log level (default warn), for
+# tracing a run through its log, e.g. "info,orcher_dispatch=info".
+#
 # Needs docker, curl and cargo. See bench/README.md.
 
 set -euo pipefail
@@ -113,7 +116,7 @@ docker run -d --name "$ENGINE" --network "$NET" \
   -e ORCHER_AUTO_MIGRATE=true -e ORCHER_DB_WAIT_SECS=120 \
   -e GRPC_BIND_ADDR=0.0.0.0:50051 -e HTTP_BIND_ADDR=0.0.0.0:8080 \
   -e ORCHER_GRPC_MAX_MESSAGE_BYTES=33554432 -e ORCHER_PAYLOAD_MAX_BYTES=8388608 \
-  -e LOG_LEVEL=warn -e LOG_FORMAT=compact \
+  -e LOG_LEVEL="${BENCH_ENGINE_LOG_LEVEL:-warn}" -e LOG_FORMAT=compact \
   "$IMAGE" >/dev/null
 GRPC_PORT=$(port_of "$ENGINE" 50051/tcp)
 HTTP_PORT=$(port_of "$ENGINE" 8080/tcp)
