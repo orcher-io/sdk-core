@@ -197,7 +197,7 @@ impl Default for WorkflowDriverConfig {
             non_determinism_retry_max: Duration::from_secs(60),
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
             supported_step_ids: Vec::new(),
-            history_cache_bytes: crate::worker::poll::history::DEFAULT_HISTORY_CACHE_BYTES,
+            history_cache_bytes: crate::wire::history::DEFAULT_HISTORY_CACHE_BYTES,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -556,7 +556,7 @@ impl WorkflowDriver {
                 {
                     if commands.iter().any(ends_run) {
                         if let Some(histories) =
-                            crate::worker::poll::history::RunHistories::of_process_if_any()
+                            crate::wire::history::RunHistories::of_process_if_any()
                         {
                             histories.forget(run_id);
                         }
