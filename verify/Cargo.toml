@@ -9,9 +9,11 @@ readme = "README.md"
 description = "Checks a workflow runtime in any language against the ORCHER kernel protocol's recorded replay vectors"
 keywords = ["orchestration", "workflow", "conformance", "replay"]
 categories = ["development-tools::testing"]
-# Published, so a runtime author can `cargo install orcher-verify` and check
-# a runtime in any language without this repository: the vectors under
-# vectors/ are built into the binary.
+# A tool, not a library: core is the only crate this repository publishes, so
+# a proto release reaches no one through this crate. Runtime authors install
+# it from the repository; the vectors under vectors/ are built into the
+# binary, so nothing else is needed.
+publish = false
 
 # Protocol messages are built with `..Default::default()` (see the workspace
 # lints in ../Cargo.toml).

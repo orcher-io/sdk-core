@@ -12,7 +12,7 @@ hands a runtime the activations recorded from the SDKs' contract suites and
 judges every answer with the kernel's own checks.
 
 ```sh
-cargo install orcher-verify
+cargo install --git https://github.com/orcher-io/sdk-core orcher-verify
 orcher-verify vectors --runtime node my-runtime.js
 ```
 
