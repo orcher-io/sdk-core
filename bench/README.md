@@ -51,7 +51,7 @@ builds `orcher-bench` in release mode from this checkout and writes
 `bench/results/<label>.md` (a summary), after every scenario, so a run
 stopped half-way keeps what it measured.
 
-`orcher-bench list` names every scenario. Set `RUST_LOG` (for example `RUST_LOG=orcher_sdk_core=warn`) to see the measured workers' logs on stderr. A full run takes from tens of
+`orcher-bench list` names every scenario. Set `RUST_LOG` (for example `RUST_LOG=orcher_sdk_core=warn`) to see the measured workers' logs on stderr. Set `BENCH_ENGINE_LOG_LEVEL` (default `warn`; for example `info,orcher_dispatch=info`) for a more detailed engine log in `bench/results/LABEL.engine.log`, to trace a slow run through the engine; more logging slows the engine, so compare only runs logged alike. A full run takes from tens of
 minutes to a few hours depending on the machine, most of it in
 `sequential-1000` and `fanout-10000`, whose cost is the point.
 
