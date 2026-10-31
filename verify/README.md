@@ -2,7 +2,9 @@
 
 Checks a workflow runtime, in any language, against the ORCHER kernel
 protocol ([`docs/kernel-protocol-v1.md`](https://github.com/orcher-io/sdk-core/blob/main/docs/kernel-protocol-v1.md)),
-without an engine and without this repository's Rust tests.
+without an engine and without this repository's Rust tests. With an engine,
+it also runs the contract scenarios against the runtime's whole worker
+([below](#the-contract-scenarios)).
 
 A runtime is the part of a language SDK that runs workflow code: handed a
 `RunActivation` (the outcomes the run observes, resolved by the kernel), it
@@ -166,3 +168,151 @@ orcher-verify vectors --runtime orcher-verify reference-runtime
 passes every vector, and with `--answers drop-command`, `change-task-type`
 or `forget-history` it answers wrong on purpose, which the tests require the
 runner to fail.
+
+## The contract scenarios
+
+The vectors check a runtime without an engine. The contract scenarios check
+a whole worker with one: [`scenarios.json`](https://github.com/orcher-io/sdk-core/blob/main/verify/scenarios.json)
+names, for each scenario, a workflow (or actor) of the contract catalog, the
+input it is started with, and what a client must observe: the terminal
+status, the JSON the workflow returns, the error a refused call reports.
+Every SDK's worker serves the same-named catalog (sdk-rust's
+`contract/src/catalog.rs` is the reference), so one runner judges them all.
+
+`scenarios.json` here is the source of truth. It was copied byte for byte
+from the SDK contract suites' `contract/scenarios.json`, identical in
+sdk-rust, sdk-py and sdk-ts at the time (sdk-rust commit 7789f26), and the
+SDKs are to sync their copy from this one. It is built into the binary;
+`--scenarios <file>` reads another.
+
+### Running them
+
+1. Start an engine with durable task failures on, and with short heartbeat
+   timeouts, so the liveness scenarios
+   (`task-outlives-heartbeat-timeout-without-heartbeat-code` among them)
+   time out a silent task within seconds rather than a minute:
+
+   ```sh
+   ORCHER_DURABLE_TASK_FAILURE=true
+   ORCHER_DEFAULT_HEARTBEAT_TIMEOUT_SECS=3
+   ORCHER_TIMEOUT_WATCHER_POLL_INTERVAL_SECS=1
+   ORCHER_TIMEOUT_WATCHER_GRACE_SECS=1
+   ```
+
+2. Start your worker, serving the contract catalog, on a task queue of its
+   own in the `contract` namespace. sdk-rust's starts with
+   `cargo run -p orcher-contract -- --worker-only --task-queue <queue>`.
+3. Run the scenarios against the same engine and queue:
+
+   ```sh
+   orcher-verify scenarios --server-url http://localhost:50051 \
+     --task-queue <queue> --sdk <your sdk>
+   ```
+
+The runner creates the namespace if it is missing, runs each scenario
+through core's client (`orcher_sdk_core::Connection`), and prints a line per
+scenario and a summary, in the vectors' style. It exits 1 if any scenario
+fails unexpectedly, 2 on a usage error.
+
+```text
+ok    echo  echo
+FAIL  task-failure-carries-its-type  task_failure_type
+        result mismatch
+            expected: {"cancelled":false,"caught":true,"error_type":"CardDeclined"}
+            actual:   {"cancelled":false,"caught":true,"error_type":"ExecutionError"}
+skip  task-retried-after-its-worker-dies  crash_mid_task
+        needs the SDK's own harness: it starts a worker process whose task kills it …
+ok    event-wakes-parked-workflow  wait_for_event_echo
+        judged in part: the engine describes no wait on an event, …
+xfail …
+47 scenarios: 37 passed (1 judged in part), 6 failed, 0 expected failures, 4 skipped
+```
+
+A scenario is `ok`, `FAIL`, `xfail` (failed as its known gap says),
+`skip` (not run, with the reason) or `ok` with "judged in part" (what a
+client can see held; the line says what it could not see).
+
+Options:
+
+- `--namespace <ns>`: the namespace (default `contract`, not `default`: a
+  child workflow started in the wrong namespace only shows as wrong in a
+  namespace that is not `default`).
+- `--sdk <name>`: whose known gaps apply. A scenario with `known_gap` (for
+  every SDK, or the ones `known_gap_sdks` lists) is expected to fail: its
+  failure is reported as `xfail` and does not fail the run, and a pass fails
+  the run so the flag is removed. Without `--sdk` only gaps for every SDK
+  apply.
+- `--only <id>[,<id>…]`: only these scenarios; may be given more than once.
+- `--parallel <n>`: run `n` scenarios at once (default 1). The scenarios
+  that restart the engine then run alone, at the end.
+- `--result-timeout <secs>`: how long to wait for a workflow to end
+  (default 30).
+- `--api-key <key>`: for an engine that authenticates callers (default
+  `ORCHER_API_KEY`).
+- `--restart-command <cmd>`: a shell command that restarts the engine, for
+  `engine-restart-then-dispatch` (default `ORCHER_CONTRACT_RESTART_CMD`);
+  without one it is skipped.
+- `--scenarios <file>`: read the catalog from this file.
+- `--actor-arguments value|tuple`: how an actor operation's input is
+  encoded. sdk-rust's operations decode their arguments as a JSON array, a
+  tuple of one; sdk-py's and sdk-ts's clients send the bare value. The
+  default is `tuple` for `--sdk rust` and `value` otherwise.
+
+A workflow's input is sent as plain JSON, as sdk-py's and sdk-ts's clients
+send it. sdk-rust's client wraps it in its payload envelope; its worker reads
+either.
+
+### How each kind is judged
+
+The judgement is sdk-rust's contract runner's (`contract/src/main.rs`), kind
+by kind. Where that runner reads the worker's own process, this one says
+what it judges instead.
+
+| `kind` | judged by |
+| --- | --- |
+| absent (a workflow) | The terminal status. For `completed`, the result: the fields `expect.result` lists, or with `result_exact` the whole result as equal JSON; and `min_elapsed_ms`/`max_elapsed_ms` on the wall clock. For `failed`, that the surfaced failure contains `error_contains`. |
+| `actor` | Each step's `parallel` invocations on a fresh key, every result matching `expect_each`. |
+| `reset` | The run completes, is reset to `reset_to_event_id`, and the successor run's result matches. |
+| `client_error` | The named call fails with core's error code `expect.error_code`. |
+| `workflow_id_reuse` | A second start under the id while it runs is refused with `error_code`, naming the open run. Once it completed, `AllowDuplicateFailedOnly` is refused the same way, and `AllowDuplicate` starts a new run whose result matches. |
+| `event` | Once parked, the event is sent by workflow id alone; the result matches and the `result_at_most` bounds hold. |
+| `cancel` | Once parked, the run is cancelled; it ends cancelled, or completes with a matching result. |
+| `engine_restart` | After the restart command, a new workflow completes on the untouched worker. Skipped without a restart command. |
+| `non_determinism_held` | In part, below. |
+| `cancel_queued_task`, `worker_crash` | Skipped, below. |
+
+"Parked" is read from the engine: the run is open and its description shows
+a pending timer or event. The engine describes a workflow parked on an event
+alone as waiting on nothing, so for `event-wakes-parked-workflow` the runner
+waits 3 seconds instead and reports the scenario as judged in part: the
+result and its activation bound are judged, but that the event woke a parked
+run, rather than reaching its first activation, is not seen.
+
+Scenarios a client cannot judge whole:
+
+- `child-id-changed-on-replay-is-held` (`non_determinism_held`) is judged in
+  part. Its `expect.observed`, that the worker replayed the run and how many
+  times the child ran, is counted in the worker's process. The runner judges
+  what that leaves in the engine instead: the catalog names the child
+  `<key>-child-<n>`, `n` counting the parent's activations, so once
+  `<key>-child-1` has completed (the parent is resumed with it: the replay
+  under test) and `hold_ms` has passed, the run must still be running and
+  `<key>-child-2` must not exist. That the replay happened is not observed.
+- `cancel-stops-a-queued-task` (`cancel_queued_task`) is skipped. It serves a
+  fresh queue with a worker that runs workflows and no tasks, starts one that
+  runs tasks only after the cancellation, and asserts what that worker saw in
+  its own process: only the SDK's harness can.
+- `task-retried-after-its-worker-dies` and
+  `task-timeout-on-last-attempt-reaches-workflow` (`worker_crash`) are
+  skipped. They start a worker process whose task kills it, then another, on
+  a queue of their own: only the SDK's harness can.
+
+sdk-rust's runner also checks, after the scenarios, the wire metrics its
+in-process worker recorded. That is not a scenario, and is not run here.
+
+### Where this is going
+
+Each SDK's contract suite carries a runner of its own today, driving the
+same file. They are meant to become thin wrappers over this one: start the
+SDK's worker, run `orcher-verify scenarios` against it, and keep in the SDK
+only the scenarios that need its own harness.

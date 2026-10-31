@@ -1,0 +1,747 @@
+{
+  "$comment": "Cross-SDK contract scenarios. Language-agnostic contract: every SDK ships a worker implementing the same-named workflow catalog, and each workflow returns a JSON result describing the durable behavior it observed. The harness starts each workflow with `input`, waits for a terminal state, and asserts `expect` (terminal status + returned result). Result matching is structural \u2014 a scenario asserts only the fields it lists, so SDK-specific extras (e.g. Rust exposes a task `attempts` count that Python's TaskError does not) are ignored. A scenario whose `expect.result_exact` is true asserts the whole result instead: equal JSON with no extra fields, where a boolean never equals a number. Scenarios with `kind: \"actor\"` instead invoke operations on a same-named actor from the catalog: each step fires `parallel` concurrent invocations against a fresh per-run key and asserts every invocation's JSON result against `expect_each`. Keep this file in sync across SDK repos.",
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "echo",
+      "description": "Sanity: worker runs, input round-trips through a workflow to a completed result.",
+      "workflow": "echo",
+      "input": {
+        "message": "hello-contract"
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "message": "hello-contract"
+        }
+      }
+    },
+    {
+      "id": "task-failure-caught",
+      "description": "A task fails; the workflow catches the durable task failure and completes, reporting the failed task type. Guards the durable task-failure decode path.",
+      "workflow": "catch_task_failure",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "task_type": "always_fail"
+        }
+      }
+    },
+    {
+      "id": "task-retries-exhausted",
+      "description": "A task declared with three attempts fails every time; the workflow catches the durable failure and reports how many attempts it took. Guards the attempt count, which a worker can drop while every other assertion here still passes.",
+      "workflow": "task_retries_exhausted",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "task_type": "always_fail_retried",
+          "attempts": 3
+        }
+      }
+    },
+    {
+      "id": "task-non-retryable-listed",
+      "description": "A task declared with three attempts fails with an error type its retry policy lists as non-retryable. The engine is told the type the task raised, so the task runs once.",
+      "workflow": "task_non_retryable_listed",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "task_type": "decline_card",
+          "attempts": 1
+        }
+      }
+    },
+    {
+      "id": "task-failure-carries-its-type",
+      "description": "A task fails with a typed error; the workflow catches the task failure and reports the error type it carries and whether it reads as a cancellation. Guards that the type the engine recorded reaches workflow code, which before carried only the task type, attempts and reason.",
+      "workflow": "task_failure_type",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "error_type": "CardDeclined",
+          "cancelled": false
+        }
+      }
+    },
+    {
+      "id": "task-non-retryable-marked",
+      "description": "A task declared with three attempts fails with an error raised as non-retryable, under a type its policy does not list. The mark alone stops the retries, so the task runs once.",
+      "workflow": "task_non_retryable_marked",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "task_type": "close_account",
+          "attempts": 1
+        }
+      }
+    },
+    {
+      "id": "task-unlisted-retried",
+      "description": "A task whose policy lists a non-retryable type fails with a type the list does not name, so it is retried to its three attempts as usual.",
+      "workflow": "task_unlisted_retried",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "task_type": "throttle",
+          "attempts": 3
+        }
+      }
+    },
+    {
+      "id": "task-input-roundtrip",
+      "description": "A workflow passes a value into a task, which returns it under `echoed`. Guards that a task actually receives its input (not a corrupted/first-byte value).",
+      "workflow": "task_input_roundtrip",
+      "input": {
+        "value": "roundtrip-me"
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "echoed": "roundtrip-me"
+        }
+      }
+    },
+    {
+      "id": "child-workflow-roundtrip",
+      "description": "A parent workflow starts a child workflow, waits for its result, and returns it. Guards the full child-workflow round trip: StartChildWorkflow command emission, child execution, and the completion decode that resumes the parent with the child's result. The child must run exactly once (a correlation bug previously re-started the child on every parent replay).",
+      "workflow": "parent_starts_child",
+      "input": {
+        "n": 21
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "child_saw": 21,
+          "doubled": 42
+        }
+      }
+    },
+    {
+      "id": "child-workflow-failure-caught",
+      "description": "A parent starts a child workflow that always fails; the parent catches the child failure and completes, reporting it. Guards child-failure propagation (engine ChildWorkflowExecutionFailed) and the per-SDK failure decode.",
+      "workflow": "parent_catches_child_failure",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "child_failed": true
+        }
+      }
+    },
+    {
+      "id": "child-workflow-retried-by-its-policy",
+      "description": "A parent starts a child workflow with a retry policy of two attempts and a one-second initial interval. The child fails on its first run and succeeds on its second, reporting the attempt it ran as; the parent receives that success. Guards the child's retry policy end to end: set on the child workflow options, carried on the start of the child, and honoured by the engine, which retries the failed run instead of handing its failure to the parent.",
+      "workflow": "parent_retries_child",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "child_succeeded": true,
+          "child_attempt": 2
+        }
+      }
+    },
+    {
+      "id": "workflow-non-retryable-not-retried",
+      "description": "A parent starts two child workflows, each with a retry policy of two attempts and a one-second initial interval, each failing its first run and succeeding on any later one. The first raises the SDK's non-retryable error, the same one task code raises: it is not retried, so the parent receives its failure. The second raises a plain error: it is retried, so the parent receives its second run's success. Guards that a workflow failure is non-retryable exactly when the workflow code raised it so, and that the engine honours the mark.",
+      "workflow": "parent_non_retryable_child",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "non_retryable_child_failed": true,
+          "plain_child_attempt": 2
+        }
+      }
+    },
+    {
+      "id": "restart-fresh-roundtrip",
+      "description": "A workflow restarts fresh once, then completes. The client following the original execution receives the continued execution's result. Guards restart-fresh persistence and the result-following chain (original -> restarted_fresh, continued -> completed).",
+      "workflow": "restart_once",
+      "input": {
+        "count": 0
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "restarted": true,
+          "count": 1
+        }
+      }
+    },
+    {
+      "id": "parallel-children-roundtrip",
+      "description": "A parent starts two child workflows in parallel (both StartChildWorkflow commands emitted before either result is awaited), then awaits both. Guards the handle path (start-child + handle.result) and the engine's idempotent child start: on replay after one child completes, re-emitting the still-pending child's start must return the existing child rather than spawn a duplicate.",
+      "workflow": "parent_two_children_parallel",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "first": 20,
+          "second": 40
+        }
+      }
+    },
+    {
+      "id": "durable-timer-roundtrip",
+      "description": "A workflow sleeps on a durable timer, then completes. Guards the timer round trip: StartTimer command emission, the engine firing the timer, and the FireTimer correlation that resumes the workflow by the business timer id on replay (not a synthetic entry-id).",
+      "workflow": "sleep_once",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "slept": true
+        },
+        "min_elapsed_ms": 900,
+        "max_elapsed_ms": 10000
+      }
+    },
+    {
+      "id": "reset-replays-journal-prefix",
+      "description": "A workflow runs a task to completion; the client then resets it to the journal event that scheduled that task. The engine must end the original run with terminal status `reset`, create a successor that replays the journal up to and including the target event, and let it make fresh decisions from there to the same result. Guards the whole reset path: the client binding, the journal key the engine reads (the execution row's internal id, not the user-facing workflow id), seeding the successor's journal before it becomes dispatchable, and the `reset` status itself.",
+      "kind": "reset",
+      "workflow": "task_input_roundtrip",
+      "input": {
+        "value": "reset-me"
+      },
+      "reset_to_event_id": 2,
+      "expect": {
+        "status": "completed",
+        "result": {
+          "echoed": "reset-me"
+        }
+      }
+    },
+    {
+      "id": "actor-shared-ops-run-concurrently",
+      "description": "Two shared (read-only) operations on the same actor key must execute concurrently. Each invocation waits (up to a deadline) until a second invocation has entered; if the scheduler wrongly serializes shared operations, the first exhausts the deadline before the second can enter and the scenario fails. Guards mode registration end-to-end (declared mode -> RegisterHandlers -> engine resolution -> concurrent dispatch).",
+      "kind": "actor",
+      "actor": "contract_probe",
+      "steps": [
+        {
+          "operation": "shared_rendezvous",
+          "input": {},
+          "parallel": 2,
+          "expect_each": {
+            "observed_concurrent": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "actor-exclusive-ops-serialize",
+      "description": "Two exclusive operations on the same actor key must never overlap (single-writer-per-key). Each invocation reports whether it ever observed a concurrent peer while it held the key.",
+      "kind": "actor",
+      "actor": "contract_probe",
+      "steps": [
+        {
+          "operation": "exclusive_probe",
+          "input": {},
+          "parallel": 2,
+          "expect_each": {
+            "alone": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "actor-shared-write-rejected",
+      "description": "A state write attempted from a shared (read-only) operation is rejected by the engine (writes during a key's shared window would race concurrent readers). The operation catches the rejection and reports it.",
+      "kind": "actor",
+      "actor": "contract_probe",
+      "steps": [
+        {
+          "operation": "shared_write_attempt",
+          "input": {},
+          "parallel": 1,
+          "expect_each": {
+            "write_rejected": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "actor-exclusive-write-allowed",
+      "description": "Control: a state write from an exclusive operation succeeds and round-trips through actor state.",
+      "kind": "actor",
+      "actor": "contract_probe",
+      "steps": [
+        {
+          "operation": "exclusive_write_roundtrip",
+          "input": {
+            "value": "contract-42"
+          },
+          "parallel": 1,
+          "expect_each": {
+            "write_ok": true,
+            "value": "contract-42"
+          }
+        }
+      ]
+    },
+    {
+      "id": "workflow-failure-surfaces-its-message",
+      "description": "A workflow throws the SDK's typed workflow error; the caller must receive that message. Asserting only that the workflow failed is not enough — a failure the engine cannot parse also counts as a failure, which is how an unreportable error stayed hidden while every suite passed.",
+      "workflow": "typed_failure",
+      "input": {},
+      "expect": {
+        "status": "failed",
+        "error_contains": "deliberate contract failure"
+      }
+    },
+    {
+      "id": "workflow-attempt-first-run",
+      "description": "A workflow reports the attempt its run reads. A first run is attempt 1, counted from 1 as a task's attempt is; the engine used to hand it out as 0, its retry count, and each SDK raised that to 1, so the run of its first retry read 1 as well.",
+      "workflow": "report_attempt",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "attempt": 1
+        }
+      }
+    },
+    {
+      "id": "task-declared-heartbeat-observed",
+      "description": "A workflow declares a heartbeat timeout on a task; the task reports back the value it was actually given. Guards the whole declaration loop — declared, recorded by the engine, delivered on poll — which is the path that silently dropped the value in every SDK while each layer looked implemented.",
+      "workflow": "task_timeouts_echo",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "heartbeat_secs": 15
+        }
+      }
+    },
+    {
+      "id": "task-outlives-heartbeat-timeout-without-heartbeat-code",
+      "description": "A task that declares no timeouts and has no heartbeat code sleeps well past the heartbeat timeout it was given, and completes having run once. The worker says it heartbeats every task on its own, so the engine gives the task its default heartbeat timeout, and the worker's own heartbeats keep the task alive for as long as it runs. Guards both halves: a worker that stopped heartbeating would see the task timed out and run a second time (the task counts its runs in the worker process), and one not given a timeout reports so. Needs an engine whose default heartbeat timeout is under the sleep, with its timeout watcher sweeping every second or two (the engine's contract-suite.sh runs it with 3s).",
+      "workflow": "outlive_heartbeat_timeout",
+      "input": {
+        "sleep_secs": 10
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "runs": 1,
+          "heartbeat_timeout_given": true,
+          "outlived_heartbeat_timeout": true
+        }
+      }
+    },
+    {
+      "id": "task-retried-after-its-worker-dies",
+      "kind": "worker_crash",
+      "description": "A task that declares no timeouts kills its worker process, as a worker dying mid-task would. The workflow runs on a queue of its own, served by a separate worker process started with ORCHER_CONTRACT_DOOMED_WORKER set, whose tasks of this kind exit the process; once it has died, a second worker process is started without it, and the task is retried there. Nothing but the engine's default heartbeat timeout can recover the first attempt: the task sets no timeout, and a dead worker sends no heartbeat. Before it, the attempt stayed started for good and the workflow never finished.",
+      "workflow": "crash_mid_task",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "survived_worker_death": true
+        }
+      }
+    },
+    {
+      "id": "client_error_workflow_not_found",
+      "kind": "client_error",
+      "description": "A client call naming a workflow that does not exist reports the same error code in every SDK. Asserted on the code, not the class name: the SDKs differ in what they call the class, but the code is what a user reads across languages.",
+      "client_call": "status_of_missing_workflow",
+      "expect": {
+        "error_code": "WORKFLOW_NOT_FOUND"
+      }
+    },
+    {
+      "id": "event-wakes-parked-workflow",
+      "description": "A workflow parks waiting for an external event; a client wakes it by workflow id alone; the replay consumes the journaled event and completes with its payload. The result also reports how many times the engine activated the workflow, bounded by `result_at_most`: park, wake, complete is a handful, and a parked workflow that is re-dispatched continuously until the event arrives is the defect this catches. Three separate defects on this path reached a customer before any suite waited for an event: the parking activation was rejected by the SDK's native layer over a field it never sent, the wake could not be addressed without a run id the SDK does not expose, and the engine re-dispatched the parked workflow sixteen times a second.",
+      "kind": "event",
+      "workflow": "wait_for_event_echo",
+      "input": {},
+      "event_name": "contract_event",
+      "event_payload": {
+        "status": "SHIPPED",
+        "amount": 42
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "received": {
+            "status": "SHIPPED",
+            "amount": 42
+          }
+        },
+        "result_at_most": {
+          "activations": 4
+        }
+      }
+    },
+    {
+      "id": "event-wait-timeout-elapses",
+      "description": "A workflow waits for an event with a two-second timeout that nobody satisfies; it must complete with a null payload and report the timeout, within a bounded wall clock. The deadline is a durable timer the SDK starts beside the wait and races against the event on replay, so the engine fires it even while no worker holds the workflow. This waited forever in every SDK until the timer was added: the timeout was accepted and ignored, because nothing evaluated it and the wire has no command the engine could enforce.",
+      "kind": "event",
+      "workflow": "wait_for_event_timeout",
+      "input": {},
+      "event_name": "contract_event_never_sent",
+      "expect": {
+        "status": "completed",
+        "result": {
+          "received": null,
+          "timed_out": true
+        },
+        "max_elapsed_ms": 15000
+      }
+    },
+    {
+      "id": "workflow-id-started-once",
+      "kind": "workflow_id_reuse",
+      "description": "A workflow is started under a caller-chosen id, then started again under the same id while it runs: the second start must be refused with WORKFLOW_ALREADY_EXISTS, naming the run already doing the work. Once that run completes, a start that reuses an id only after a failure (ALLOW_DUPLICATE_FAILED_ONLY) is refused the same way, and a plain start (ALLOW_DUPLICATE) runs the workflow again as a new run. The engine used to accept the duplicate and record a second run, so a caller relying on the id to start its work once did it twice; and the SDKs refused every reuse policy as unsupported by the server.",
+      "workflow": "sleep_once",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "slept": true
+        },
+        "error_code": "WORKFLOW_ALREADY_EXISTS"
+      }
+    },
+    {
+      "id": "engine-restart-then-dispatch",
+      "description": "The engine is restarted under a running worker; a workflow started afterwards must be picked up and completed by that same worker, untouched. Guards poller recovery: the workflow pollers used to treat the error a proxy returns during a restart as permanent and stop for the life of the process, while the worker kept heartbeating and looked healthy. Opt-in: runs only when `ORCHER_CONTRACT_RESTART_CMD` names a command that restarts the engine the harness is pointed at; reported as skipped otherwise.",
+      "kind": "engine_restart",
+      "workflow": "echo",
+      "input": {
+        "message": "after-restart"
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "message": "after-restart"
+        }
+      }
+    },
+    {
+      "id": "cancel-ends-a-sleeping-workflow",
+      "kind": "cancel",
+      "description": "A workflow parked on a long sleep is cancelled. The sleep is where it is told, and it does not catch the cancellation, so it ends cancelled. Guards that a cancellation request reaches the workflow at all, and that an uncaught one ends the run.",
+      "workflow": "cancel_sleep",
+      "input": {},
+      "expect": {
+        "status": "cancelled"
+      }
+    },
+    {
+      "id": "cancel-lets-the-workflow-clean-up",
+      "kind": "cancel",
+      "description": "A workflow parked on a long sleep is cancelled, catches the cancellation, runs a cleanup task long enough to be heartbeated, and returns. It ends completed with the cleanup's result: work started after the request is not told to stop, the workflow knows it was told, and how the run ends follows the workflow.",
+      "workflow": "cancel_cleanup",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "told": true,
+          "cleanup": "cleaned"
+        }
+      }
+    },
+    {
+      "id": "cancel-runs-saga-compensations",
+      "kind": "cancel",
+      "description": "A saga completes a step with a compensation, then parks and is cancelled. Told of the cancellation, it compensates: the compensation is an ordinary task, scheduled and completed after the request.",
+      "workflow": "cancel_saga",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "compensated": 1
+        }
+      }
+    },
+    {
+      "id": "cancel-stops-a-queued-task",
+      "kind": "cancel_queued_task",
+      "description": "A workflow schedules a task that no worker can start yet, on a queue whose only worker runs workflows and no tasks, and parks on it; the client cancels it. Its cancellation handler then runs a cleanup task and lets the cancellation end the run. Only then is a worker that runs tasks started on the queue. The queued task was scheduled before the request, so the cancellation ends it before it starts: its handler must never run, though a worker able to run it is polling, while the cleanup, scheduled after the request, runs. The workflow is told of the cancellation at its wait on the queued task, and reports how that wait ended under `queued_task_wait`. The worker observes the tasks in-process, keyed by the `key` the harness passes as input. Before the engine ended queued tasks at the request, the cancelled workflow's task started on the first worker free to take it and ran to the end.",
+      "workflow": "cancel_queued_task",
+      "input": {},
+      "expect": {
+        "status": "cancelled",
+        "observed": {
+          "queued_task_ran": false,
+          "queued_task_wait": "cancellation",
+          "cleanup_ran": true
+        }
+      }
+    },
+    {
+      "id": "task-timeout-on-last-attempt-reaches-workflow",
+      "kind": "worker_crash",
+      "description": "A task allowed a single attempt kills its worker process mid-task, as in `task-retried-after-its-worker-dies`. Its heartbeat timeout ends that attempt, which was its last, so the timeout is a terminal failure the workflow must receive: it catches the task failure and completes, reporting the task and whether the failure says it timed out. Before the engine recorded a terminal timeout the way it records a failure the worker reports, the workflow was never told and stayed running for good.",
+      "workflow": "task_timeout_terminal",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "caught": true,
+          "task_type": "exit_if_worker_doomed_once",
+          "timed_out": true
+        }
+      }
+    },
+    {
+      "id": "saga-step-failure-surfaces-compensation-failure",
+      "description": "A saga completes two steps, each with a compensation, and its third step fails. The compensations run in reverse order: the later one fails, and the earlier one still runs. The failure the workflow catches must say that a compensation failed, and still carry the failure of the step that started the compensating. Before, every SDK logged the failed compensation and raised only the step's failure, so a run whose undo was left half done read the same as one cleanly compensated.",
+      "workflow": "saga_step_failure",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "compensation_failed": true,
+          "failed_compensations": 1,
+          "step_failure_kept": true,
+          "compensations_ran": [
+            "saga_refund",
+            "saga_release"
+          ]
+        },
+        "result_exact": true
+      }
+    },
+    {
+      "id": "saga-compensate-surfaces-compensation-failure",
+      "description": "A saga completes two steps, each with a compensation, and the workflow then compensates it itself. The later compensation fails and the earlier one still runs; compensating must then fail, saying that a compensation failed. The SDKs disagreed here: one raised the failure, the other two logged it and returned as if the saga had been undone.",
+      "workflow": "saga_compensate_failure",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "compensation_failed": true,
+          "failed_compensations": 1,
+          "compensations_ran": [
+            "saga_refund",
+            "saga_release"
+          ]
+        },
+        "result_exact": true
+      }
+    },
+    {
+      "id": "child-id-changed-on-replay-is-held",
+      "kind": "non_determinism_held",
+      "description": "A workflow names its child workflow from a count kept in the worker process, so replaying it names the child differently from the child its journal records. The replay must be found non-deterministic and held: the run stays running, its journal unchanged, and no second child workflow starts. The harness waits until the workflow has been replayed, then for `hold_ms` more, reads the run's status and what the worker observed (keyed by the `key` it passes as input), and then terminates the run. A worker that let the replay through would start a child under the new id, and the child would run twice.",
+      "workflow": "child_id_changes_on_replay",
+      "input": {},
+      "hold_ms": 5000,
+      "expect": {
+        "status": "running",
+        "observed": {
+          "replayed": true,
+          "child_runs": 1
+        }
+      }
+    },
+    {
+      "id": "falsy-task-results",
+      "description": "A workflow runs a task six times, asking it for 0, false, an empty string, null, an empty list and an empty object, and returns what each run returned, in order. Each must reach the workflow as that value exactly: not dropped, not replaced by a default, and not read as another of the six.",
+      "workflow": "falsy_task_results",
+      "input": {},
+      "expect": {
+        "status": "completed",
+        "result": {
+          "values": [
+            0,
+            false,
+            "",
+            null,
+            [],
+            {}
+          ]
+        },
+        "result_exact": true
+      }
+    },
+    {
+      "id": "falsy-workflow-result-zero",
+      "description": "A workflow returns 0 as its whole result; the caller must receive 0.",
+      "workflow": "falsy_result",
+      "input": {
+        "kind": "zero"
+      },
+      "expect": {
+        "status": "completed",
+        "result": 0,
+        "result_exact": true
+      }
+    },
+    {
+      "id": "falsy-workflow-result-false",
+      "description": "A workflow returns false as its whole result; the caller must receive false.",
+      "workflow": "falsy_result",
+      "input": {
+        "kind": "false"
+      },
+      "expect": {
+        "status": "completed",
+        "result": false,
+        "result_exact": true
+      }
+    },
+    {
+      "id": "falsy-workflow-result-empty-string",
+      "description": "A workflow returns an empty string as its whole result; the caller must receive an empty string.",
+      "workflow": "falsy_result",
+      "input": {
+        "kind": "empty_string"
+      },
+      "expect": {
+        "status": "completed",
+        "result": "",
+        "result_exact": true
+      }
+    },
+    {
+      "id": "falsy-workflow-result-null",
+      "description": "A workflow returns null as its whole result; the caller must receive null, as a completed result rather than an error.",
+      "workflow": "falsy_result",
+      "input": {
+        "kind": "null"
+      },
+      "expect": {
+        "status": "completed",
+        "result": null,
+        "result_exact": true
+      }
+    },
+    {
+      "id": "falsy-workflow-result-empty-list",
+      "description": "A workflow returns an empty list as its whole result; the caller must receive an empty list.",
+      "workflow": "falsy_result",
+      "input": {
+        "kind": "empty_list"
+      },
+      "expect": {
+        "status": "completed",
+        "result": [],
+        "result_exact": true
+      }
+    },
+    {
+      "id": "falsy-workflow-result-empty-object",
+      "description": "A workflow returns an empty object as its whole result; the caller must receive an empty object.",
+      "workflow": "falsy_result",
+      "input": {
+        "kind": "empty_object"
+      },
+      "expect": {
+        "status": "completed",
+        "result": {},
+        "result_exact": true
+      }
+    },
+    {
+      "id": "list-input-received-whole",
+      "description": "A workflow started with a list takes it as its one argument, and passes it to a task that takes a list as its one argument and returns it. Both must receive the list exactly: whole, not spread into several arguments or cut to its first item, with its falsy items intact.",
+      "workflow": "list_input",
+      "input": [
+        "a",
+        1,
+        0,
+        false,
+        "",
+        null,
+        [
+          2
+        ],
+        {
+          "k": "v"
+        },
+        {}
+      ],
+      "expect": {
+        "status": "completed",
+        "result": {
+          "workflow_received": [
+            "a",
+            1,
+            0,
+            false,
+            "",
+            null,
+            [
+              2
+            ],
+            {
+              "k": "v"
+            },
+            {}
+          ],
+          "task_received": [
+            "a",
+            1,
+            0,
+            false,
+            "",
+            null,
+            [
+              2
+            ],
+            {
+              "k": "v"
+            },
+            {}
+          ]
+        },
+        "result_exact": true
+      }
+    },
+    {
+      "id": "several-arguments-received-exactly",
+      "description": "A workflow takes several arguments, started with an object naming each of them, and passes them on to a task that takes several arguments, as the SDK's language passes several values. Both must receive every argument exactly, the falsy ones included, and report them by name.",
+      "workflow": "several_arguments",
+      "input": {
+        "name": "widget",
+        "count": 0,
+        "tags": [
+          "a",
+          "b"
+        ],
+        "gift": false
+      },
+      "expect": {
+        "status": "completed",
+        "result": {
+          "workflow_received": {
+            "name": "widget",
+            "count": 0,
+            "tags": [
+              "a",
+              "b"
+            ],
+            "gift": false
+          },
+          "task_received": {
+            "name": "widget",
+            "count": 0,
+            "tags": [
+              "a",
+              "b"
+            ],
+            "gift": false
+          }
+        },
+        "result_exact": true
+      }
+    }
+  ]
+}

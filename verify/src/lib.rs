@@ -1,6 +1,7 @@
 //! `orcher-verify`: checks a workflow runtime in any language against the
 //! kernel protocol (`docs/kernel-protocol-v1.md` in sdk-core), without an
-//! engine and without Rust tests.
+//! engine and without Rust tests, and its worker against the contract
+//! scenarios, with one.
 //!
 //! The replay vectors are activations recorded from each SDK's contract
 //! suite: for each, the `RunActivation` the kernel resolves it to and the
@@ -18,13 +19,18 @@
 //! - [`reference`](mod@reference): a runtime that answers with the recorded
 //!   answers, right or wrong on purpose, which the runner's own tests run.
 //!
-//! The vectors and the framing are documented for runtime authors in
-//! `verify/README.md`.
+//! With an engine, [`scenarios`] runs the contract scenarios, the catalog
+//! every SDK's contract suite runs, against the runtime's own worker, and
+//! judges each by what a client observes.
+//!
+//! The vectors, the framing and the scenarios are documented for runtime
+//! authors in `verify/README.md`.
 
 pub mod framing;
 pub mod judge;
 pub mod reference;
 pub mod runner;
+pub mod scenarios;
 pub mod vectors;
 
 /// The files under `vectors/`, built into the binary by `build.rs`.
