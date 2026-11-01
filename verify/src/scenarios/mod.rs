@@ -147,6 +147,27 @@ pub struct Expect {
     pub observed: Value,
 }
 
+impl Expect {
+    /// Check the whole-run wall clock against the scenario's optional bounds.
+    fn check_elapsed_bounds(&self, elapsed_ms: u128) -> std::result::Result<(), String> {
+        if let Some(min) = self.min_elapsed_ms {
+            if elapsed_ms < min {
+                return Err(format!(
+                    "completed too fast: {elapsed_ms}ms < {min}ms (the wait did not happen)"
+                ));
+            }
+        }
+        if let Some(max) = self.max_elapsed_ms {
+            if elapsed_ms > max {
+                return Err(format!(
+                    "took too long: {elapsed_ms}ms > {max}ms (waited far longer than asked)"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One step of an actor scenario: `parallel` concurrent invocations of
 /// `operation`, each result matched against `expect_each`.
 #[derive(Debug, Clone, Deserialize)]
@@ -519,6 +540,26 @@ mod tests {
         assert!(within_bounds(&bounds, &json!({"activations": "4"})).is_err());
         assert!(within_bounds(&bounds, &json!({})).is_err());
         assert!(within_bounds(&bounds, &json!(4)).is_err());
+    }
+
+    #[test]
+    fn elapsed_bounds_are_inclusive_and_enforced_at_both_ends() {
+        let expect = Expect {
+            min_elapsed_ms: Some(1_000),
+            max_elapsed_ms: Some(15_000),
+            ..Expect::default()
+        };
+
+        assert!(expect.check_elapsed_bounds(1_000).is_ok());
+        assert!(expect.check_elapsed_bounds(15_000).is_ok());
+        assert!(expect
+            .check_elapsed_bounds(999)
+            .unwrap_err()
+            .contains("completed too fast"));
+        assert!(expect
+            .check_elapsed_bounds(15_001)
+            .unwrap_err()
+            .contains("took too long"));
     }
 
     fn gapped(sdks: Option<Vec<&str>>) -> Scenario {

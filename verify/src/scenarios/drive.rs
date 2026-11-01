@@ -342,20 +342,7 @@ impl Engine<'_> {
             ("completed", Ok(result)) => {
                 // A durable timer must wait, and not far longer than asked.
                 let elapsed_ms = started_at.elapsed().as_millis();
-                if let Some(min) = expect.min_elapsed_ms {
-                    if elapsed_ms < min {
-                        return Err(format!(
-                            "completed too fast: {elapsed_ms}ms < {min}ms (the wait did not happen)"
-                        ));
-                    }
-                }
-                if let Some(max) = expect.max_elapsed_ms {
-                    if elapsed_ms > max {
-                        return Err(format!(
-                            "took too long: {elapsed_ms}ms > {max}ms (waited far longer than asked)"
-                        ));
-                    }
-                }
+                expect.check_elapsed_bounds(elapsed_ms)?;
                 if result_matches(expect, &result) {
                     Ok(Outcome::Passed)
                 } else {
@@ -532,6 +519,7 @@ impl Engine<'_> {
 
         let key = fresh_key("verify");
         let workflow_id = format!("verify-event-{key}");
+        let started_at = Instant::now();
         let handle = self
             .start(workflow, &keyed(&scenario.input, &key), &workflow_id, None)
             .await
@@ -575,6 +563,7 @@ impl Engine<'_> {
                 return Err(format!("expected completion after the event but got: {e}"));
             }
         };
+        expect.check_elapsed_bounds(started_at.elapsed().as_millis())?;
         if !super::json_matches(&expect.result, &result) {
             return Err(mismatch("result mismatch", &expect.result, &result));
         }
