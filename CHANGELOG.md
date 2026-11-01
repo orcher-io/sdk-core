@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.23.0](https://github.com/orcher-io/sdk-core/compare/v0.22.2...v0.23.0) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* orcher_sdk_core::proto is gone; depend on orcher-proto directly. Host::next_activation, complete_activation, next_task, heartbeat, complete_task, next_actor_operation and complete_actor_operation are on Host::encoded with encoded messages. StateScope::of is replaced by StateScope::new, and kernel::step_ids::step_id by mapping a call to a StepKind for kernel::step_ids::id_for. See UPGRADING.md.
+
+### Changes
+
+* take the last generated protocol types out of the public API ([#155](https://github.com/orcher-io/sdk-core/issues/155)) ([c7ba62e](https://github.com/orcher-io/sdk-core/commit/c7ba62e5482e1ead94e445e6e7c324519279b1c3)), closes [#31](https://github.com/orcher-io/sdk-core/issues/31)
+
 ## [0.22.2](https://github.com/orcher-io/sdk-core/compare/v0.22.1...v0.22.2) (2026-10-31)
 
 
