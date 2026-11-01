@@ -40,5 +40,21 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      # The public API names no generated protocol type, so a new orcher-proto
+      # changes nothing a language SDK compiles against.
+      - name: No generated types in the public API
+        run: python3 scripts/check-public-surface.py
       # Builds both crates exactly as crates.io would receive them.
       - run: cargo package --workspace --exclude orcher-bench --exclude orcher-verify
+
+  # On a release PR: the new version must be at least as big a step as the
+  # public API changed by, so a breaking change is never released as a patch,
+  # which every language SDK would then pick up without being changed for it.
+  semver:
+    if: startsWith(github.head_ref, 'release-please--')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: orcher-sdk-core

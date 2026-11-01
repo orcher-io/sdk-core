@@ -13,13 +13,13 @@
 
 use std::collections::HashMap;
 
-use orcher_sdk_core::kernel::step_ids;
-use orcher_sdk_core::proto::kernel::v1::{
+use orcher_proto::kernel::v1::{
     command, outcome, resolution, run_activation_result, AwaitEvent, Command, Commands,
     CompleteRun, FailRun, Failure, Payload, RunActivation, RunActivationResult, RunTask,
     StartTimer,
 };
-use orcher_sdk_core::proto::prost_types;
+use orcher_proto::prost_types;
+use orcher_sdk_core::kernel::step_ids::{self, StepKind};
 use serde::{Deserialize, Serialize};
 
 /// The workflow type every workload runs.
@@ -182,6 +182,17 @@ fn parse_program(data: &[u8]) -> Result<Program, serde_json::Error> {
     serde_json::from_value(value)
 }
 
+/// The kind of step a call makes, for its kernel step id; `None` for a call
+/// that is not a step. Only the calls these workloads make.
+fn step_kind(what: &command::What) -> Option<StepKind> {
+    match what {
+        command::What::RunTask(_) => Some(StepKind::Task),
+        command::What::StartTimer(_) => Some(StepKind::Timer),
+        command::What::AwaitEvent(_) => Some(StepKind::AwaitEvent),
+        _ => None,
+    }
+}
+
 struct Run {
     commands: Vec<Command>,
     seq: u64,
@@ -193,7 +204,9 @@ struct Run {
 
 impl Run {
     fn call(&mut self, what: command::What, settled: bool) {
-        let step_id = step_ids::step_id(&what, self.seq).unwrap_or_default();
+        let step_id = step_kind(&what)
+            .map(|kind| step_ids::id_for(kind, self.seq))
+            .unwrap_or_default();
         self.commands.push(Command {
             seq: self.seq,
             satisfied: settled,

@@ -16,9 +16,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use orcher_proto::kernel::v1::RunActivation;
+use orcher_proto::prost::Message;
 use orcher_sdk_core::kernel::encoded;
-use orcher_sdk_core::proto::kernel::v1::RunActivation;
-use orcher_sdk_core::proto::prost::Message;
 use orcher_sdk_core::worker::record::{read_runs, Recorded};
 
 const NAMESPACE: &str = "contract";
@@ -162,10 +162,10 @@ fn an_answer_is_checked_against_the_recorded_history() {
 /// workflow the code failed; and nothing for code that no longer replays.
 #[test]
 fn an_answer_becomes_what_the_worker_sends() {
+    use orcher_proto::kernel::v1::{run_activation_result, Failure, FailureCode};
     use orcher_proto::orcher::v1::{
         command::Attributes, CompleteWorkflowExecutionRequest, FailWorkflowExecutionRequest,
     };
-    use orcher_sdk_core::proto::kernel::v1::{run_activation_result, Failure, FailureCode};
 
     let replays = answer(vec![
         call(0, true, "charge_0", "charge"),
@@ -279,8 +279,8 @@ fn call(
     satisfied: bool,
     step_id: &str,
     task_type: &str,
-) -> orcher_sdk_core::proto::kernel::v1::Command {
-    use orcher_sdk_core::proto::kernel::v1::{command, Command, RunTask};
+) -> orcher_proto::kernel::v1::Command {
+    use orcher_proto::kernel::v1::{command, Command, RunTask};
     Command {
         seq,
         satisfied,
@@ -294,11 +294,9 @@ fn call(
 }
 
 fn answer(
-    commands: Vec<orcher_sdk_core::proto::kernel::v1::Command>,
-) -> orcher_sdk_core::proto::kernel::v1::RunActivationResult {
-    use orcher_sdk_core::proto::kernel::v1::{
-        run_activation_result, Commands, RunActivationResult,
-    };
+    commands: Vec<orcher_proto::kernel::v1::Command>,
+) -> orcher_proto::kernel::v1::RunActivationResult {
+    use orcher_proto::kernel::v1::{run_activation_result, Commands, RunActivationResult};
     RunActivationResult {
         activation_id: b"act-1".to_vec(),
         outcome: Some(run_activation_result::Outcome::Commands(Commands {

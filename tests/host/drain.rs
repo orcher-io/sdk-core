@@ -2,11 +2,12 @@
 //! within the shutdown grace, what it did not finish is handed back where the
 //! engine can take it, and shutdown ends in bounded time.
 
+use crate::common::typed::TypedWork;
 use std::time::{Duration, Instant};
 
 use crate::common::{activation, task, Engine};
-use orcher_sdk_core::proto::host::v1::{task_outcome, TaskOutcome};
-use orcher_sdk_core::proto::kernel::v1::Payload;
+use orcher_proto::host::v1::{task_outcome, TaskOutcome};
+use orcher_proto::kernel::v1::Payload;
 use orcher_sdk_core::{Host, HostConfig, Registrations};
 
 async fn worker(engine: &Engine, grace: Duration) -> Host {
@@ -26,7 +27,7 @@ async fn work_finished_within_the_grace_is_reported() {
     let engine = Engine::default();
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     let host = worker(&engine, Duration::from_secs(5)).await;
-    let assignment = host.next_task().await.expect("a task");
+    let assignment = host.typed().next_task().await.expect("a task");
     let watching = host.clone();
     let token = assignment.token.clone();
     let cancelled = tokio::spawn(async move { watching.task_cancelled(&token).await });
@@ -41,16 +42,17 @@ async fn work_finished_within_the_grace_is_reported() {
         "the task was asked to cancel before the grace ended"
     );
 
-    host.complete_task(TaskOutcome {
-        token: assignment.token,
-        result: Some(task_outcome::Result::Value(Payload {
-            data: b"{}".to_vec(),
+    host.typed()
+        .complete_task(TaskOutcome {
+            token: assignment.token,
+            result: Some(task_outcome::Result::Value(Payload {
+                data: b"{}".to_vec(),
+                ..Default::default()
+            })),
             ..Default::default()
-        })),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), shutdown)
         .await
         .expect("shutdown in time")
@@ -74,7 +76,7 @@ async fn an_unanswered_activation_is_handed_back() {
     let engine = Engine::default();
     engine.script().activations.push_back(activation("act-1"));
     let host = worker(&engine, Duration::from_millis(300)).await;
-    host.next_activation().await.expect("an activation");
+    host.typed().next_activation().await.expect("an activation");
 
     tokio::time::timeout(Duration::from_secs(10), host.shutdown())
         .await
@@ -96,7 +98,7 @@ async fn a_task_unfinished_at_the_grace_is_asked_to_cancel() {
     let engine = Engine::default();
     engine.script().tasks.push_back(task("charge_0", "token-1"));
     let host = worker(&engine, Duration::from_millis(300)).await;
-    let assignment = host.next_task().await.expect("a task");
+    let assignment = host.typed().next_task().await.expect("a task");
     let watching = host.clone();
     let cancelled = tokio::spawn(async move { watching.task_cancelled(&assignment.token).await });
 

@@ -18,6 +18,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
+pub mod typed;
+
 #[derive(Default)]
 pub struct Script {
     /// Tasks to hand out, one per poll of the worker's own queue.
@@ -98,7 +100,7 @@ pub fn task(task_id: &str, token: &str) -> PollTaskExecutionResponse {
         task_token: token.as_bytes().to_vec(),
         input: br#"{"amount":7}"#.to_vec(),
         attempt: 2,
-        start_to_close_timeout: Some(orcher_sdk_core::proto::prost_types::Duration {
+        start_to_close_timeout: Some(orcher_proto::prost_types::Duration {
             seconds: 30,
             nanos: 0,
         }),
@@ -307,7 +309,7 @@ fn entry(
 ) -> JournalEntry {
     JournalEntry {
         entry_id: id,
-        timestamp: Some(orcher_sdk_core::proto::prost_types::Timestamp {
+        timestamp: Some(orcher_proto::prost_types::Timestamp {
             seconds: ms / 1000,
             nanos: ((ms % 1000) * 1_000_000) as i32,
         }),

@@ -94,15 +94,6 @@ impl StateScope {
             execution_id: execution_id.into(),
         }
     }
-
-    /// The scope of `operation`'s actor, for that operation.
-    pub fn of(operation: &ActorOperation) -> Self {
-        Self::new(
-            &operation.actor_name,
-            &operation.key,
-            &operation.execution_id,
-        )
-    }
 }
 
 /// The host's calls to the actor service, with the worker's credentials.
