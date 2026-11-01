@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.2](https://github.com/orcher-io/sdk-core/compare/v0.22.1...v0.22.2) (2026-10-31)
+
+
+### Features
+
+* **verify:** replay vectors and a runner for any language runtime ([#146](https://github.com/orcher-io/sdk-core/issues/146)) ([8919833](https://github.com/orcher-io/sdk-core/commit/89198335568f0e1250362021e2d1de7afcef3215))
+* **verify:** run the contract scenarios against any worker ([#148](https://github.com/orcher-io/sdk-core/issues/148)) ([#151](https://github.com/orcher-io/sdk-core/issues/151)) ([23ab9a1](https://github.com/orcher-io/sdk-core/commit/23ab9a158a071ebab82f32199d4c22a8cba8fbc2))
+
 ## [0.22.1](https://github.com/orcher-io/sdk-core/compare/v0.22.0...v0.22.1) (2026-10-31)
 
 
