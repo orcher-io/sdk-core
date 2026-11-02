@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::framing::{read_frame, write_frame};
-use crate::judge::judge;
+use crate::judge::{judge_with_payload_comparison, PayloadComparison};
 use crate::vectors::Vector;
 
 /// How long the runtime has to exit once its stdin is closed.
@@ -35,7 +35,7 @@ impl Summary {
 
 /// Runs `runtime` (a program and its arguments) against `vectors`, judged in
 /// `namespace`, waiting at most `timeout` for each answer, and writes a line
-/// per vector and the summary to `out`.
+/// per vector and the summary to `out`. Payload bytes are compared exactly.
 ///
 /// # Errors
 ///
@@ -46,6 +46,26 @@ pub fn run(
     vectors: &[Vector],
     namespace: &str,
     timeout: Duration,
+    out: &mut impl Write,
+) -> io::Result<Summary> {
+    run_with_payload_comparison(
+        runtime,
+        vectors,
+        namespace,
+        timeout,
+        PayloadComparison::Exact,
+        out,
+    )
+}
+
+/// Runs `runtime` with an explicit policy for comparing serialized payload
+/// bytes in the recorded answers.
+pub fn run_with_payload_comparison(
+    runtime: &[String],
+    vectors: &[Vector],
+    namespace: &str,
+    timeout: Duration,
+    payload_comparison: PayloadComparison,
     out: &mut impl Write,
 ) -> io::Result<Summary> {
     let (program, args) = runtime
@@ -78,7 +98,9 @@ pub fn run(
         let problems = match &gone {
             Some(why) => vec![why.clone()],
             None => match exchange(&mut stdin, &answers, vector, timeout) {
-                Ok(answer) => judge(vector, &answer, namespace),
+                Ok(answer) => {
+                    judge_with_payload_comparison(vector, &answer, namespace, payload_comparison)
+                }
                 Err(why) => {
                     gone = Some(why.clone());
                     vec![why]

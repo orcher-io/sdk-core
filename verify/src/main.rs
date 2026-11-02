@@ -4,6 +4,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+use orcher_verify::judge::PayloadComparison;
 use orcher_verify::reference::{self, Answers};
 use orcher_verify::runner;
 use orcher_verify::scenarios::{self, drive::ActorArguments};
@@ -38,6 +39,10 @@ Options for vectors, list and reference-runtime:
   --vectors <dir>     Read the vectors from this directory (with index.json)
                       instead of the ones built in.
   --timeout <secs>    How long to wait for each answer (default 30).
+  --payloads <mode>   (vectors only) Compare serialized payload bytes: exact
+                      (default) or ignore-bytes. Ignoring bytes is useful
+                      across SDKs with different JSON serializers, but does
+                      not validate values.
 
 Options for scenarios:
   --namespace <ns>          Namespace to run in, created if missing
@@ -84,6 +89,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     let mut sdks: Vec<String> = Vec::new();
     let mut files = Files::Embedded;
     let mut timeout = Duration::from_secs(30);
+    let mut payload_comparison = PayloadComparison::Exact;
     let mut answers = Answers::Recorded;
     let mut runtime: Option<Vec<String>> = None;
     while let Some((flag, after)) = rest.split_first() {
@@ -103,6 +109,17 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                     .parse()
                     .map_err(|_| format!("--timeout takes whole seconds, not {value:?}"))?;
                 timeout = Duration::from_secs(secs);
+            }
+            "--payloads" => {
+                payload_comparison = match value.as_str() {
+                    "exact" => PayloadComparison::Exact,
+                    "ignore-bytes" => PayloadComparison::IgnoreBytes,
+                    _ => {
+                        return Err(format!(
+                            "--payloads must be exact or ignore-bytes, not {value:?}"
+                        ))
+                    }
+                };
             }
             "--answers" => {
                 answers = Answers::named(value).ok_or_else(|| {
@@ -129,11 +146,12 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             let runtime = runtime
                 .filter(|runtime| !runtime.is_empty())
                 .ok_or_else(|| "vectors needs --runtime <command>".to_string())?;
-            let summary = runner::run(
+            let summary = runner::run_with_payload_comparison(
                 &runtime,
                 &chosen,
                 &index.namespace,
                 timeout,
+                payload_comparison,
                 &mut std::io::stdout().lock(),
             )
             .map_err(|e| e.to_string())?;
