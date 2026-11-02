@@ -275,7 +275,7 @@ what it judges instead.
 | `reset` | The run completes, is reset to `reset_to_event_id`, and the successor run's result matches. |
 | `client_error` | The named call fails with core's error code `expect.error_code`. |
 | `workflow_id_reuse` | A second start under the id while it runs is refused with `error_code`, naming the open run. Once it completed, `AllowDuplicateFailedOnly` is refused the same way, and `AllowDuplicate` starts a new run whose result matches. |
-| `event` | Once parked, the event is sent by workflow id alone; the result matches and the `result_at_most` bounds hold. |
+| `event` | Once parked, the event is sent by workflow id alone; the result, whole-run elapsed bounds, and `result_at_most` bounds are checked. |
 | `cancel` | Once parked, the run is cancelled; it ends cancelled, or completes with a matching result. |
 | `engine_restart` | After the restart command, a new workflow completes on the untouched worker. Skipped without a restart command. |
 | `non_determinism_held` | In part, below. |
