@@ -292,6 +292,76 @@
       ]
     },
     {
+      "id": "actor-argument-received-whole",
+      "description": "An actor operation receives its one argument as the caller sent it: a zero, a false, an empty string, a list and an object each arrive whole, never wrapped, spread or dropped, and the operation returns it as `received`. A call carries one argument value, which each SDK binds to the operation's parameters in its own way (sdk-core#149).",
+      "kind": "actor",
+      "actor": "contract_probe",
+      "steps": [
+        {
+          "operation": "echo_argument",
+          "input": 0,
+          "parallel": 1,
+          "expect_each": {
+            "received": 0
+          }
+        },
+        {
+          "operation": "echo_argument",
+          "input": false,
+          "parallel": 1,
+          "expect_each": {
+            "received": false
+          }
+        },
+        {
+          "operation": "echo_argument",
+          "input": "",
+          "parallel": 1,
+          "expect_each": {
+            "received": ""
+          }
+        },
+        {
+          "operation": "echo_argument",
+          "input": [
+            1,
+            "two",
+            null,
+            false
+          ],
+          "parallel": 1,
+          "expect_each": {
+            "received": [
+              1,
+              "two",
+              null,
+              false
+            ]
+          }
+        },
+        {
+          "operation": "echo_argument",
+          "input": {
+            "name": "widget",
+            "count": 0,
+            "tags": [
+              "a"
+            ]
+          },
+          "parallel": 1,
+          "expect_each": {
+            "received": {
+              "name": "widget",
+              "count": 0,
+              "tags": [
+                "a"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": "workflow-failure-surfaces-its-message",
       "description": "A workflow throws the SDK's typed workflow error; the caller must receive that message. Asserting only that the workflow failed is not enough — a failure the engine cannot parse also counts as a failure, which is how an unreportable error stayed hidden while every suite passed.",
       "workflow": "typed_failure",
