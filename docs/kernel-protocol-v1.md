@@ -144,6 +144,7 @@ message DeterminismViolation {             // kernel → SDK (for its error/log)
 ```
 
 - **Commands say what, not ids.** `RunTask` carries type, queue, input, timeouts, retry policy and headers; the kernel assigns the step id (§8) and owns defaults and validation (#30), so the `?? 3` retry default and duration encoding live once.
+- **A call carries one argument value.** `input` (`RunTask`, `StartChild`, `RestartFresh`, and `RunStarted` / `TaskAssignment` on the way in) and an actor operation's `payload` hold one value, whatever the function's parameter count: the engine stores one. Binding that value to the function's parameters is the SDK's (Python spreads an object as keyword arguments, TypeScript passes it whole), and a list is one value, never spread. The kernel refuses a command with several input payloads as a protocol error (#149); the field stays repeated so that several can be carried later without a breaking change, if the engine comes to store them.
 - **`AwaitEvent` and `RecordValue` are first-class**, so waiting on an event and journaling a computed value are compared like everything else.
 - **One failure shape everywhere**, replacing both sentinel markers; `Outcome.end` replaces the child-failure variants.
 
