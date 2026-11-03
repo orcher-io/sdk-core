@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.23.1](https://github.com/orcher-io/sdk-core/compare/v0.23.0...v0.23.1) (2026-11-03)
+
+
+### Features
+
+* **verify:** compare vectors across payload encodings ([#160](https://github.com/orcher-io/sdk-core/issues/160)) ([4f87ee8](https://github.com/orcher-io/sdk-core/commit/4f87ee8a09310c578e11165500184bb7029a39eb))
+
+
+### Bug Fixes
+
+* a call carries one argument value ([#161](https://github.com/orcher-io/sdk-core/issues/161)) ([13599e1](https://github.com/orcher-io/sdk-core/commit/13599e19c9b37a00a898d1107cfeaec765bc9dbc))
+* enforce elapsed bounds for event scenarios ([#158](https://github.com/orcher-io/sdk-core/issues/158)) ([c64e019](https://github.com/orcher-io/sdk-core/commit/c64e0199b2f8c5f1acd3ffc76c1af43b2cfc334e))
+
 ## [0.23.0](https://github.com/orcher-io/sdk-core/compare/v0.22.2...v0.23.0) (2026-11-01)
 
 
