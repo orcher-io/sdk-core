@@ -8,11 +8,29 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::framing::{read_frame, write_frame};
-use crate::judge::{judge_with_payload_comparison, PayloadComparison};
+use crate::judge::{judge, PayloadComparison};
 use crate::vectors::Vector;
 
 /// How long the runtime has to exit once its stdin is closed.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Configuration for one run of the vector checker.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// How long to wait for each runtime answer.
+    pub timeout: Duration,
+    /// How payloads are compared: as bytes, as JSON values, or not at all.
+    pub payload_comparison: PayloadComparison,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            payload_comparison: PayloadComparison::Exact,
+        }
+    }
+}
 
 /// How a run went.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -34,8 +52,9 @@ impl Summary {
 }
 
 /// Runs `runtime` (a program and its arguments) against `vectors`, judged in
-/// `namespace`, waiting at most `timeout` for each answer, and writes a line
-/// per vector and the summary to `out`. Payload bytes are compared exactly.
+/// `namespace`, waiting at most `options.timeout` for each answer, and writes a
+/// line per vector and the summary to `out`. The payload comparison policy is
+/// `options.payload_comparison`.
 ///
 /// # Errors
 ///
@@ -45,27 +64,7 @@ pub fn run(
     runtime: &[String],
     vectors: &[Vector],
     namespace: &str,
-    timeout: Duration,
-    out: &mut impl Write,
-) -> io::Result<Summary> {
-    run_with_payload_comparison(
-        runtime,
-        vectors,
-        namespace,
-        timeout,
-        PayloadComparison::Exact,
-        out,
-    )
-}
-
-/// Runs `runtime` with an explicit policy for comparing serialized payload
-/// bytes in the recorded answers.
-pub fn run_with_payload_comparison(
-    runtime: &[String],
-    vectors: &[Vector],
-    namespace: &str,
-    timeout: Duration,
-    payload_comparison: PayloadComparison,
+    options: Options,
     out: &mut impl Write,
 ) -> io::Result<Summary> {
     let (program, args) = runtime
@@ -97,10 +96,8 @@ pub fn run_with_payload_comparison(
     for vector in vectors {
         let problems = match &gone {
             Some(why) => vec![why.clone()],
-            None => match exchange(&mut stdin, &answers, vector, timeout) {
-                Ok(answer) => {
-                    judge_with_payload_comparison(vector, &answer, namespace, payload_comparison)
-                }
+            None => match exchange(&mut stdin, &answers, vector, options.timeout) {
+                Ok(answer) => judge(vector, &answer, namespace, options.payload_comparison),
                 Err(why) => {
                     gone = Some(why.clone());
                     vec![why]

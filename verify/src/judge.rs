@@ -13,16 +13,18 @@
 //! answers that send it the same thing are the same answer. Calls answered
 //! from history (`satisfied`) send nothing, so they are judged only by the
 //! history check, which needs each one's step id. Payload bytes are compared
-//! exactly by default; an explicit portable-runtime mode ignores only those
-//! serialized input and result bytes.
+//! exactly by default; `json` compares them as JSON values instead, for a
+//! runtime whose serializer spells the same values differently, and
+//! `ignore-bytes` does not compare them at all.
 
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use orcher_proto::kernel::v1::{run_activation_result, RunActivationResult};
 use orcher_proto::prost::Message;
 use orcher_proto::{
     command::Attributes, query_result, update_result, Command, CompleteWorkflowExecutionRequest,
-    FailWorkflowExecutionRequest, QueryResult, UpdateResult,
+    FailWorkflowExecutionRequest, Failure, QueryResult, UpdateResult,
 };
 #[cfg(test)]
 use orcher_proto::{CommandType, ScheduleTaskCommandAttributes};
@@ -37,6 +39,9 @@ pub enum PayloadComparison {
     /// Require payload bytes to match the recording exactly.
     #[default]
     Exact,
+    /// Compare payloads as JSON values when both decode as JSON; compare bytes
+    /// exactly when either side is not JSON.
+    Json,
     /// Ignore serialized input and result bytes, but compare command structure,
     /// headers, and every other non-payload field.
     IgnoreBytes,
@@ -45,12 +50,7 @@ pub enum PayloadComparison {
 /// What is wrong with `answer`, an encoded `RunActivationResult`, as the
 /// answer to `vector`, judged in `namespace`; empty when it is the recorded
 /// answer.
-pub fn judge(vector: &Vector, answer: &[u8], namespace: &str) -> Vec<String> {
-    judge_with_payload_comparison(vector, answer, namespace, PayloadComparison::Exact)
-}
-
-/// What is wrong with `answer`, using the requested payload-byte comparison.
-pub fn judge_with_payload_comparison(
+pub fn judge(
     vector: &Vector,
     answer: &[u8],
     namespace: &str,
@@ -122,21 +122,21 @@ fn compare(
                 &recorded.commands,
                 &sent.commands,
                 payload_comparison,
-                strip_command_payload_bytes,
+                |command| strip_command_payload_bytes(command, payload_comparison),
             );
             problems.extend(differences_with_payloads(
                 "query answer",
                 &recorded.query_results,
                 &sent.query_results,
                 payload_comparison,
-                strip_query_payload_bytes,
+                |result| strip_query_payload_bytes(result, payload_comparison),
             ));
             problems.extend(differences_with_payloads(
                 "update answer",
                 &recorded.update_results,
                 &sent.update_results,
                 payload_comparison,
-                strip_update_payload_bytes,
+                |result| strip_update_payload_bytes(result, payload_comparison),
             ));
             problems
         }
@@ -181,14 +181,14 @@ fn kind(message: &Recorded) -> &'static str {
     }
 }
 
-/// Compare typed messages after optionally clearing their serialized payload
-/// bytes. Message counts and all non-payload fields remain significant.
+/// Compare typed messages after normalizing their serialized payload bytes.
+/// Message counts and all non-payload fields remain significant.
 fn differences_with_payloads<T>(
     what: &str,
     recorded: &[T],
     sent: &[T],
     comparison: PayloadComparison,
-    strip_payload_bytes: impl Fn(&mut T),
+    normalize_payloads: impl Fn(&mut T),
 ) -> Vec<String>
 where
     T: Clone + PartialEq + Debug,
@@ -200,63 +200,148 @@ where
     let mut recorded = recorded.to_vec();
     let mut sent = sent.to_vec();
     for message in &mut recorded {
-        strip_payload_bytes(message);
+        normalize_payloads(message);
     }
     for message in &mut sent {
-        strip_payload_bytes(message);
+        normalize_payloads(message);
     }
     differences(what, &recorded, &sent)
 }
 
-/// Clear serialized inputs/results while retaining the command shape and
+/// Normalize serialized inputs/results while retaining command structure and
 /// comparing all non-payload fields.
-fn strip_command_payload_bytes(command: &mut Command) {
+fn strip_command_payload_bytes(command: &mut Command, comparison: PayloadComparison) {
     match command.attributes.as_mut() {
         Some(Attributes::ScheduleTask(attributes)) => {
-            attributes.input.clear();
+            normalize_payload_bytes(&mut attributes.input, comparison);
         }
         Some(Attributes::CompleteWorkflow(attributes)) => {
-            attributes.result.clear();
+            normalize_payload_bytes(&mut attributes.result, comparison);
         }
         Some(Attributes::CancelWorkflow(attributes)) => {
-            attributes.details.clear();
+            normalize_payload_bytes(&mut attributes.details, comparison);
         }
         Some(Attributes::FailWorkflow(attributes)) => {
             if let Some(failure) = attributes.failure.as_mut() {
-                failure.details.clear();
+                normalize_failure_payload_bytes(failure, comparison);
             }
         }
         Some(Attributes::RestartFresh(attributes)) => {
-            attributes.input.clear();
+            normalize_payload_bytes(&mut attributes.input, comparison);
         }
         Some(Attributes::StartChildWorkflow(attributes)) => {
-            attributes.input.clear();
+            normalize_payload_bytes(&mut attributes.input, comparison);
         }
         Some(Attributes::SendEvent(attributes)) => {
-            attributes.payload.clear();
+            normalize_payload_bytes(&mut attributes.payload, comparison);
         }
         Some(Attributes::QueryChildWorkflow(attributes)) => {
-            attributes.query_args.clear();
+            normalize_payload_bytes(&mut attributes.query_args, comparison);
         }
         Some(Attributes::RecordStepResult(attributes)) => {
-            attributes.result.clear();
+            normalize_payload_bytes(&mut attributes.result, comparison);
             if let Some(failure) = attributes.failure.as_mut() {
-                failure.details.clear();
+                normalize_failure_payload_bytes(failure, comparison);
             }
         }
-        _ => {}
+        Some(Attributes::StartTimer(_))
+        | Some(Attributes::CancelTimer(_))
+        | Some(Attributes::RequestCancelTask(_))
+        | Some(Attributes::CancelChildWorkflow(_))
+        | Some(Attributes::RequestCancellation(_))
+        | Some(Attributes::UpsertLabels(_))
+        | None => {}
     }
 }
 
-fn strip_query_payload_bytes(result: &mut QueryResult) {
-    if let Some(query_result::Result::Answer(answer)) = result.result.as_mut() {
-        answer.clear();
+fn normalize_payload_bytes(bytes: &mut Vec<u8>, comparison: PayloadComparison) {
+    match comparison {
+        PayloadComparison::Exact => {}
+        PayloadComparison::Json => {
+            if let Some(canonical) = canonical_json_bytes(bytes) {
+                *bytes = canonical;
+            }
+        }
+        PayloadComparison::IgnoreBytes => bytes.clear(),
     }
 }
 
-fn strip_update_payload_bytes(result: &mut UpdateResult) {
-    if let Some(update_result::Result::Answer(answer)) = result.result.as_mut() {
-        answer.clear();
+fn canonical_json_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let value = serde_json::from_slice(bytes).ok()?;
+    serde_json::to_vec(&CanonicalJson::from_value(value)?).ok()
+}
+
+/// A JSON value with one spelling for each value: object keys in order, and
+/// a number that is a whole number written as an integer (`1.0` is `1`),
+/// kept exact whatever its size, so two different large integers never
+/// compare equal by rounding to the same float.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum CanonicalJson {
+    Null,
+    Boolean(bool),
+    Integer(i128),
+    Number(f64),
+    String(String),
+    Array(Vec<CanonicalJson>),
+    Object(BTreeMap<String, CanonicalJson>),
+}
+
+impl CanonicalJson {
+    fn from_value(value: serde_json::Value) -> Option<Self> {
+        match value {
+            serde_json::Value::Null => Some(Self::Null),
+            serde_json::Value::Bool(value) => Some(Self::Boolean(value)),
+            serde_json::Value::Number(value) => {
+                if let Some(integer) = value.as_i64() {
+                    return Some(Self::Integer(i128::from(integer)));
+                }
+                if let Some(integer) = value.as_u64() {
+                    return Some(Self::Integer(i128::from(integer)));
+                }
+                let number = value.as_f64()?;
+                // A whole number written with a fraction (`1.0`, `-0.0`) is
+                // the integer it equals, as a runtime without an integer type
+                // writes it.
+                if number.fract() == 0.0 && number.abs() < 9.0e15 {
+                    Some(Self::Integer(number as i128))
+                } else {
+                    Some(Self::Number(number))
+                }
+            }
+            serde_json::Value::String(value) => Some(Self::String(value)),
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .map(Self::from_value)
+                .collect::<Option<Vec<_>>>()
+                .map(Self::Array),
+            serde_json::Value::Object(values) => values
+                .into_iter()
+                .map(|(key, value)| Some((key, Self::from_value(value)?)))
+                .collect::<Option<BTreeMap<_, _>>>()
+                .map(Self::Object),
+        }
+    }
+}
+
+fn normalize_failure_payload_bytes(failure: &mut Failure, comparison: PayloadComparison) {
+    normalize_payload_bytes(&mut failure.details, comparison);
+    if let Some(cause) = failure.cause.as_mut() {
+        normalize_failure_payload_bytes(cause, comparison);
+    }
+}
+
+fn strip_query_payload_bytes(result: &mut QueryResult, comparison: PayloadComparison) {
+    match result.result.as_mut() {
+        Some(query_result::Result::Answer(answer)) => normalize_payload_bytes(answer, comparison),
+        Some(query_result::Result::ErrorMessage(_)) | None => {}
+    }
+}
+
+fn strip_update_payload_bytes(result: &mut UpdateResult, comparison: PayloadComparison) {
+    match result.result.as_mut() {
+        Some(update_result::Result::Answer(answer)) => normalize_payload_bytes(answer, comparison),
+        Some(update_result::Result::ErrorMessage(_)) | None => {}
     }
 }
 
@@ -305,6 +390,7 @@ mod tests {
                         headers: [("trace".to_string(), header.to_vec())].into(),
                         ..Default::default()
                     })),
+                    ..Default::default()
                 }],
                 query_results: vec![QueryResult {
                     query_id: "query-1".to_string(),
@@ -343,5 +429,37 @@ mod tests {
         assert!(compare(&recorded, &different_bytes, PayloadComparison::IgnoreBytes).is_empty());
         assert!(!compare(&recorded, &different_task, PayloadComparison::IgnoreBytes).is_empty());
         assert!(!compare(&recorded, &different_header, PayloadComparison::IgnoreBytes).is_empty());
+    }
+
+    #[test]
+    fn json_payloads_compare_decoded_values_and_fall_back_to_bytes() {
+        let recorded = completion(
+            "charge",
+            br#"{"amount":1,"tags":["a","b"]}"#,
+            br#"{"ok":true,"count":1}"#,
+            b"header",
+        );
+        let equivalent_json = completion(
+            "charge",
+            br#"{ "tags": ["a", "b"], "amount": 1.0 }"#,
+            br#"{"count":1.0,"ok":true}"#,
+            b"header",
+        );
+        let invalid_json = completion("charge", b"\x00\xff", b"\x01\xfe", b"header");
+        let invalid_json_changed = completion("charge", b"\x00\xfe", b"\x01\xfe", b"header");
+
+        assert!(compare(&recorded, &equivalent_json, PayloadComparison::Json).is_empty());
+
+        // Integers stay exact: two that differ only past a float's precision
+        // are different values.
+        let large = completion("charge", b"9007199254740993", b"1", b"header");
+        let large_rounded = completion("charge", b"9007199254740992", b"1", b"header");
+        assert!(!compare(&large, &large_rounded, PayloadComparison::Json).is_empty());
+        assert!(!compare(
+            &invalid_json,
+            &invalid_json_changed,
+            PayloadComparison::Json
+        )
+        .is_empty());
     }
 }
