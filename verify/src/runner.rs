@@ -8,11 +8,29 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::framing::{read_frame, write_frame};
-use crate::judge::judge;
+use crate::judge::{judge, PayloadComparison};
 use crate::vectors::Vector;
 
 /// How long the runtime has to exit once its stdin is closed.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Configuration for one run of the vector checker.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// How long to wait for each runtime answer.
+    pub timeout: Duration,
+    /// How payloads are compared: as bytes, as JSON values, or not at all.
+    pub payload_comparison: PayloadComparison,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            payload_comparison: PayloadComparison::Exact,
+        }
+    }
+}
 
 /// How a run went.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -34,8 +52,9 @@ impl Summary {
 }
 
 /// Runs `runtime` (a program and its arguments) against `vectors`, judged in
-/// `namespace`, waiting at most `timeout` for each answer, and writes a line
-/// per vector and the summary to `out`.
+/// `namespace`, waiting at most `options.timeout` for each answer, and writes a
+/// line per vector and the summary to `out`. The payload comparison policy is
+/// `options.payload_comparison`.
 ///
 /// # Errors
 ///
@@ -45,7 +64,7 @@ pub fn run(
     runtime: &[String],
     vectors: &[Vector],
     namespace: &str,
-    timeout: Duration,
+    options: Options,
     out: &mut impl Write,
 ) -> io::Result<Summary> {
     let (program, args) = runtime
@@ -77,8 +96,8 @@ pub fn run(
     for vector in vectors {
         let problems = match &gone {
             Some(why) => vec![why.clone()],
-            None => match exchange(&mut stdin, &answers, vector, timeout) {
-                Ok(answer) => judge(vector, &answer, namespace),
+            None => match exchange(&mut stdin, &answers, vector, options.timeout) {
+                Ok(answer) => judge(vector, &answer, namespace, options.payload_comparison),
                 Err(why) => {
                     gone = Some(why.clone());
                     vec![why]

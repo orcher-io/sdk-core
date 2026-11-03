@@ -36,6 +36,11 @@ Options:
 - `--sdk <sdk>`: only the vectors recorded from that SDK's contract suite
   (`rust`, `python`, `typescript`); may be given more than once.
 - `--timeout <secs>`: how long to wait for each answer (default 30).
+- `vectors` only: `--payloads exact|json|ignore-bytes` selects how payloads
+  (task input, results, event payloads, failure details) are compared: as
+  bytes (`exact`, the default), as JSON values (`json`), or not at all
+  (`ignore-bytes`). Command structure, headers and every other field are
+  compared in all three.
 - `--vectors <dir>`: read the vectors from a directory laid out like
   [`vectors/`](https://github.com/orcher-io/sdk-core/tree/main/verify/vectors) instead of the built-in ones.
 
@@ -72,6 +77,15 @@ expected answer is the recorded one, payloads included: the bytes a workflow
 passes to a task or completes with must be the bytes the recording SDK
 produced. Pick the vectors of the SDK whose contract suite your workflows
 implement with `--sdk`.
+
+To check a runtime against every vector, whichever SDK recorded it, pass
+`--payloads json`. Payloads are then compared as JSON values: key order and
+whitespace do not matter, a whole number may be written `1` or `1.0`, and
+integers are compared exactly; a payload that is not JSON is compared as
+bytes. The values themselves must match, so a runtime that returns `null`
+where `0` was recorded still fails. `--payloads ignore-bytes` skips payloads
+altogether and checks only the shape of what is sent; use it only to narrow
+down a failure. Keep the default, `exact`, to check one SDK's serialization.
 
 ## How an answer is judged
 

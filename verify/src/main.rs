@@ -4,8 +4,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+use orcher_verify::judge::PayloadComparison;
 use orcher_verify::reference::{self, Answers};
-use orcher_verify::runner;
+use orcher_verify::runner::{self, Options as VectorOptions};
 use orcher_verify::scenarios::{self, drive::ActorArguments};
 use orcher_verify::vectors::{self, Files, Vector, SDKS};
 
@@ -38,6 +39,12 @@ Options for vectors, list and reference-runtime:
   --vectors <dir>     Read the vectors from this directory (with index.json)
                       instead of the ones built in.
   --timeout <secs>    How long to wait for each answer (default 30).
+  vectors only:
+    --payloads <mode> How payloads are compared: exact bytes (default);
+                      json, as JSON values, to check a runtime against every
+                      SDK's vectors (a payload that is not JSON is compared
+                      as bytes); or ignore-bytes, not at all, only to narrow
+                      down a failure.
 
 Options for scenarios:
   --namespace <ns>          Namespace to run in, created if missing
@@ -83,7 +90,8 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
 
     let mut sdks: Vec<String> = Vec::new();
     let mut files = Files::Embedded;
-    let mut timeout = Duration::from_secs(30);
+    let mut vector_options = VectorOptions::default();
+    let mut payload_comparison_was_set = false;
     let mut answers = Answers::Recorded;
     let mut runtime: Option<Vec<String>> = None;
     while let Some((flag, after)) = rest.split_first() {
@@ -102,7 +110,20 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 let secs: u64 = value
                     .parse()
                     .map_err(|_| format!("--timeout takes whole seconds, not {value:?}"))?;
-                timeout = Duration::from_secs(secs);
+                vector_options.timeout = Duration::from_secs(secs);
+            }
+            "--payloads" => {
+                vector_options.payload_comparison = match value.as_str() {
+                    "exact" => PayloadComparison::Exact,
+                    "json" => PayloadComparison::Json,
+                    "ignore-bytes" => PayloadComparison::IgnoreBytes,
+                    _ => {
+                        return Err(format!(
+                            "--payloads must be exact, json, or ignore-bytes, not {value:?}"
+                        ))
+                    }
+                };
+                payload_comparison_was_set = true;
             }
             "--answers" => {
                 answers = Answers::named(value).ok_or_else(|| {
@@ -115,6 +136,9 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             _ => return Err(format!("unknown option {flag:?}")),
         }
         rest = after;
+    }
+    if payload_comparison_was_set && command != "vectors" {
+        return Err("--payloads is only valid with the vectors command".to_string());
     }
 
     let (index, all) =
@@ -133,7 +157,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 &runtime,
                 &chosen,
                 &index.namespace,
-                timeout,
+                vector_options,
                 &mut std::io::stdout().lock(),
             )
             .map_err(|e| e.to_string())?;
