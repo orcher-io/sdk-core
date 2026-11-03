@@ -40,11 +40,11 @@ Options for vectors, list and reference-runtime:
                       instead of the ones built in.
   --timeout <secs>    How long to wait for each answer (default 30).
   vectors only:
-    --payloads <mode> Compare serialized payload bytes: exact (default),
-                      json, or ignore-bytes. JSON mode compares decoded JSON
-                      values, falling back to exact bytes for non-JSON data.
-                      Ignoring bytes is useful across SDK serializers, but
-                      does not validate values.
+    --payloads <mode> How payloads are compared: exact bytes (default);
+                      json, as JSON values, to check a runtime against every
+                      SDK's vectors (a payload that is not JSON is compared
+                      as bytes); or ignore-bytes, not at all, only to narrow
+                      down a failure.
 
 Options for scenarios:
   --namespace <ns>          Namespace to run in, created if missing
