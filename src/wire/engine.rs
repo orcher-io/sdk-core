@@ -92,13 +92,7 @@ pub(crate) fn commands(
                         } else {
                             cmd.task_queue
                         },
-                        input: {
-                            let mut all_data = Vec::new();
-                            for payload in &cmd.input {
-                                all_data.extend(&payload.data);
-                            }
-                            all_data
-                        },
+                        input: one_value(&cmd.input),
                         // The queue-wait limit is a separate option. Absent, the task
                         // waits in the queue as long as it needs to. Inheriting the
                         // run limit here would double the effective total timeout.
@@ -193,13 +187,7 @@ pub(crate) fn commands(
                     task_queue: cmd
                         .task_queue
                         .unwrap_or_else(|| default_task_queue.to_string()),
-                    input: {
-                        let mut all_data = Vec::new();
-                        for payload in &cmd.input {
-                            all_data.extend(&payload.data);
-                        }
-                        all_data
-                    },
+                    input: one_value(&cmd.input),
                     execution_timeout: cmd.timeout.map(|t| prost_types::Duration {
                         seconds: t.as_secs() as i64,
                         nanos: (t.as_nanos() % 1_000_000_000) as i32,
@@ -253,13 +241,7 @@ pub(crate) fn commands(
                             } else {
                                 cmd.task_queue
                             },
-                            input: {
-                                let mut all_data = Vec::new();
-                                for payload in &cmd.input {
-                                    all_data.extend(&payload.data);
-                                }
-                                all_data
-                            },
+                            input: one_value(&cmd.input),
                             execution_timeout: cmd.timeout.map(|t| prost_types::Duration {
                                 seconds: t.as_secs() as i64,
                                 nanos: (t.as_nanos() % 1_000_000_000) as i32,
@@ -540,4 +522,15 @@ impl From<proto::PollTaskExecutionResponse> for TaskExecutionTask {
                 .map(|d| Duration::new(d.seconds as u64, d.nanos as u32)),
         }
     }
+}
+
+/// The engine's one input value for a call: its only payload's bytes, or
+/// none. The kernel refuses a call with several (`kernel::completion`);
+/// joining their bytes would make one value nothing could read back.
+fn one_value(input: &[crate::payload::Payload]) -> Vec<u8> {
+    debug_assert!(input.len() <= 1, "a call carries one argument value");
+    input
+        .first()
+        .map(|payload| payload.data.clone())
+        .unwrap_or_default()
 }

@@ -246,7 +246,7 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
             task_id: step_id,
             task_type: task.task_type,
             task_queue: task.task_queue,
-            input: task.input.into_iter().map(payload).collect(),
+            input: one_value("a task", task.input)?,
             timeout: task
                 .attempt_timeout
                 .map(duration)
@@ -275,7 +275,7 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
                 workflow_id: child.workflow_id,
                 workflow_type: child.workflow_type,
                 task_queue: child.task_queue,
-                input: child.input.into_iter().map(payload).collect(),
+                input: one_value("a child workflow", child.input)?,
                 timeout: child.execution_timeout.map(duration),
                 orphan_policy: match KernelOrphanPolicy::try_from(child.orphan_policy) {
                     Ok(KernelOrphanPolicy::Terminate) => OrphanPolicy::Terminate,
@@ -344,7 +344,7 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
         }
         Some(command::What::RestartFresh(restart)) => Command::RestartFresh(RestartFreshCommand {
             workflow_type: restart.workflow_type,
-            input: restart.input.into_iter().map(payload).collect(),
+            input: one_value("a restart-fresh", restart.input)?,
             task_queue: Some(restart.task_queue).filter(|queue| !queue.is_empty()),
             timeout: restart.execution_timeout.map(duration),
             // Unset: the fresh run keeps the policy of the run it replaces.
@@ -357,6 +357,21 @@ fn engine_command(command: KernelCommand) -> Result<Command> {
         }
         None => return Err(Error::Protocol("a command of no kind".to_string())),
     })
+}
+
+/// The arguments a call's `input` carries, as the engine stores them: one
+/// value at most. Several parameters are the SDK's to bind from that one
+/// value, as every SDK does; several payloads are refused, as a protocol
+/// error, rather than joined into one value nothing could read back.
+fn one_value(call: &str, input: Vec<KernelPayload>) -> Result<Vec<Payload>> {
+    if input.len() > 1 {
+        return Err(Error::Protocol(format!(
+            "{call} was given {} argument payloads; a call carries one value, from which the \
+             SDK binds the function's parameters",
+            input.len()
+        )));
+    }
+    Ok(input.into_iter().map(payload).collect())
 }
 
 /// A recorded value's result, failure and attempts, as a step result.
@@ -1086,6 +1101,66 @@ mod tests {
             let error = execution_result("run-1", answer).unwrap_err();
             assert!(matches!(error, Error::Protocol(_)), "{error:?}");
         }
+    }
+
+    /// A call carries one argument value: several payloads are refused as
+    /// a protocol error rather than joined into bytes nothing could read
+    /// back, and one is sent as it is.
+    #[test]
+    fn a_call_carries_one_argument_value() {
+        use crate::proto::kernel::v1::{RestartFresh, StartChild};
+        let value = |data: &[u8]| KernelPayload {
+            data: data.to_vec(),
+            ..Default::default()
+        };
+        let two = || vec![value(b"1"), value(b"2")];
+        for what in [
+            command::What::RunTask(RunTask {
+                task_type: "charge".into(),
+                input: two(),
+                ..Default::default()
+            }),
+            command::What::StartChild(StartChild {
+                workflow_type: "child".into(),
+                input: two(),
+                ..Default::default()
+            }),
+            command::What::RestartFresh(RestartFresh {
+                workflow_type: "again".into(),
+                input: two(),
+                ..Default::default()
+            }),
+        ] {
+            let error = execution_result("run-1", answered(vec![call(0, false, "step_0", what)]))
+                .unwrap_err();
+            assert!(
+                matches!(&error, Error::Protocol(message) if message.contains("2 argument payloads")),
+                "{error:?}"
+            );
+        }
+
+        let result = execution_result(
+            "run-1",
+            answered(vec![call(
+                0,
+                false,
+                "charge_0",
+                command::What::RunTask(RunTask {
+                    task_type: "charge".into(),
+                    input: vec![value(br#"[1,2]"#)],
+                    ..Default::default()
+                }),
+            )]),
+        )
+        .unwrap();
+        let Command::ScheduleTask(task) = &result.commands[0] else {
+            panic!("a task");
+        };
+        assert_eq!(task.input.len(), 1);
+        assert_eq!(
+            task.input[0].data, br#"[1,2]"#,
+            "a list is one value, whole"
+        );
     }
 
     /// Two tasks issued together; the second has finished, the first is
