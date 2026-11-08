@@ -115,6 +115,7 @@ one engine and database for the whole run, in a fixed order.
 | `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends so results stay comparable with earlier ones (sending each once also completes every run: orcher-io/orcher#376 found no stall) |
 | `fanout-1000`, `fanout-10000` | one run issuing n no-op tasks at once and waiting for all | one run's activations as its tasks complete; eager dispatch; claims in bulk (#33) |
 | `concurrent-100x10` | 100 runs at once of 10 tasks each | many runs at once against 100 slots |
+| `processes-1-10x100`, `processes-4-10x100` | 10 runs at once of 100 tasks each, on 1 or on 4 worker processes serving the queue | how often a run's next activation reaches the process that holds its journal (#36): `partial_activation_share`, and the journal rows it saves |
 | `footprint-task-worker` | a task-only worker, 10 s idle, then 1,000 tasks of 20 ms through 100 slots | a task-only worker's footprint idle and busy, and claimed-but-not-started tasks (#33) |
 | `heartbeat-100/1000` | k tasks running at once for 15 s, heartbeat timeout 3 s, on a task-only worker | heartbeat RPC rate and Postgres writes per heartbeat against concurrency (#35) |
 | `throughput-1`, `throughput-10` | sustained load: 100 (or 50) runs kept in flight for 60 s, each of 1 (or 10) no-op tasks, a new run started as each ends | runs/s and tasks/s at saturation, end-to-end p50/p99 from the client, and schedule-to-start p50/p99 from the engine's task rows (#108). Rates are a laptop's wall clock: compare them only on a hosted runner |
@@ -140,12 +141,13 @@ Postgres numbers, the top statements, the phase's worker cost).
 | `empty_polls` | polls that came back with no work |
 | `worker_connections` | the most connections the worker had open to the engine (#38) |
 | `journal_rows_read`, `journal_blocks` | rows returned by, and shared buffers touched by, statements reading `workflow_execution_journal` |
-| `journal_rows_per_activation` | the same per activation: grows with n while every activation is the whole journal |
+| `journal_rows_per_activation` | the same per activation, of every worker process: grows with n while every activation is the whole journal |
 | `pg_rows`, `pg_blocks`, `pg_calls`, `pg_wal_bytes` | every statement the engine ran: rows returned or written, shared buffers hit + read, calls, WAL |
 | `pg_write_rows` | rows written by insert, update and delete statements |
-| `pg_blocks_per_activation`, `pg_wal_bytes_per_activation` | Postgres work per activation |
-| `activation_bytes` | bytes of a workflow poll response that carried an activation, on average |
+| `pg_blocks_per_activation`, `pg_wal_bytes_per_activation` | Postgres work per activation, of every worker process |
+| `activation_bytes` | bytes of workflow poll responses per activation they carried, on average, polls for one and batch polls alike |
 | `journal_entries_per_activation` | journal entries an activation carried, on average |
+| `partial_activation_share` | activations that carried only the run's entries after those its worker process was sent before (#36), of all activations |
 | `worker_cpu_us_per_activation`, `worker_allocs_per_activation`, `worker_alloc_bytes_per_activation` | the worker's CPU time and allocations per activation (including its tasks' share where it runs both) |
 | `worker_cpu_us_per_task`, `worker_allocs_per_task` | the same per task |
 | `worker_peak_heap_bytes`, `worker_peak_tokio_tasks` | the most live heap and tokio tasks sampled |

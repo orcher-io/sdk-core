@@ -43,10 +43,15 @@ pub fn derive(result: &ScenarioResult) -> BTreeMap<String, f64> {
     let rpc = &busy.rpc;
     let pg = &result.pg;
     let activations = worker.activations;
+    // A scenario with several worker processes measures one; the others'
+    // activations count towards what the engine did per activation.
+    let peers = result.peers_rpc.clone().unwrap_or_default();
+    let all_activations = activations + peers.activations_claimed();
     let tasks = worker.tasks;
     let journal = pg.journal_reads();
     let writes = pg.writes();
-    let polls = rpc.method("PollWorkflowExecution");
+    let polls = rpc.workflow_polls();
+    let all_polls = polls.plus(&peers.workflow_polls());
     let heartbeats = rpc.method("RecordTaskHeartbeat");
 
     d.insert("success_rate".into(), result.success_rate);
@@ -83,23 +88,27 @@ pub fn derive(result: &ScenarioResult) -> BTreeMap<String, f64> {
     d.insert("journal_blocks".into(), journal.blocks() as f64);
     d.insert(
         "journal_rows_per_activation".into(),
-        ratio(journal.rows, activations),
+        ratio(journal.rows, all_activations),
     );
     d.insert(
         "pg_blocks_per_activation".into(),
-        ratio(pg.total.blocks(), activations),
+        ratio(pg.total.blocks(), all_activations),
     );
     d.insert(
         "pg_wal_bytes_per_activation".into(),
-        ratio(pg.total.wal_bytes, activations),
+        ratio(pg.total.wal_bytes, all_activations),
     );
     d.insert(
         "activation_bytes".into(),
-        ratio(polls.response_bytes, polls.with_work),
+        ratio(all_polls.response_bytes, all_polls.items),
     );
     d.insert(
         "journal_entries_per_activation".into(),
-        ratio(polls.journal_entries, polls.with_work),
+        ratio(all_polls.journal_entries, all_polls.items),
+    );
+    d.insert(
+        "partial_activation_share".into(),
+        ratio(all_polls.partial, all_polls.items),
     );
     d.insert(
         "worker_cpu_us_per_activation".into(),
@@ -198,6 +207,7 @@ const SUMMARY: &[(&str, &str)] = &[
     ("journal_rows_per_activation", "journal rows/activation"),
     ("pg_blocks_per_activation", "PG blocks/activation"),
     ("activation_bytes", "bytes/activation"),
+    ("partial_activation_share", "partial activations"),
     ("worker_cpu_us_per_activation", "worker CPU µs/activation"),
     ("worker_allocs_per_activation", "allocs/activation"),
 ];
