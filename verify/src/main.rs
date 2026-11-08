@@ -7,7 +7,7 @@ use std::time::Duration;
 use orcher_verify::judge::PayloadComparison;
 use orcher_verify::reference::{self, Answers};
 use orcher_verify::runner::{self, Options as VectorOptions};
-use orcher_verify::scenarios::{self, drive::ActorArguments};
+use orcher_verify::scenarios;
 use orcher_verify::vectors::{self, Files, Vector, SDKS};
 
 const USAGE: &str = "\
@@ -60,9 +60,6 @@ Options for scenarios:
                             skipped without one.
   --scenarios <file>        Read the catalog from this file instead of the
                             one built in.
-  --actor-arguments <enc>   How an actor operation's input is encoded: value,
-                            or tuple (a JSON array of one); default tuple for
-                            --sdk rust, value otherwise.
 ";
 
 fn main() -> ExitCode {
@@ -203,7 +200,6 @@ fn scenarios(mut rest: &[String]) -> Result<ExitCode, String> {
         .ok()
         .filter(|c| !c.is_empty());
     let mut source = scenarios::Source::Embedded;
-    let mut actor_arguments: Option<ActorArguments> = None;
     while let Some((flag, after)) = rest.split_first() {
         let (value, after) = after
             .split_first()
@@ -235,14 +231,6 @@ fn scenarios(mut rest: &[String]) -> Result<ExitCode, String> {
             "--api-key" => api_key = Some(value.clone()),
             "--restart-command" => restart_command = Some(value.clone()),
             "--scenarios" => source = scenarios::Source::File(value.into()),
-            "--actor-arguments" => {
-                actor_arguments = Some(ActorArguments::named(value).ok_or_else(|| {
-                    format!(
-                        "--actor-arguments is one of {}, not {value:?}",
-                        ActorArguments::NAMES.join(", ")
-                    )
-                })?);
-            }
             _ => return Err(format!("unknown option {flag:?}")),
         }
         rest = after;
@@ -252,7 +240,6 @@ fn scenarios(mut rest: &[String]) -> Result<ExitCode, String> {
         server_url: server_url.ok_or("scenarios needs --server-url <url>")?,
         task_queue: task_queue.ok_or("scenarios needs --task-queue <queue>")?,
         namespace,
-        actor_arguments: actor_arguments.unwrap_or_else(|| ActorArguments::of_sdk(sdk.as_deref())),
         sdk,
         api_key,
         result_timeout,
