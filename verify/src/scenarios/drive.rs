@@ -24,47 +24,6 @@ use serde_json::Value;
 
 use super::{result_matches, within_bounds, Kind, Outcome, Scenario, Summary, Verdict};
 
-/// How an actor operation's argument is encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActorArguments {
-    /// The input as it is: what sdk-py's and sdk-ts's clients send.
-    Value,
-    /// The input as a JSON array of one, the argument tuple sdk-rust's
-    /// operations decode.
-    Tuple,
-}
-
-impl ActorArguments {
-    /// The names `--actor-arguments` takes.
-    pub const NAMES: [&'static str; 2] = ["value", "tuple"];
-
-    /// The encoding `name` names.
-    pub fn named(name: &str) -> Option<ActorArguments> {
-        match name {
-            "value" => Some(ActorArguments::Value),
-            "tuple" => Some(ActorArguments::Tuple),
-            _ => None,
-        }
-    }
-
-    /// What `sdk`'s worker decodes: a tuple for sdk-rust, the value for
-    /// every other.
-    pub fn of_sdk(sdk: Option<&str>) -> ActorArguments {
-        match sdk {
-            Some("rust") => ActorArguments::Tuple,
-            _ => ActorArguments::Value,
-        }
-    }
-
-    fn encode(self, input: &Value) -> Vec<u8> {
-        let value = match self {
-            ActorArguments::Value => input.clone(),
-            ActorArguments::Tuple => Value::Array(vec![input.clone()]),
-        };
-        serde_json::to_vec(&value).expect("JSON encodes")
-    }
-}
-
 /// Where and how to run the scenarios.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -84,8 +43,6 @@ pub struct Options {
     pub parallel: usize,
     /// The command that restarts the engine, for `kind: "engine_restart"`.
     pub restart_command: Option<String>,
-    /// How an actor operation's argument is encoded.
-    pub actor_arguments: ActorArguments,
 }
 
 /// Runs `scenarios` against the engine `options` names, writing a line per
@@ -437,7 +394,8 @@ impl Engine<'_> {
             .ok_or("actor scenario missing `actor`")?;
         let key = fresh_key("verify");
         for step in &scenario.steps {
-            let payload = self.options.actor_arguments.encode(&step.input);
+            // A call carries one argument value, sent as it is (sdk-core#149).
+            let payload = serde_json::to_vec(&step.input).expect("JSON encodes");
             let invocations = (0..step.parallel).map(|_| {
                 self.actors.invoke_operation(
                     actor.to_string(),

@@ -267,14 +267,12 @@ Options:
   `engine-restart-then-dispatch` (default `ORCHER_CONTRACT_RESTART_CMD`);
   without one it is skipped.
 - `--scenarios <file>`: read the catalog from this file.
-- `--actor-arguments value|tuple`: how an actor operation's input is
-  encoded. sdk-rust's operations decode their arguments as a JSON array, a
-  tuple of one; sdk-py's and sdk-ts's clients send the bare value. The
-  default is `tuple` for `--sdk rust` and `value` otherwise.
 
 A workflow's input is sent as plain JSON, as sdk-py's and sdk-ts's clients
 send it. sdk-rust's client wraps it in its payload envelope; its worker reads
 either.
+An actor operation's input is sent as it is too: a call carries one
+argument value, which every SDK's operations decode whole.
 
 ### How each kind is judged
 
