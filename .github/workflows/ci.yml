@@ -25,6 +25,8 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      # crates.io shows README.registry.md, generated from README.md
+      - run: scripts/registry-readme.sh --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace --lib --tests

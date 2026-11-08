@@ -1,10 +1,9 @@
+<!-- banner -->
 <p>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner-light.svg">
-    <img alt="ORCHER SDK Core" src="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner.svg" width="100%">
-  </picture>
+  <img alt="ORCHER SDK Core" src="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner.svg#gh-dark-mode-only" width="100%">
+  <img alt="ORCHER SDK Core" src="https://raw.githubusercontent.com/orcher-io/sdk-core/main/assets/banner-light.svg#gh-light-mode-only" width="100%">
 </p>
+<!-- /banner -->
 
 <p align="center"><sub>The shared engine room of every ORCHER SDK: gRPC, workers and deterministic replay, in Rust.</sub></p>
 
