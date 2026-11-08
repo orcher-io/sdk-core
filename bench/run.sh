@@ -16,6 +16,9 @@
 #
 # BENCH_ENGINE_LOG_LEVEL sets the engine's log level (default warn), for
 # tracing a run through its log, e.g. "info,orcher_dispatch=info".
+# BENCH_ENGINE_ENV adds engine settings, as space-separated NAME=VALUE pairs,
+# to measure one, e.g. "ORCHER_JOURNAL_HOLDER_HOLD_MS=0"; they are recorded in
+# the results as engine_env.
 #
 # Needs docker, curl and cargo. See bench/README.md.
 
@@ -27,6 +30,13 @@ usage() {
 }
 
 [ $# -ge 1 ] || usage
+ENGINE_ENV=()
+for setting in ${BENCH_ENGINE_ENV:-}; do
+  case "$setting" in
+    *=*) ENGINE_ENV+=(-e "$setting") ;;
+    *) echo "bench: BENCH_ENGINE_ENV takes NAME=VALUE pairs, not $setting" >&2; exit 2 ;;
+  esac
+done
 LABEL=$1
 shift
 case "$LABEL" in -*) usage ;; esac
@@ -117,6 +127,7 @@ docker run -d --name "$ENGINE" --network "$NET" \
   -e GRPC_BIND_ADDR=0.0.0.0:50051 -e HTTP_BIND_ADDR=0.0.0.0:8080 \
   -e ORCHER_GRPC_MAX_MESSAGE_BYTES=33554432 -e ORCHER_PAYLOAD_MAX_BYTES=8388608 \
   -e LOG_LEVEL="${BENCH_ENGINE_LOG_LEVEL:-warn}" -e LOG_FORMAT=compact \
+  ${ENGINE_ENV[@]+"${ENGINE_ENV[@]}"} \
   "$IMAGE" >/dev/null
 GRPC_PORT=$(port_of "$ENGINE" 50051/tcp)
 HTTP_PORT=$(port_of "$ENGINE" 8080/tcp)
@@ -155,6 +166,7 @@ echo "bench: engine $ENGINE_RELEASE ($ENGINE_REVISION), sdk-core $CORE_REVISION"
   --out "$ROOT/bench/results" \
   --meta "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --meta "engine_image=$IMAGE" \
+  --meta "engine_env=${BENCH_ENGINE_ENV:-}" \
   --meta "engine_release=$ENGINE_RELEASE" \
   --meta "engine_revision=$ENGINE_REVISION" \
   --meta "sdk_core_revision=$CORE_REVISION" \
