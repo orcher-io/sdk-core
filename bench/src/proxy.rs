@@ -35,7 +35,8 @@ use hyper::body::Incoming;
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use orcher_proto::orcher::v1::{
-    CompleteWorkflowExecutionResponse, PollTaskExecutionResponse, PollWorkflowExecutionResponse,
+    CompleteWorkflowExecutionResponse, PollTaskExecutionResponse, PollTaskExecutionsResponse,
+    PollWorkflowExecutionResponse, PollWorkflowExecutionsResponse,
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,14 @@ pub struct MethodStats {
     pub response_bytes: u64,
     /// Polls that brought back work.
     pub with_work: u64,
+    /// Activations or tasks the polls brought back: one per poll that
+    /// brought work back for a poll for one, any number for a batch poll.
+    #[serde(default)]
+    pub items: u64,
+    /// Activations that carried only the run's entries after those the
+    /// worker process was sent before (`history_after_entry_id` above 0).
+    #[serde(default)]
+    pub partial: u64,
     /// Journal entries the activations carried (workflow polls only).
     pub journal_entries: u64,
     /// Tasks handed back with a workflow completion.
@@ -68,6 +77,24 @@ pub struct MethodStats {
     /// The errors, by status code and message (the first few kinds only).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub error_kinds: BTreeMap<String, u64>,
+}
+
+impl MethodStats {
+    /// Both counts together; the error kinds are left out.
+    pub fn plus(&self, other: &MethodStats) -> MethodStats {
+        MethodStats {
+            calls: self.calls + other.calls,
+            errors: self.errors + other.errors,
+            request_bytes: self.request_bytes + other.request_bytes,
+            response_bytes: self.response_bytes + other.response_bytes,
+            with_work: self.with_work + other.with_work,
+            items: self.items + other.items,
+            partial: self.partial + other.partial,
+            journal_entries: self.journal_entries + other.journal_entries,
+            eager_tasks: self.eager_tasks + other.eager_tasks,
+            error_kinds: BTreeMap::new(),
+        }
+    }
 }
 
 /// How many kinds of error are kept per method.
@@ -94,13 +121,24 @@ pub struct ProxyStats {
 impl ProxyStats {
     /// Workflow activations claimed: polled ones.
     pub fn activations_claimed(&self) -> u64 {
-        self.method("PollWorkflowExecution").with_work
+        self.workflow_polls().items
     }
 
     /// Tasks claimed: polled and eager ones.
     pub fn tasks_claimed(&self) -> u64 {
-        self.method("PollTaskExecution").with_work
-            + self.method("CompleteWorkflowExecution").eager_tasks
+        self.task_polls().items + self.method("CompleteWorkflowExecution").eager_tasks
+    }
+
+    /// Workflow polls for one activation and for several, together.
+    pub fn workflow_polls(&self) -> MethodStats {
+        self.method("PollWorkflowExecution")
+            .plus(&self.method("PollWorkflowExecutions"))
+    }
+
+    /// Task polls for one task and for several, together.
+    pub fn task_polls(&self) -> MethodStats {
+        self.method("PollTaskExecution")
+            .plus(&self.method("PollTaskExecutions"))
     }
 
     pub fn method(&self, name: &str) -> MethodStats {
@@ -122,6 +160,8 @@ impl ProxyStats {
                 request_bytes: after.request_bytes - b.request_bytes,
                 response_bytes: after.response_bytes - b.response_bytes,
                 with_work: after.with_work - b.with_work,
+                items: after.items - b.items,
+                partial: after.partial - b.partial,
                 journal_entries: after.journal_entries - b.journal_entries,
                 eager_tasks: after.eager_tasks - b.eager_tasks,
                 error_kinds: after
@@ -388,10 +428,10 @@ fn record(
     error: Option<&str>,
     response: Option<&Bytes>,
 ) {
-    let (with_work, journal_entries, eager_tasks) = match response.and_then(|r| message(r)) {
-        Some(message) => decode(method, message),
-        None => (false, 0, 0),
-    };
+    let seen = response
+        .and_then(|r| message(r))
+        .map(|message| decode(method, message))
+        .unwrap_or_default();
     counts.with(|stats| {
         let m = stats.methods.entry(method.to_string()).or_default();
         m.calls += 1;
@@ -403,9 +443,11 @@ fn record(
         }
         m.request_bytes += request_bytes;
         m.response_bytes += response_bytes;
-        m.with_work += u64::from(with_work);
-        m.journal_entries += journal_entries;
-        m.eager_tasks += eager_tasks;
+        m.with_work += u64::from(seen.items > 0);
+        m.items += seen.items;
+        m.partial += seen.partial;
+        m.journal_entries += seen.journal_entries;
+        m.eager_tasks += seen.eager_tasks;
     });
 }
 
@@ -418,21 +460,63 @@ fn message(body: &Bytes) -> Option<&[u8]> {
     body.get(5..5 + len)
 }
 
-fn decode(method: &str, message: &[u8]) -> (bool, u64, u64) {
+/// What a response brought back.
+#[derive(Debug, Default)]
+struct Seen {
+    items: u64,
+    partial: u64,
+    journal_entries: u64,
+    eager_tasks: u64,
+}
+
+impl Seen {
+    fn activations<'a>(polls: impl IntoIterator<Item = &'a PollWorkflowExecutionResponse>) -> Self {
+        let mut seen = Seen::default();
+        for poll in polls
+            .into_iter()
+            .filter(|poll| !poll.workflow_id.is_empty())
+        {
+            seen.items += 1;
+            seen.partial += u64::from(poll.history_after_entry_id > 0);
+            seen.journal_entries += poll.journal.len() as u64;
+        }
+        seen
+    }
+
+    fn tasks<'a>(polls: impl IntoIterator<Item = &'a PollTaskExecutionResponse>) -> Self {
+        Seen {
+            items: polls
+                .into_iter()
+                .filter(|poll| !poll.task_token.is_empty())
+                .count() as u64,
+            ..Seen::default()
+        }
+    }
+}
+
+/// What the response to `method` brought back. A worker polls for one
+/// activation or task, or for several at once; both are read.
+fn decode(method: &str, message: &[u8]) -> Seen {
     match method {
-        "PollWorkflowExecution" => match PollWorkflowExecutionResponse::decode(message) {
-            Ok(poll) if !poll.workflow_id.is_empty() => (true, poll.journal.len() as u64, 0),
-            _ => (false, 0, 0),
-        },
-        "PollTaskExecution" => match PollTaskExecutionResponse::decode(message) {
-            Ok(poll) if !poll.task_token.is_empty() => (true, 0, 0),
-            _ => (false, 0, 0),
-        },
-        "CompleteWorkflowExecution" => match CompleteWorkflowExecutionResponse::decode(message) {
-            Ok(done) => (false, 0, done.eager_tasks.len() as u64),
-            _ => (false, 0, 0),
-        },
-        _ => (false, 0, 0),
+        "PollWorkflowExecution" => PollWorkflowExecutionResponse::decode(message)
+            .map(|poll| Seen::activations([&poll]))
+            .unwrap_or_default(),
+        "PollWorkflowExecutions" => PollWorkflowExecutionsResponse::decode(message)
+            .map(|polls| Seen::activations(&polls.executions))
+            .unwrap_or_default(),
+        "PollTaskExecution" => PollTaskExecutionResponse::decode(message)
+            .map(|poll| Seen::tasks([&poll]))
+            .unwrap_or_default(),
+        "PollTaskExecutions" => PollTaskExecutionsResponse::decode(message)
+            .map(|polls| Seen::tasks(&polls.tasks))
+            .unwrap_or_default(),
+        "CompleteWorkflowExecution" => CompleteWorkflowExecutionResponse::decode(message)
+            .map(|done| Seen {
+                eager_tasks: done.eager_tasks.len() as u64,
+                ..Seen::default()
+            })
+            .unwrap_or_default(),
+        _ => Seen::default(),
     }
 }
 

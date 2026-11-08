@@ -45,6 +45,9 @@ pub struct Scenario {
     /// Tasks run on a second, task-only worker, which is the one measured;
     /// the workflow worker beside it is not.
     pub split_tasks: bool,
+    /// Worker processes serving the queue, all alike. The first is the one
+    /// measured; the others' RPCs are counted apart (`peers_rpc`).
+    pub worker_processes: u32,
     pub task_concurrency: u32,
     pub deadline_secs: u64,
     /// Sustained load instead of `runs` started together: this many runs in
@@ -70,6 +73,7 @@ impl Scenario {
             events_per_run: 0,
             event_every_ms: 0,
             split_tasks: false,
+            worker_processes: 1,
             task_concurrency: 100,
             deadline_secs: 1200,
             sustain: None,
@@ -83,6 +87,11 @@ impl Scenario {
 
     fn runs(mut self, runs: u64) -> Self {
         self.runs = runs;
+        self
+    }
+
+    fn worker_processes(mut self, n: u32) -> Self {
+        self.worker_processes = n;
         self
     }
 
@@ -201,6 +210,25 @@ pub fn all() -> Vec<Scenario> {
             },
         )
         .runs(100),
+        Scenario::new(
+            "processes-1-10x100",
+            "10 runs at once, each of 100 no-op tasks in sequence, on one worker process",
+            Program::Sequence {
+                n: 100,
+                task: noop(),
+            },
+        )
+        .runs(10),
+        Scenario::new(
+            "processes-4-10x100",
+            "the same 10 runs of 100 tasks, on 4 worker processes serving the queue: how often a run's next activation reaches the process holding its journal",
+            Program::Sequence {
+                n: 100,
+                task: noop(),
+            },
+        )
+        .runs(10)
+        .worker_processes(4),
         Scenario {
             idle_secs: 10,
             split_tasks: true,
@@ -263,6 +291,10 @@ pub struct ScenarioResult {
     /// The RPCs of the unmeasured workflow worker of a split scenario.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub helper_rpc: Option<ProxyStats>,
+    /// The RPCs of the unmeasured worker processes of a scenario with more
+    /// than one, together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_rpc: Option<ProxyStats>,
     pub claimed_waiting: ClaimedWaiting,
     pub pg: PgStats,
     /// Set for a sustained-load scenario.
@@ -402,14 +434,43 @@ impl Bench {
             None
         };
 
+        // The other processes of a scenario with several, alike and
+        // unmeasured, through a proxy of their own.
+        let peers_proxy = Proxy::start(self.engine.clone(), self.upstream)
+            .await
+            .map_err(|e| format!("the proxy did not start: {e}"))?;
+        let mut peers = Vec::new();
+        for _ in 1..scenario.worker_processes {
+            peers.push(
+                Worker::spawn(WorkerSetup {
+                    server_url: peers_proxy.url(),
+                    task_queue: queue.clone(),
+                    workflows: true,
+                    tasks: true,
+                    workflow_concurrency: 100,
+                    task_concurrency: scenario.task_concurrency,
+                    workflow_pollers: 4,
+                    task_pollers: 4,
+                })
+                .await?,
+            );
+        }
+
         let helper_before = helper_proxy.stats();
+        let peers_before = peers_proxy.stats();
         let outcome = self
             .workload(scenario, &program, &queue, &proxy, &measured, result)
             .await;
         if helper.is_some() {
             result.helper_rpc = Some(helper_proxy.stats().since(&helper_before));
         }
+        if !peers.is_empty() {
+            result.peers_rpc = Some(peers_proxy.stats().since(&peers_before));
+        }
         measured.stop().await;
+        for peer in peers {
+            peer.stop().await;
+        }
         if let Some(helper) = helper {
             helper.stop().await;
         }
