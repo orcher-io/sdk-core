@@ -111,8 +111,8 @@ one engine and database for the whole run, in a fixed order.
 | `idle` | a worker with a workflow and a task type registered, nothing to do, 10 s | the cost of waiting: polls, heartbeats, CPU, heap, tokio tasks, connections |
 | `sequential-10/100/300/1000` | one run of n no-op tasks in sequence | the O(n²) journal reads: every activation reads and ships the whole journal (#36) |
 | `payload-1k/10k/100k/1m` | one run of 5 tasks in sequence, each returning a result of that size | boundary encoding and payload shipping per activation (#37) |
-| `timers` | 20 runs of 10 timers of 1 s in sequence | timer-heavy runs: activations with no task. The timers are 1 s, not shorter: before orcher-io/orcher#400 (engines up to 0.5.5), a timer shorter than the engine's delay in storing it failed the completion |
-| `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends so results stay comparable with earlier ones (sending each once also completes every run: orcher-io/orcher#376 found no stall) |
+| `timers` | 20 runs of 10 timers of 1 s in sequence | timer-heavy runs: activations with no task. The timers are 1 s, not shorter: on engines up to 0.5.5, a timer shorter than the engine's delay in storing it failed the completion |
+| `events` | 20 runs each waiting for 20 events in sequence; an event is sent to each run every 50 ms until it ends | event-heavy runs. How many events one activation picks up depends on timing, so `events_sent` is recorded; events are sent until the run ends so results stay comparable with earlier ones (sending each once also completes every run: no stall on 0.5.5 or later) |
 | `fanout-1000`, `fanout-10000` | one run issuing n no-op tasks at once and waiting for all | one run's activations as its tasks complete; eager dispatch; claims in bulk (#33) |
 | `concurrent-100x10` | 100 runs at once of 10 tasks each | many runs at once against 100 slots |
 | `processes-1-10x100`, `processes-4-10x100` | 10 runs at once of 100 tasks each, on 1 or on 4 worker processes serving the queue | how often a run's next activation reaches the process that holds its journal (#36): `partial_activation_share`, and the journal rows it saves |
@@ -190,8 +190,8 @@ channel; when the drivers have one, run the suite with it on and off.
 
 ## Not measured yet
 
-- **Engine resolution (orcher#315), eager versus polled activations
-  (orcher#310) and cache hit versus miss (#36)**: there is nothing to switch
+- **Engine resolution, eager versus polled activations
+  and cache hit versus miss (#36)**: there is nothing to switch
   until those land; the numbers above are what they should move.
 - **Per-SDK payload sweeps**: the suite drives the Rust host only. The
   Python and TypeScript bindings will cross the same host, so the same

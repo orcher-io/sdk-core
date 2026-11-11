@@ -232,7 +232,7 @@ Deterministic random: `KERNEL_V1` runs get the lineage-derived seed in `RunStart
 The measured cost (n² journal reads in the engine) does not need the SDK to keep anything alive.
 
 1. **Kernel-side resolution** (v1, #26): resolution moves into Rust once, out of three languages.
-2. **Kernel-side history cache + incremental fetch** (after orcher#307): the kernel keeps each run's resolved history; the engine routes the run's activations to that worker and sends only entries after the last one the kernel has; on a miss (restart, eviction, another worker) the engine sends full history. **This is invisible to the SDK**: it still gets the full resolution list and replays from the start. It removes the measured engine-side cost (n² rows read, data shipped, the activation size ceiling).
+2. **Kernel-side history cache + incremental fetch** (the engine sends incremental journals from 0.7.0): the kernel keeps each run's resolved history; the engine routes the run's activations to that worker and sends only entries after the last one the kernel has; on a miss (restart, eviction, another worker) the engine sends full history. **This is invisible to the SDK**: it still gets the full resolution list and replays from the start. It removes the measured engine-side cost (n² rows read, data shipped, the activation size ceiling).
 3. **SDK live instances** (later, optional, own design): keep the coroutine between activations and apply only new resolutions. It needs a resumable runtime in each SDK, which none has (§4), and defined behaviour on process loss, eviction mid-execution, cancellation and migration. Pursue only if measurements after step 2 show handler replay CPU matters; today it is mild (worker CPU 2.2 → 3.7 ms per step from 10 to 1,000 steps).
 
 Measure each step separately (#41): journal entries read per activation, resolution CPU, bytes per activation, handler replay time, cache hit rate and memory per cached run, recovery cost after worker loss. Whatever is cached, a disagreement or loss always falls back to full history: correctness never depends on a cache hit.
@@ -253,19 +253,19 @@ Resource management (#33–#35, #39–#40) lives with the kernel's governor, not
 
 ## 11. Engine wire additions
 
-Additive `orcher.v1` fields, each its own engine issue; none is needed for the first kernel step (v1 resolution works on today's full journal):
+Additive `orcher.v1` fields, each its own engine change; none is needed for the first kernel step (v1 resolution works on today's full journal):
 
-| need | for | engine issue |
+| need | for | engine |
 |---|---|---|
-| step results as real journal entries in order (stop appending synthetic `StepCompleted` after the journal) | correct ordering and time without heuristics; incremental history | orcher#307 |
-| `history_after_entry_id` on the poll, `full_history` on the response | §9.2 | orcher#307 |
-| route a run to the worker holding its history (the engine already has affinity leases internally) | cache hits | orcher#307, #292 |
-| bind the step-id scheme and history lineage at first activation; route runs only to workers supporting their scheme | §8.3 | new |
-| `max_items` on polls; batch claim | credits | orcher#308 |
-| batched heartbeat with capacity report | §10 | orcher#309 |
-| next activation in the completion response | one round trip per hot step | orcher#310 |
-| priority on starts, tasks, children, actor calls | §10 | orcher#313 |
-| a `RunActivation` payload on the poll response | engine-side resolution (§12) | orcher#315 |
+| step results as real journal entries in order (stop appending synthetic `StepCompleted` after the journal) | correct ordering and time without heuristics; incremental history | 0.6.0 |
+| `history_after_entry_id` on the poll, `full_history` on the response | §9.2 | 0.7.0 |
+| route a run to the worker holding its history (the engine already has affinity leases internally) | cache hits | 0.7.0 |
+| bind the step-id scheme and history lineage at first activation; route runs only to workers supporting their scheme | §8.3 | planned |
+| `max_items` on polls; batch claim | credits | 0.6.0 |
+| batched heartbeat with capacity report | §10 | 0.6.0 |
+| next activation in the completion response | one round trip per hot step | planned |
+| priority on starts, tasks, children, actor calls | §10 | planned |
+| a `RunActivation` payload on the poll response | engine-side resolution (§12) | planned |
 
 ## 12. Deployments
 
@@ -273,7 +273,7 @@ The same messages, different carriers:
 - **In-process (default).** Rust uses the structs. napi/pyo3 pass the encoded message as one byte buffer each way per activation (no JSON, no number arrays).
 - **Sidecar.** The kernel as a process; messages length-prefixed over a socket or stdio, for a language with no native module.
 - **WASM.** The kernel as a component taking and returning the encoded messages.
-- **Engine-side.** The engine runs the kernel's resolution and puts a `RunActivation` on the poll response, so a new language needs no Rust and serverless push fits. Possible because the protocol is serializable and never calls back. Cost is per-activation engine work: v1 keeps it possible; decide after orcher#315 measures it.
+- **Engine-side.** The engine runs the kernel's resolution and puts a `RunActivation` on the poll response, so a new language needs no Rust and serverless push fits. Possible because the protocol is serializable and never calls back. Cost is per-activation engine work: v1 keeps it possible; decide once the engine has measured it.
 
 ## 13. Conformance
 
@@ -292,7 +292,7 @@ Each step is gated on every SDK suite, the conformance tests, an end-to-end run 
 3. **Kernel resolution** (#26): the kernel builds `RunActivation` from today's full journal; SDKs opt in with protocol version 3 in `WorkerHello`. The raw-task path stays until all three SDKs have switched, then is removed in the same arc.
 4. **Kernel step identity and full command comparison** (#27), with frozen legacy schemes.
 5. **Binary boundary** (#37) as each SDK switches.
-6. **Kernel history cache + incremental fetch** (§9.2), with orcher#307.
+6. **Kernel history cache + incremental fetch** (§9.2), with the engine's incremental journals.
 7. Governor items (§10) as their engine issues land.
 8. SDK live instances (§9.3) only if measurements justify them.
 
