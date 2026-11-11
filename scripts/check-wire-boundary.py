@@ -30,7 +30,7 @@ ALLOWED = {
     # The kernel and host build and read the kernel and host protocols'
     # messages here and hand every language SDK their encoded bytes, which
     # each SDK decodes with generated code of its own. None of them is in the
-    # public API (scripts/check-public-surface.py keeps it so): #31 Phase B
+    # public API (scripts/check-public-surface.py keeps it so): #31
     # chose encoded messages over a hand-written mirror.
     "src/kernel/activation.rs": "kernel protocol messages",
     "src/kernel/completion.rs": "kernel protocol messages",
