@@ -360,6 +360,43 @@ pub struct Bench {
     pub engine: String,
     pub pg: Pg,
     pub upstream: Upstream,
+    /// The language of the workers the scenarios run on.
+    pub language: Language,
+}
+
+/// The language a measured worker is written in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    /// This checkout's host, with the workloads' code as its language
+    /// (`worker.rs`): what core itself costs.
+    #[default]
+    Rust,
+    /// The Python SDK, running the same workloads through its public API
+    /// (`bench/workers/python`): what a Python user's worker costs.
+    Python,
+    /// The TypeScript SDK, likewise (`bench/workers/typescript`).
+    Typescript,
+}
+
+impl Language {
+    /// The name `--worker` takes.
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "rust" => Some(Self::Rust),
+            "python" => Some(Self::Python),
+            "typescript" => Some(Self::Typescript),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::Typescript => "typescript",
+        }
+    }
 }
 
 impl Bench {
@@ -371,6 +408,18 @@ impl Bench {
             upstream: Some(self.upstream),
             ..Default::default()
         };
+        // A split scenario sends its tasks to a queue of their own, which a
+        // workflow written against the Python or TypeScript SDK's API cannot
+        // choose: measuring it there would measure another workload under
+        // the same name.
+        if scenario.split_tasks && self.language != Language::Rust {
+            result.error = Some(format!(
+                "not run on the {} worker: its tasks go to a queue of their own, \
+                 which the SDK's workflow API does not choose",
+                self.language.name()
+            ));
+            return result;
+        }
         if let Err(error) = self.measure(scenario, &mut result).await {
             result.error = Some(error);
         }
@@ -395,20 +444,23 @@ impl Bench {
 
         // The measured worker goes through the proxy; a split scenario's
         // workflow worker talks to the engine directly and is not measured.
-        let measured = Worker::spawn(WorkerSetup {
-            server_url: proxy.url(),
-            task_queue: if scenario.split_tasks {
-                task_queue.clone()
-            } else {
-                queue.clone()
+        let measured = Worker::spawn(
+            self.language,
+            WorkerSetup {
+                server_url: proxy.url(),
+                task_queue: if scenario.split_tasks {
+                    task_queue.clone()
+                } else {
+                    queue.clone()
+                },
+                workflows: !scenario.split_tasks,
+                tasks: true,
+                workflow_concurrency: 100,
+                task_concurrency: scenario.task_concurrency,
+                workflow_pollers: 4,
+                task_pollers: 4,
             },
-            workflows: !scenario.split_tasks,
-            tasks: true,
-            workflow_concurrency: 100,
-            task_concurrency: scenario.task_concurrency,
-            workflow_pollers: 4,
-            task_pollers: 4,
-        })
+        )
         .await?;
         // Its RPCs are counted on a proxy of its own, apart from the
         // measured worker's, to see what went wrong when a run does not end.
@@ -417,16 +469,19 @@ impl Bench {
             .map_err(|e| format!("the proxy did not start: {e}"))?;
         let helper = if scenario.split_tasks {
             Some(
-                Worker::spawn(WorkerSetup {
-                    server_url: helper_proxy.url(),
-                    task_queue: queue.clone(),
-                    workflows: true,
-                    tasks: false,
-                    workflow_concurrency: 100,
-                    task_concurrency: 1,
-                    workflow_pollers: 4,
-                    task_pollers: 1,
-                })
+                Worker::spawn(
+                    self.language,
+                    WorkerSetup {
+                        server_url: helper_proxy.url(),
+                        task_queue: queue.clone(),
+                        workflows: true,
+                        tasks: false,
+                        workflow_concurrency: 100,
+                        task_concurrency: 1,
+                        workflow_pollers: 4,
+                        task_pollers: 1,
+                    },
+                )
                 .await?,
             )
         } else {
@@ -441,16 +496,19 @@ impl Bench {
         let mut peers = Vec::new();
         for _ in 1..scenario.worker_processes {
             peers.push(
-                Worker::spawn(WorkerSetup {
-                    server_url: peers_proxy.url(),
-                    task_queue: queue.clone(),
-                    workflows: true,
-                    tasks: true,
-                    workflow_concurrency: 100,
-                    task_concurrency: scenario.task_concurrency,
-                    workflow_pollers: 4,
-                    task_pollers: 4,
-                })
+                Worker::spawn(
+                    self.language,
+                    WorkerSetup {
+                        server_url: peers_proxy.url(),
+                        task_queue: queue.clone(),
+                        workflows: true,
+                        tasks: true,
+                        workflow_concurrency: 100,
+                        task_concurrency: scenario.task_concurrency,
+                        workflow_pollers: 4,
+                        task_pollers: 4,
+                    },
+                )
                 .await?,
             );
         }
@@ -638,6 +696,14 @@ impl Bench {
             worker: cost(&before, &after, &samples),
         };
         result.claimed_waiting = waiting;
+        if self.language != Language::Rust {
+            // An SDK does not say how many activations it ran; the proxy
+            // counted every one it handed the worker. What the worker had
+            // claimed and not started is measured against its own count, so
+            // it is not known here.
+            result.busy.worker.activations = result.busy.rpc.activations_claimed();
+            result.claimed_waiting = ClaimedWaiting::default();
+        }
         result.success_rate = if result.runs_started == 0 {
             1.0
         } else {
@@ -775,11 +841,36 @@ struct WorkerIo {
 }
 
 impl Worker {
-    async fn spawn(setup: WorkerSetup) -> Result<Self, String> {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut child = tokio::process::Command::new(exe)
-            .arg("worker")
-            .arg(serde_json::to_string(&setup).map_err(|e| e.to_string())?)
+    async fn spawn(language: Language, setup: WorkerSetup) -> Result<Self, String> {
+        let setup = serde_json::to_string(&setup).map_err(|e| e.to_string())?;
+        let workers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("workers");
+        let mut command = match language {
+            Language::Rust => {
+                let mut command = tokio::process::Command::new(
+                    std::env::current_exe().map_err(|e| e.to_string())?,
+                );
+                command.arg("worker");
+                command
+            }
+            // BENCH_PYTHON and BENCH_NODE name the interpreter, which has the
+            // SDK installed (bench/README.md).
+            Language::Python => {
+                let mut command = tokio::process::Command::new(
+                    std::env::var("BENCH_PYTHON").unwrap_or_else(|_| "python3".into()),
+                );
+                command.arg(workers.join("python/worker.py"));
+                command
+            }
+            Language::Typescript => {
+                let mut command = tokio::process::Command::new(
+                    std::env::var("BENCH_NODE").unwrap_or_else(|_| "node".into()),
+                );
+                command.arg(workers.join("typescript/worker.mjs"));
+                command
+            }
+        };
+        let mut child = command
+            .arg(setup)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

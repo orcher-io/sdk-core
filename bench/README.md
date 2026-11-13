@@ -62,6 +62,39 @@ counts, so they are much steadier than timings, but an overloaded engine
 times out claims and polls, and retries change the counts; check
 `rpc_errors` and the success rate before reading a difference.
 
+## Python and TypeScript workers
+
+`--worker python` or `--worker typescript` runs the same scenarios on a worker
+written against that SDK's public API (`bench/workers/`), instead of this
+checkout's core driven directly. The workflow `bench.program` and the task
+`bench.task` do what the Rust worker's do, through `execute_task`/`executeTask`,
+`sleep`, `wait_for_event`/`waitForEvent` and the task's heartbeat, so the
+difference between the three is what each language's SDK, native module and
+runtime add on top of core.
+
+```bash
+python3 -m venv /tmp/bench-py && /tmp/bench-py/bin/pip install -r bench/workers/python/requirements.txt
+BENCH_PYTHON=/tmp/bench-py/bin/python bench/run.sh py-label --worker python
+npm ci --prefix bench/workers/typescript
+bench/run.sh ts-label --worker typescript          # BENCH_NODE names node if needed
+gh workflow run bench.yml -f label=py-label -f worker=python
+```
+
+The SDK versions are pinned (`bench/workers/python/requirements.txt`,
+`bench/workers/typescript/package-lock.json`); a run records the one it
+measured as `worker_sdk`, and the worker as `worker`.
+
+What differs from the Rust worker:
+
+- Activations are counted at the proxy: an SDK does not say how many it ran.
+  Tasks, heartbeats and ended runs are the worker's own counts.
+- The worker reports its CPU time and peak resident memory
+  (`worker_max_rss_bytes`), not allocations, its live heap or tokio tasks:
+  those metrics are left out of its results rather than shown as 0.
+- Scenarios that send their tasks to a queue of their own (`heartbeat-*`,
+  `footprint-task-worker`) are not run: neither SDK's workflow API chooses a
+  task's queue.
+
 ## How it measures
 
 ```

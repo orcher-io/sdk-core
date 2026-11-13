@@ -29,7 +29,8 @@ static ALLOCATOR: stats::Counting = stats::Counting;
 
 const USAGE: &str = "usage:
   orcher-bench suite --engine HOST:PORT --pg URL --label NAME --out DIR
-                     [--only a,b] [--upstream mirror|shared] [--meta key=value]...
+                     [--only a,b] [--upstream mirror|shared] [--worker rust|python|typescript]
+                     [--meta key=value]...
   orcher-bench compare A.json B.json
   orcher-bench gate GATE.json RUN.json
       judge RUN against the baseline in GATE; exits 1 on a regression
@@ -86,6 +87,7 @@ struct SuiteArgs {
     out: PathBuf,
     only: Option<Vec<String>>,
     upstream: proxy::Upstream,
+    language: scenarios::Language,
     meta: BTreeMap<String, String>,
 }
 
@@ -96,6 +98,7 @@ fn parse_suite(args: &[String]) -> Result<SuiteArgs, String> {
     let mut out = None;
     let mut only = None;
     let mut upstream = proxy::Upstream::Mirror;
+    let mut language = scenarios::Language::Rust;
     let mut meta = BTreeMap::new();
     let mut args = args.iter();
     while let Some(flag) = args.next() {
@@ -125,6 +128,11 @@ fn parse_suite(args: &[String]) -> Result<SuiteArgs, String> {
                     other => return Err(format!("unknown upstream {other}: mirror or shared")),
                 }
             }
+            "--worker" => {
+                let name = value()?;
+                language = scenarios::Language::named(&name)
+                    .ok_or_else(|| format!("unknown worker {name}: rust, python or typescript"))?;
+            }
             "--meta" => {
                 let pair = value()?;
                 let (key, value) = pair
@@ -142,6 +150,7 @@ fn parse_suite(args: &[String]) -> Result<SuiteArgs, String> {
         out: out.ok_or("--out is required")?,
         only,
         upstream,
+        language,
         meta,
     })
 }
@@ -166,6 +175,7 @@ async fn suite(args: &[String]) -> Result<(), String> {
         engine: args.engine.clone(),
         pg: pg::Pg::connect(&args.pg).await?,
         upstream: args.upstream,
+        language: args.language,
     };
     let mut results = report::Results {
         label: args.label.clone(),
@@ -176,6 +186,9 @@ async fn suite(args: &[String]) -> Result<(), String> {
         "upstream".into(),
         format!("{:?}", args.upstream).to_lowercase(),
     );
+    results
+        .meta
+        .insert("worker".into(), args.language.name().to_string());
     results
         .meta
         .insert("os".into(), std::env::consts::OS.to_string());

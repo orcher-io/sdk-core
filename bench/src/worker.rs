@@ -35,8 +35,10 @@ pub struct WorkerSetup {
     pub task_pollers: usize,
 }
 
-/// What the worker has done, and what it has cost so far.
+/// What the worker has done, and what it has cost so far. A worker in
+/// another language leaves out what it cannot count, which reads as 0.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Snapshot {
     pub process: ProcessStats,
     /// Activations the language pulled.

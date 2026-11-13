@@ -23,6 +23,11 @@ on:
         description: "Comma-separated scenarios (orcher-bench list); empty runs them all"
         default: ""
         type: string
+      worker:
+        description: "The measured worker: this checkout's core, or the Python or TypeScript SDK (bench/workers)"
+        default: rust
+        type: choice
+        options: [rust, python, typescript]
       upstream:
         description: "How the proxy connects to the engine (#38)"
         default: mirror
@@ -45,15 +50,33 @@ jobs:
       ENGINE_VERSION: ${{ inputs.engine_version }}
       ONLY: ${{ inputs.only }}
       UPSTREAM: ${{ inputs.upstream }}
+      WORKER: ${{ inputs.worker }}
       RUST_LOG: ${{ inputs.rust_log }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        if: inputs.worker == 'python'
+        with:
+          python-version: "3.12"
+      - name: Install the Python SDK the bench measures
+        if: inputs.worker == 'python'
+        run: |
+          python -m venv "$RUNNER_TEMP/bench-py"
+          "$RUNNER_TEMP/bench-py/bin/pip" install -q -r bench/workers/python/requirements.txt
+          echo "BENCH_PYTHON=$RUNNER_TEMP/bench-py/bin/python" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        if: inputs.worker == 'typescript'
+        with:
+          node-version: "22"
+      - name: Install the TypeScript SDK the bench measures
+        if: inputs.worker == 'typescript'
+        run: npm ci --prefix bench/workers/typescript
       - name: Run the suite
         run: |
           [ -n "$RUST_LOG" ] || unset RUST_LOG
-          args=(--engine-version "$ENGINE_VERSION" --upstream "$UPSTREAM")
+          args=(--engine-version "$ENGINE_VERSION" --upstream "$UPSTREAM" --worker "$WORKER")
           [ -z "$ONLY" ] || args+=(--only "$ONLY")
           bench/run.sh "$LABEL" "${args[@]}" 2>&1 | tee "bench/results/$LABEL.run.log"
       - uses: actions/upload-artifact@v4
