@@ -1,0 +1,144 @@
+{
+  "about": "The regression gate (bench/README.md, \"Regression gate\"). The nightly Bench gate workflow runs these scenarios against this engine version and judges each metric against its baseline. Remake the baseline with orcher-bench gate-baseline from at least three runs on the hosted runner; never edit the numbers by hand.",
+  "engine_version": "0.7.0",
+  "scenarios": [
+    "sequential-100",
+    "processes-4-10x100",
+    "concurrent-100x10"
+  ],
+  "metrics": {
+    "activation_bytes": "higher",
+    "journal_entries_per_activation": "higher",
+    "journal_rows_per_activation": "higher",
+    "partial_activation_share": "lower",
+    "pg_blocks_per_activation": "higher",
+    "rpc_per_activation": "higher"
+  },
+  "measured": {
+    "runs": [
+      "gate-base-1 (sdk-core 185431ecf4912f2f29d807ff249f5744c309e9a3)",
+      "gate-base-2 (sdk-core 185431ecf4912f2f29d807ff249f5744c309e9a3)",
+      "gate-base-3 (sdk-core 185431ecf4912f2f29d807ff249f5744c309e9a3)",
+      "gate-base-4 (sdk-core 185431ecf4912f2f29d807ff249f5744c309e9a3)",
+      "gate-base-5 (sdk-core 185431ecf4912f2f29d807ff249f5744c309e9a3)"
+    ],
+    "date": "2026-11-13T21:05:13Z",
+    "machine": "4 CPUs, 16759439360 bytes of memory for Docker, linux"
+  },
+  "baseline": {
+    "concurrent-100x10": {
+      "activation_bytes": {
+        "median": 520.0618181818181,
+        "min": 519.8390909090909,
+        "max": 520.2218181818182,
+        "tolerance": 0.02
+      },
+      "journal_entries_per_activation": {
+        "median": 2.8181818181818183,
+        "min": 2.8181818181818183,
+        "max": 2.8181818181818183,
+        "tolerance": 0.02
+      },
+      "journal_rows_per_activation": {
+        "median": 3.727272727272727,
+        "min": 3.727272727272727,
+        "max": 3.727272727272727,
+        "tolerance": 0.02
+      },
+      "partial_activation_share": {
+        "median": 0.9090909090909091,
+        "min": 0.9090909090909091,
+        "max": 0.9090909090909091,
+        "tolerance": 0.02
+      },
+      "pg_blocks_per_activation": {
+        "median": 766.1672727272727,
+        "min": 763.6627272727272,
+        "max": 783.1254545454545,
+        "tolerance": 0.06640135550746114
+      },
+      "rpc_per_activation": {
+        "median": 2.1636363636363636,
+        "min": 2.1554545454545453,
+        "max": 2.18,
+        "tolerance": 0.022689075630252402
+      }
+    },
+    "processes-4-10x100": {
+      "activation_bytes": {
+        "median": 538.0138613861386,
+        "min": 536.7683168316831,
+        "max": 594.3069306930693,
+        "tolerance": 0.31389378609259555
+      },
+      "journal_entries_per_activation": {
+        "median": 2.981188118811881,
+        "min": 2.981188118811881,
+        "max": 4.212871287128713,
+        "tolerance": 1.239455330454998
+      },
+      "journal_rows_per_activation": {
+        "median": 3.9712871287128713,
+        "min": 3.9712871287128713,
+        "max": 5.202970297029703,
+        "tolerance": 0.9304412864622287
+      },
+      "partial_activation_share": {
+        "median": 0.9891089108910891,
+        "min": 0.9752475247524752,
+        "max": 0.9891089108910891,
+        "tolerance": 0.04204204204204208
+      },
+      "pg_blocks_per_activation": {
+        "median": 1010.6861386138614,
+        "min": 980.810891089109,
+        "max": 1089.449504950495,
+        "tolerance": 0.23379176777270227
+      },
+      "rpc_per_activation": {
+        "median": 3.8158415841584157,
+        "min": 3.779207920792079,
+        "max": 3.868316831683168,
+        "tolerance": 0.041255838090295836
+      }
+    },
+    "sequential-100": {
+      "activation_bytes": {
+        "median": 534.6435643564356,
+        "min": 533.7425742574258,
+        "max": 534.8613861386139,
+        "tolerance": 0.02
+      },
+      "journal_entries_per_activation": {
+        "median": 2.98019801980198,
+        "min": 2.98019801980198,
+        "max": 2.98019801980198,
+        "tolerance": 0.02
+      },
+      "journal_rows_per_activation": {
+        "median": 3.9702970297029703,
+        "min": 3.9702970297029703,
+        "max": 3.9702970297029703,
+        "tolerance": 0.02
+      },
+      "partial_activation_share": {
+        "median": 0.9900990099009901,
+        "min": 0.9900990099009901,
+        "max": 0.9900990099009901,
+        "tolerance": 0.02
+      },
+      "pg_blocks_per_activation": {
+        "median": 614.049504950495,
+        "min": 607.2970297029703,
+        "max": 635.1584158415842,
+        "tolerance": 0.10312968606394851
+      },
+      "rpc_per_activation": {
+        "median": 3.98019801980198,
+        "min": 3.98019801980198,
+        "max": 3.99009900990099,
+        "tolerance": 0.02
+      }
+    }
+  }
+}

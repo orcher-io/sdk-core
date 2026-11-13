@@ -58,9 +58,11 @@ pub fn derive(result: &ScenarioResult) -> BTreeMap<String, f64> {
     d.insert("activations".into(), activations as f64);
     d.insert("tasks".into(), tasks as f64);
     d.insert("rpc_calls".into(), rpc.total_calls() as f64);
+    // Of every worker process: one process's share of a scenario's
+    // activations varies from run to run, and its empty polls with it.
     d.insert(
         "rpc_per_activation".into(),
-        ratio(rpc.total_calls(), activations),
+        ratio(rpc.total_calls() + peers.total_calls(), all_activations),
     );
     d.insert("rpc_per_task".into(), ratio(rpc.total_calls(), tasks));
     d.insert(

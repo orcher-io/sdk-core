@@ -12,6 +12,7 @@
 //! orcher-bench worker SETUP_JSON        (run by the suite itself)
 //! ```
 
+mod gate;
 mod pg;
 mod program;
 mod proxy;
@@ -30,6 +31,10 @@ const USAGE: &str = "usage:
   orcher-bench suite --engine HOST:PORT --pg URL --label NAME --out DIR
                      [--only a,b] [--upstream mirror|shared] [--meta key=value]...
   orcher-bench compare A.json B.json
+  orcher-bench gate GATE.json RUN.json
+      judge RUN against the baseline in GATE; exits 1 on a regression
+  orcher-bench gate-baseline GATE.json RUN.json...
+      remake GATE's baseline from three or more runs
   orcher-bench list";
 
 fn main() {
@@ -53,6 +58,8 @@ fn main() {
         },
         Some("suite") => runtime.block_on(suite(&args[1..])),
         Some("compare") => compare(&args[1..]),
+        Some("gate") => gate(&args[1..]),
+        Some("gate-baseline") => gate_baseline(&args[1..]),
         Some("list") => {
             for scenario in scenarios::all() {
                 println!("{:<24} {}", scenario.name, scenario.about);
@@ -208,6 +215,45 @@ async fn suite(args: &[String]) -> Result<(), String> {
         "orcher-bench: wrote {} and {}",
         json_path.display(),
         md_path.display()
+    );
+    Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Judges one run against the gate; a regression is an error, so the
+/// process exits 1.
+fn gate(args: &[String]) -> Result<(), String> {
+    let [gate, run] = args else {
+        return Err(USAGE.to_string());
+    };
+    let verdict = gate::judge(&read_json(gate)?, &read_json(run)?)?;
+    print!("{}", verdict.report);
+    match verdict.regressions {
+        0 => Ok(()),
+        n => Err(format!("{n} regression(s) against the baseline")),
+    }
+}
+
+/// Rewrites the gate's baseline from the runs given.
+fn gate_baseline(args: &[String]) -> Result<(), String> {
+    let [gate_path, runs @ ..] = args else {
+        return Err(USAGE.to_string());
+    };
+    let template: gate::Gate = read_json(gate_path)?;
+    let runs = runs
+        .iter()
+        .map(|path| Ok((path.clone(), read_json::<report::Results>(path)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    let gate = gate::baseline(&template, &runs)?;
+    let text = serde_json::to_string_pretty(&gate).map_err(|e| e.to_string())?;
+    std::fs::write(gate_path, text + "\n").map_err(|e| format!("{gate_path}: {e}"))?;
+    eprintln!(
+        "orcher-bench: wrote the baseline of {} runs to {gate_path}",
+        runs.len()
     );
     Ok(())
 }

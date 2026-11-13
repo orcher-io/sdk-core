@@ -136,7 +136,7 @@ Postgres numbers, the top statements, the phase's worker cost).
 |---|---|
 | `success_rate` | runs completed / runs started. Never read a number without it. |
 | `activations`, `tasks` | workflow activations and tasks the worker's language ran |
-| `rpc_calls`, `rpc_per_activation`, `rpc_per_task` | RPCs the worker made, in all and per unit of work |
+| `rpc_calls`, `rpc_per_activation`, `rpc_per_task` | RPCs the worker made, in all and per unit of work; `rpc_per_activation` counts every worker process's RPCs and activations |
 | `rpc_errors` | RPCs that ended with a non-OK status (engine timeouts under load show here) |
 | `empty_polls` | polls that came back with no work |
 | `worker_connections` | the most connections the worker had open to the engine (#38) |
@@ -155,6 +155,40 @@ Postgres numbers, the top statements, the phase's worker cost).
 | `heartbeat_rpcs`, `heartbeat_rpcs_per_s` | `RecordTaskHeartbeat` calls, in all and per second (#35) |
 | `task_updates_per_heartbeat` | `update task_executions` statements per heartbeat RPC: the Postgres writes heartbeats cost (#35) |
 | `idle_rpc_per_s`, `idle_cpu_us_per_s`, `idle_heap_bytes`, `idle_tokio_tasks` | the idle phase of `idle` and `footprint-task-worker` |
+
+## Regression gate
+
+`bench/gate.json` names a few scenarios, an engine version and the counts to
+watch: journal rows, journal entries, bytes, RPCs and Postgres blocks per
+activation, and the share of activations that reached the worker holding the
+run's journal. The `Bench gate` workflow (`.github/workflows/bench-gate.yml`)
+runs those scenarios every night, and on demand, and fails when a count is
+worse than the baseline by more than its tolerance:
+
+```bash
+gh workflow run bench-gate.yml --ref my-branch     # before merging a change
+cargo run --release -p orcher-bench -- gate bench/gate.json bench/results/LABEL.json
+```
+
+Only counts are judged. Times and worker CPU move with the machine's load by
+more than most changes move them, so they would fail the gate at random.
+
+The baseline is the median of at least three runs on the hosted runner, and
+each metric's tolerance is three times how far those runs spread from it, at
+least 2%. Both are written by the bench, never by hand:
+
+```bash
+for n in 1 2 3 4 5; do
+  gh workflow run bench.yml -f label=gate-base-$n -f engine_version=VERSION \
+    -f only=$(jq -r '.scenarios | join(",")' bench/gate.json)
+done
+# download the five results, then
+cargo run --release -p orcher-bench -- gate-baseline bench/gate.json gate-base-*.json
+```
+
+Make a new baseline when a change makes a count better on purpose (the gate
+says so when one is better than its spread), and when moving `engine_version`
+to a newer engine: a run against another engine is not judged at all.
 
 ## What each lever should move
 
