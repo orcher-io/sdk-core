@@ -136,7 +136,7 @@ Postgres numbers, the top statements, the phase's worker cost).
 |---|---|
 | `success_rate` | runs completed / runs started. Never read a number without it. |
 | `activations`, `tasks` | workflow activations and tasks the worker's language ran |
-| `rpc_calls`, `rpc_per_activation`, `rpc_per_task` | RPCs the worker made, in all and per unit of work |
+| `rpc_calls`, `rpc_per_activation`, `rpc_per_task` | RPCs the worker made, in all and per unit of work; `rpc_per_activation` counts every worker process's RPCs and activations |
 | `rpc_errors` | RPCs that ended with a non-OK status (engine timeouts under load show here) |
 | `empty_polls` | polls that came back with no work |
 | `worker_connections` | the most connections the worker had open to the engine (#38) |

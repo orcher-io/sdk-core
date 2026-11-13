@@ -1,0 +1,47 @@
+name: Bench gate
+
+# The regression gate (bench/README.md, "Regression gate"): a few scenarios of
+# the benchmark suite, every night and on demand, judged against the baseline
+# in bench/gate.json. It fails when journal rows, Postgres blocks, RPCs or
+# bytes per activation grow beyond what the baseline runs differed by, so a
+# change that brings back a cost the suite measured away is caught the night
+# it lands rather than when someone next runs the suite.
+#
+# Run it on a branch before merging with
+#   gh workflow run bench-gate.yml --ref my-branch
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the gate's scenarios
+        run: |
+          engine=$(jq -r .engine_version bench/gate.json)
+          only=$(jq -r '.scenarios | join(",")' bench/gate.json)
+          bench/run.sh gate --engine-version "$engine" --only "$only" 2>&1 | tee bench/results/gate.run.log
+      - name: Judge them against the baseline
+        run: |
+          cargo run --quiet --release -p orcher-bench -- gate bench/gate.json bench/results/gate.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-gate
+          path: bench/results/gate*
+          if-no-files-found: warn

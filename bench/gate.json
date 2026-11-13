@@ -1,0 +1,15 @@
+{
+  "about": "The regression gate (bench/README.md, \"Regression gate\"). The nightly Bench gate workflow runs these scenarios against this engine version and judges each metric against its baseline. Remake the baseline with orcher-bench gate-baseline from at least three runs on the hosted runner; never edit the numbers by hand.",
+  "engine_version": "0.7.0",
+  "scenarios": ["sequential-100", "processes-4-10x100", "concurrent-100x10"],
+  "metrics": {
+    "journal_rows_per_activation": "higher",
+    "journal_entries_per_activation": "higher",
+    "activation_bytes": "higher",
+    "rpc_per_activation": "higher",
+    "pg_blocks_per_activation": "higher",
+    "partial_activation_share": "lower"
+  },
+  "measured": { "runs": [], "date": "", "machine": "" },
+  "baseline": {}
+}
