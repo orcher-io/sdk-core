@@ -77,6 +77,11 @@ impl RunBinding {
 pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
     let mut resolutions: Vec<(Option<Timestamp>, i64, Resolution)> = Vec::new();
     let mut started_at = None;
+    // The run already observed every outcome up to the journal entry its
+    // last applied activation read to, which the engine reports; 0, an
+    // engine that reports none or a run's first activation, marks nothing.
+    let observed_through = task.previous_started_event_id;
+    let observed = |entry_id: i64| observed_through > 0 && entry_id <= observed_through;
 
     for entry in &task.journal {
         let Some((step_id, what)) = resolution_for(entry) else {
@@ -91,9 +96,7 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
             Resolution {
                 step_id,
                 at: entry.timestamp,
-                // Whether this activation repeats an outcome the run already
-                // saw is not known from a full history; diagnostic only.
-                replaying: false,
+                replaying: observed(entry.entry_id),
                 what: Some(what),
                 ..Default::default()
             },
@@ -115,7 +118,8 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
     let started = Resolution {
         step_id: String::new(),
         at: started_at,
-        replaying: false,
+        // Any applied activation before this one began with the start.
+        replaying: observed_through > 0,
         what: Some(resolution::What::Started(RunStarted {
             input: vec![json_payload(
                 serde_json::to_vec(&task.input).unwrap_or_else(|_| b"null".to_vec()),
@@ -156,6 +160,8 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
             .chain(task.updates.iter().map(|update| Resolution {
                 step_id: String::new(),
                 at: None,
+                // Never observed: the engine journals an update only once
+                // the worker has answered it.
                 replaying: false,
                 what: Some(resolution::What::Update(UpdateArrived {
                     update_id: update.update_id.clone(),
@@ -847,5 +853,69 @@ mod tests {
         );
         assert_eq!(update.args[0].data, br#"["new name"]"#);
         assert!(last.at.is_none() && !last.replaying);
+    }
+    /// The outcomes at or before the entry the last applied activation read
+    /// to are marked replaying, by journal position, whatever their place in
+    /// the order the run observes them; pending updates never are.
+    #[test]
+    fn outcomes_the_run_observed_before_are_replaying() {
+        let step = |id: i64, ms: i64, name: &str| {
+            entry(
+                id,
+                ms,
+                EntryType::StepCompleted,
+                Attributes::StepCompleted(StepCompletedEventAttributes {
+                    step_name: name.into(),
+                    result: b"null".to_vec(),
+                    execution_attempt: 1,
+                    ..Default::default()
+                }),
+            )
+        };
+        let journal = vec![
+            started(1_000),
+            step(2, 2_000, "a_0"),
+            step(3, 3_000, "b_0"),
+            // Recorded before b_0, appended after it, and after the last
+            // applied activation read to entry 3.
+            step(4, 2_500, "c_0"),
+        ];
+        let mut task = task(journal);
+        task.previous_started_event_id = 3;
+        task.updates = vec![orcher_proto::orcher::v1::UpdateRequest {
+            update_id: "u1".into(),
+            update_type: "rename".into(),
+            ..Default::default()
+        }];
+        let activation = resolve(&task, "default");
+        let marks: Vec<(String, bool)> = activation
+            .resolutions
+            .iter()
+            .map(|r| {
+                let name = match r.what.as_ref().unwrap() {
+                    resolution::What::Started(_) => "started".to_string(),
+                    resolution::What::Update(_) => "update".to_string(),
+                    _ => r.step_id.clone(),
+                };
+                (name, r.replaying)
+            })
+            .collect();
+        let expected = [
+            ("started", true),
+            ("a_0", true),
+            ("c_0", false),
+            ("b_0", true),
+            ("update", false),
+        ];
+        assert_eq!(
+            marks,
+            expected.map(|(name, replaying)| (name.to_string(), replaying))
+        );
+
+        // An engine that reports no position, or a run's first activation:
+        // nothing is marked.
+        task.previous_started_event_id = 0;
+        let activation = resolve(&task, "default");
+        assert!(activation.resolutions.iter().all(|r| !r.replaying));
     }
 }
