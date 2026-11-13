@@ -120,7 +120,18 @@ pub fn baseline(template: &Gate, runs: &[(String, Results)]) -> Result<Gate, Str
     let first = &runs[0].1;
     Ok(Gate {
         measured: Measured {
-            runs: runs.iter().map(|(path, _)| path.clone()).collect(),
+            runs: runs
+                .iter()
+                .map(|(_, run)| {
+                    format!(
+                        "{} (sdk-core {})",
+                        run.label,
+                        run.meta
+                            .get("sdk_core_revision")
+                            .map_or("?", String::as_str)
+                    )
+                })
+                .collect(),
             date: first.meta.get("date").cloned().unwrap_or_default(),
             machine: format!(
                 "{} CPUs, {} bytes of memory for Docker, {}",
