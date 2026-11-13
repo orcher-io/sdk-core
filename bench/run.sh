@@ -19,6 +19,10 @@
 # BENCH_ENGINE_ENV adds engine settings, as space-separated NAME=VALUE pairs,
 # to measure one, e.g. "ORCHER_JOURNAL_HOLDER_HOLD_MS=0"; they are recorded in
 # the results as engine_env.
+# --worker python|typescript measures the Python or TypeScript SDK running the
+# same workloads, instead of this checkout's core (bench/workers/); BENCH_PYTHON
+# and BENCH_NODE name the interpreter, which must have the SDK installed, and
+# the SDK's version is recorded as worker_sdk.
 #
 # Needs docker, curl and cargo. See bench/README.md.
 
@@ -43,6 +47,7 @@ case "$LABEL" in -*) usage ;; esac
 
 ENGINE_VERSION=latest
 ENGINE_IMAGE=
+WORKER=rust
 SUITE_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,6 +55,7 @@ while [ $# -gt 0 ]; do
     --engine-image) ENGINE_IMAGE=$2; shift 2 ;;
     --only) SUITE_ARGS+=(--only "$2"); shift 2 ;;
     --upstream) SUITE_ARGS+=(--upstream "$2"); shift 2 ;;
+    --worker) WORKER=$2; SUITE_ARGS+=(--worker "$2"); shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
@@ -153,6 +159,16 @@ if [ -n "$(git -C "$ROOT" status --porcelain -- src host bench/src Cargo.toml)" 
   CORE_REVISION="$CORE_REVISION+changes"
 fi
 
+# The SDK a language worker runs, as installed for its interpreter.
+case "$WORKER" in
+  rust) WORKER_SDK="sdk-core (this checkout)" ;;
+  python)
+    WORKER_SDK="orcher-sdk $("${BENCH_PYTHON:-python3}" -c 'import importlib.metadata as m; print(m.version("orcher-sdk"))')" ;;
+  typescript)
+    WORKER_SDK="@orcher/sdk $(cd "$(dirname "$0")/workers/typescript" && "${BENCH_NODE:-node}" -p 'require("@orcher/sdk/package.json").version')" ;;
+  *) echo "bench: --worker is rust, python or typescript, not $WORKER" >&2; exit 2 ;;
+esac
+
 echo "bench: building the worker"
 cargo build --release --manifest-path "$ROOT/Cargo.toml" -p orcher-bench
 TARGET_DIR=$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --format-version 1 --no-deps |
@@ -170,6 +186,7 @@ echo "bench: engine $ENGINE_RELEASE ($ENGINE_REVISION), sdk-core $CORE_REVISION"
   --meta "engine_release=$ENGINE_RELEASE" \
   --meta "engine_revision=$ENGINE_REVISION" \
   --meta "sdk_core_revision=$CORE_REVISION" \
+  --meta "worker_sdk=$WORKER_SDK" \
   --meta "postgres_image=$PG_IMAGE" \
   --meta "docker_cpus=$(docker info --format '{{.NCPU}}')" \
   --meta "docker_memory_bytes=$(docker info --format '{{.MemTotal}}')" \

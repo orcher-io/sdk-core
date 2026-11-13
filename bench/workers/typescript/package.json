@@ -1,0 +1,9 @@
+{
+  "name": "orcher-bench-typescript-worker",
+  "private": true,
+  "description": "The bench's workloads on the TypeScript SDK (bench/README.md).",
+  "type": "module",
+  "dependencies": {
+    "@orcher/sdk": "0.5.19"
+  }
+}

@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::report::Results;
 
+fn rust() -> String {
+    "rust".to_string()
+}
+
 /// A threshold is this many times the spread the baseline runs showed...
 const SPREAD_FACTOR: f64 = 3.0;
 /// ...and never tighter than this, as a fraction of the baseline, so a
@@ -40,6 +44,9 @@ pub struct Gate {
     /// The engine image the baseline was measured against. A run against
     /// another one is judged against nothing: bump this with a new baseline.
     pub engine_version: String,
+    /// The worker the baseline ran on (`--worker`); rust when unset.
+    #[serde(default = "rust")]
+    pub worker: String,
     /// The scenarios the gate runs.
     pub scenarios: Vec<String>,
     /// The metrics it judges, by name, with the direction that is worse.
@@ -163,6 +170,13 @@ pub fn judge(gate: &Gate, run: &Results) -> Result<Verdict, String> {
             "the run was against {engine}, the baseline against engine {}: \
              compare like with like, or make a new baseline",
             gate.engine_version
+        ));
+    }
+    let worker = run.meta.get("worker").map_or("rust", String::as_str);
+    if worker != gate.worker {
+        return Err(format!(
+            "the run was on the {worker} worker, the baseline on the {} one",
+            gate.worker
         ));
     }
     unreliable(run, &gate.scenarios)?;
@@ -300,6 +314,7 @@ mod tests {
         Gate {
             about: String::new(),
             engine_version: "0.7.0".into(),
+            worker: rust(),
             scenarios: vec!["s".into()],
             metrics: [
                 ("journal_rows_per_activation".to_string(), Worse::Higher),

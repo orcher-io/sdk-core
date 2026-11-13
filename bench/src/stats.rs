@@ -62,6 +62,7 @@ fn allocated(size: usize) {
 
 /// A point-in-time reading of a process's resource use.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProcessStats {
     /// Allocations made since the process started.
     pub allocations: u64,

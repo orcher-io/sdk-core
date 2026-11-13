@@ -116,27 +116,33 @@ pub fn derive(result: &ScenarioResult) -> BTreeMap<String, f64> {
         "worker_cpu_us_per_activation".into(),
         ratio(worker.cpu_us, activations),
     );
-    d.insert(
-        "worker_allocs_per_activation".into(),
-        ratio(worker.allocations, activations),
-    );
-    d.insert(
-        "worker_alloc_bytes_per_activation".into(),
-        ratio(worker.allocated_bytes, activations),
-    );
     d.insert("worker_cpu_us_per_task".into(), ratio(worker.cpu_us, tasks));
-    d.insert(
-        "worker_allocs_per_task".into(),
-        ratio(worker.allocations, tasks),
-    );
-    d.insert(
-        "worker_peak_heap_bytes".into(),
-        worker.peak_live_heap_bytes as f64,
-    );
-    d.insert(
-        "worker_peak_tokio_tasks".into(),
-        worker.peak_tokio_alive_tasks as f64,
-    );
+    // Allocations, the live heap and tokio tasks are counted by the Rust
+    // worker alone; a worker in another language reports none, and a 0
+    // would read as a measurement.
+    if worker.allocations > 0 {
+        d.insert(
+            "worker_allocs_per_activation".into(),
+            ratio(worker.allocations, activations),
+        );
+        d.insert(
+            "worker_alloc_bytes_per_activation".into(),
+            ratio(worker.allocated_bytes, activations),
+        );
+        d.insert(
+            "worker_allocs_per_task".into(),
+            ratio(worker.allocations, tasks),
+        );
+        d.insert(
+            "worker_peak_heap_bytes".into(),
+            worker.peak_live_heap_bytes as f64,
+        );
+        d.insert(
+            "worker_peak_tokio_tasks".into(),
+            worker.peak_tokio_alive_tasks as f64,
+        );
+    }
+    d.insert("worker_max_rss_bytes".into(), worker.max_rss_bytes as f64);
     d.insert(
         "claimed_waiting_peak_tasks".into(),
         result.claimed_waiting.peak_tasks as f64,
