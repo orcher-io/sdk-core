@@ -68,7 +68,9 @@ async def bench_task(
 
 def _task_options(spec: dict[str, Any]) -> dict[str, Any]:
     timeout_ms = spec.get("heartbeat_timeout_ms") or 0
-    return {"heartbeat_timeout": timedelta(milliseconds=timeout_ms)} if timeout_ms else {}
+    return (
+        {"heartbeat_timeout": timedelta(milliseconds=timeout_ms)} if timeout_ms else {}
+    )
 
 
 @workflow(name=WORKFLOW_TYPE)
@@ -86,7 +88,10 @@ async def bench_program(
             await ctx.execute_task(bench_task, **_task_options(spec), **spec)
     elif shape == "fan_out":
         await asyncio.gather(
-            *(ctx.execute_task(bench_task, **_task_options(spec), **spec) for _ in range(n))
+            *(
+                ctx.execute_task(bench_task, **_task_options(spec), **spec)
+                for _ in range(n)
+            )
         )
     elif shape == "timers":
         for _ in range(n):
