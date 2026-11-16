@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.23.1](https://github.com/orcher-io/sdk-core/compare/v0.23.0...v0.23.1) (2026-11-13)
+
+
+### Features
+
+* **bench:** a nightly regression gate on per-activation counts ([#170](https://github.com/orcher-io/sdk-core/issues/170)) ([57c305a](https://github.com/orcher-io/sdk-core/commit/57c305a3e2a4ef25249362a05d2f0b5dbf65d54d))
+* **bench:** measure the Python and TypeScript SDKs' workers ([#171](https://github.com/orcher-io/sdk-core/issues/171)) ([2be2d77](https://github.com/orcher-io/sdk-core/commit/2be2d77301701baafc380fdfae4fa59bd600e697))
+* **bench:** pass engine settings to measure one ([#166](https://github.com/orcher-io/sdk-core/issues/166)) ([af23bf3](https://github.com/orcher-io/sdk-core/commit/af23bf3f95ce4ffe71bcd04600c4dedbfe5017fe))
+* mark the outcomes a run observed before as replaying ([#169](https://github.com/orcher-io/sdk-core/issues/169)) ([eaae88e](https://github.com/orcher-io/sdk-core/commit/eaae88e3fb71433f938291b199dc8b118b7e0c61))
+* **verify:** compare vectors across payload encodings ([#160](https://github.com/orcher-io/sdk-core/issues/160)) ([4f87ee8](https://github.com/orcher-io/sdk-core/commit/4f87ee8a09310c578e11165500184bb7029a39eb))
+
+
+### Bug Fixes
+
+* a call carries one argument value ([#161](https://github.com/orcher-io/sdk-core/issues/161)) ([13599e1](https://github.com/orcher-io/sdk-core/commit/13599e19c9b37a00a898d1107cfeaec765bc9dbc))
+* **bench:** read batch polls, and measure runs across worker processes ([#164](https://github.com/orcher-io/sdk-core/issues/164)) ([cebc6ce](https://github.com/orcher-io/sdk-core/commit/cebc6ce11d74f848c569d7c8a5475d6a77ca3b02))
+* enforce elapsed bounds for event scenarios ([#158](https://github.com/orcher-io/sdk-core/issues/158)) ([c64e019](https://github.com/orcher-io/sdk-core/commit/c64e0199b2f8c5f1acd3ffc76c1af43b2cfc334e))
+
+
+### Changes
+
+* **verify:** send an actor operation's input as it is ([#163](https://github.com/orcher-io/sdk-core/issues/163)) ([bf217f7](https://github.com/orcher-io/sdk-core/commit/bf217f78563ae38fd04898caf49f4062294f701d))
+
+
+### Documentation
+
+* cite engine releases, not engine issue numbers ([#167](https://github.com/orcher-io/sdk-core/issues/167)) ([4111ec5](https://github.com/orcher-io/sdk-core/commit/4111ec5abec25c983d84fc4bcdefe243836608ab))
+* the banner follows the GitHub theme, not the computer's ([#165](https://github.com/orcher-io/sdk-core/issues/165)) ([63c2da6](https://github.com/orcher-io/sdk-core/commit/63c2da6dbbdfc7544ee469537762941358c82b45))
+
 ## [0.23.0](https://github.com/orcher-io/sdk-core/compare/v0.22.2...v0.23.0) (2026-11-01)
 
 
