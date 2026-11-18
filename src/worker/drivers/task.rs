@@ -893,7 +893,8 @@ impl TaskDriver {
         let token = task.task_token.clone();
         let ids = TaskIds {
             task_id: task.task_id.clone(),
-            workflow_id: task.execution.workflow_id.clone(),
+            // For log lines: the id the run's users know it by.
+            workflow_id: task.client_workflow_id.clone(),
         };
         tracing::debug!(
             task_id = %ids.task_id,
@@ -933,7 +934,7 @@ impl TaskDriver {
         while let Ok(task) = self.task_receiver.try_recv() {
             tracing::error!(
                 task_id = %task.task_id,
-                workflow_id = %task.execution.workflow_id,
+                workflow_id = %task.client_workflow_id,
                 "Task received but never handed over; it waits out its start-to-close timeout"
             );
             drop(self.credits.give_back(&task.task_token));

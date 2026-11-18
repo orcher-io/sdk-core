@@ -203,8 +203,16 @@ impl Default for PollerConfig {
 /// A workflow execution step polled from the server, waiting to be processed.
 #[derive(Debug, Clone)]
 pub struct WorkflowExecutionTask {
-    /// Workflow execution identifier.
+    /// Workflow execution identifier, as the engine knows the run: its
+    /// `workflow_id` is the engine's own id for the run, which every report
+    /// about the activation sends back.
     pub execution: WorkflowExecution,
+
+    /// The workflow id the run's users know it by: the one it was started
+    /// with, or the one its start answered with. What the run's code is told
+    /// and what logs and errors name it by. From an engine that does not
+    /// report it, the engine's own id.
+    pub client_workflow_id: String,
 
     /// Workflow type.
     pub workflow_type: String,
@@ -261,8 +269,13 @@ pub struct WorkflowExecutionTask {
 /// A task execution polled from the server, waiting to be processed.
 #[derive(Debug, Clone)]
 pub struct TaskExecutionTask {
-    /// The workflow execution that scheduled the task.
+    /// The workflow execution that scheduled the task, as the engine knows
+    /// it.
     pub execution: WorkflowExecution,
+
+    /// The workflow id the run's users know it by, as
+    /// [`WorkflowExecutionTask::client_workflow_id`].
+    pub client_workflow_id: String,
 
     /// Task ID.
     pub task_id: String,
@@ -630,7 +643,7 @@ impl WorkflowExecutionPoller {
                     while let Some(task) = tasks.next() {
                         tracing::info!(
                             task_queue = %self.config.task_queue,
-                            workflow_id = %task.execution.workflow_id,
+                            workflow_id = %task.client_workflow_id,
                             run_id = %task.execution.run_id,
                             workflow_type = %task.workflow_type,
                             "Received workflow execution task"
@@ -655,7 +668,7 @@ impl WorkflowExecutionPoller {
                             for task in std::iter::once(task).chain(tasks.by_ref()) {
                                 tracing::warn!(
                                     task_queue = %self.config.task_queue,
-                                    workflow_id = %task.execution.workflow_id,
+                                    workflow_id = %task.client_workflow_id,
                                     run_id = %task.execution.run_id,
                                     "Workflow driver stopped before this activation could be \
                                      handed to it; handing it back to the engine"
@@ -978,7 +991,7 @@ impl WorkflowExecutionPoller {
         };
 
         tracing::debug!(
-            workflow_id = %task.execution.workflow_id,
+            workflow_id = %task.client_workflow_id,
             execution_id = %task.execution.run_id,
             workflow_type = %task.workflow_type,
             elapsed_ms = elapsed.as_millis(),
@@ -1322,7 +1335,7 @@ impl TaskExecutionPoller {
                     while let Some(task) = tasks.next() {
                         tracing::info!(
                             task_queue = %self.config.task_queue,
-                            workflow_id = %task.execution.workflow_id,
+                            workflow_id = %task.client_workflow_id,
                             run_id = %task.execution.run_id,
                             task_id = %task.task_id,
                             task_type = %task.task_type,
@@ -1345,7 +1358,7 @@ impl TaskExecutionPoller {
                                 tracing::error!(
                                     task_queue = %self.config.task_queue,
                                     task_id = %task.task_id,
-                                    workflow_id = %task.execution.workflow_id,
+                                    workflow_id = %task.client_workflow_id,
                                     "Task driver stopped before this task could be handed to \
                                      it; it waits out its start-to-close timeout"
                                 );

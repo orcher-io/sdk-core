@@ -12,7 +12,7 @@ categories = ["asynchronous", "network-programming"]
 
 [dependencies]
 # Protocol definitions
-orcher-proto = "0.15"
+orcher-proto = "0.16"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

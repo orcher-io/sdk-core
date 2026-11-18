@@ -19,7 +19,10 @@ use tokio::sync::mpsc;
 
 /// An activation the language holds, and what its answer is sent with.
 struct Held {
+    /// The engine's id for the run, which the outcome is reported with.
     workflow_id: String,
+    /// The id the run's users know it by, which logs name it by.
+    client_workflow_id: String,
     run: kernel::RunBinding,
     task_token: Vec<u8>,
     stream_entry_id: Option<String>,
@@ -56,6 +59,7 @@ impl Workflows {
             activation.activation_id.clone(),
             Held {
                 workflow_id: work.task.execution.workflow_id.clone(),
+                client_workflow_id: work.task.client_workflow_id.clone(),
                 run: kernel::RunBinding::of(&work.task),
                 task_token: work.task.task_token.clone(),
                 stream_entry_id: work.stream_entry_id.clone(),
@@ -80,6 +84,7 @@ impl Workflows {
         self.results
             .send(WorkflowWorkResult {
                 workflow_id: held.workflow_id,
+                client_workflow_id: held.client_workflow_id,
                 run_id: held.run.run_id,
                 task_token: held.task_token,
                 stream_entry_id: held.stream_entry_id,
@@ -109,6 +114,7 @@ impl Workflows {
                 .results
                 .send(WorkflowWorkResult {
                     workflow_id: held.workflow_id,
+                    client_workflow_id: held.client_workflow_id,
                     run_id: held.run.run_id,
                     task_token: held.task_token,
                     stream_entry_id: held.stream_entry_id,
