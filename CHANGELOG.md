@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.2](https://github.com/orcher-io/sdk-core/compare/v0.23.1...v0.23.2) (2026-11-18)
+
+
+### Features
+
+* tell a run's code and logs the workflow id its users know it by ([#172](https://github.com/orcher-io/sdk-core/issues/172)) ([d4d34a4](https://github.com/orcher-io/sdk-core/commit/d4d34a448efb35459bdd0ec3416dd9714d920e43))
+
 ## [0.23.1](https://github.com/orcher-io/sdk-core/compare/v0.23.0...v0.23.1) (2026-11-13)
 
 
