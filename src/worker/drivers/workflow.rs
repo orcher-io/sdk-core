@@ -218,8 +218,11 @@ pub struct WorkflowWork {
 /// The result of a workflow activation, sent back by the language SDK.
 #[derive(Debug)]
 pub struct WorkflowWorkResult {
-    /// Workflow ID.
+    /// The engine's id for the run, which the report sends back.
     pub workflow_id: String,
+
+    /// The workflow id the run's users know it by, which logs name it by.
+    pub client_workflow_id: String,
 
     /// Run ID (the execution ID).
     pub run_id: String,
@@ -770,7 +773,7 @@ impl WorkflowDriver {
         self.task_receiver.close();
         while let Ok(task) = self.task_receiver.try_recv() {
             tracing::warn!(
-                workflow_id = %task.execution.workflow_id,
+                workflow_id = %task.client_workflow_id,
                 run_id = %task.execution.run_id,
                 "Workflow activation received but never handed over; handing it back to the \
                  engine"
@@ -802,13 +805,16 @@ impl WorkflowDriver {
             metrics.workflow_started();
         }
         self.config.wire.record_activation(task.journal.len());
+        // The engine's id for the run, which the reports below send back,
+        // and the id its users know it by, which logs name it by.
         let workflow_id = task.execution.workflow_id.clone();
+        let client_workflow_id = task.client_workflow_id.clone();
         let run_id = task.execution.run_id.clone();
         let workflow_type = task.workflow_type.clone();
         let stream_entry_id = task.stream_entry_id.clone();
 
         tracing::debug!(
-            workflow_id = %workflow_id,
+            workflow_id = %client_workflow_id,
             run_id = %run_id,
             workflow_type = %workflow_type,
             "Driver received workflow task"
@@ -817,7 +823,7 @@ impl WorkflowDriver {
         // Replay the journal to catch determinism violations before the
         // language SDK runs anything.
         let execution = WorkflowExecution {
-            workflow_id: workflow_id.clone(),
+            workflow_id: client_workflow_id.clone(),
             run_id: run_id.clone(),
         };
         let token = activation_token(task.task_token.clone(), stream_entry_id.as_deref());
@@ -828,7 +834,7 @@ impl WorkflowDriver {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(
-                        workflow_id = %workflow_id,
+                        workflow_id = %client_workflow_id,
                         error = %e,
                         "Replay validation failed"
                     );
@@ -846,7 +852,7 @@ impl WorkflowDriver {
 
         if !replay_result.success || replay_result.has_critical_violations() {
             tracing::error!(
-                workflow_id = %workflow_id,
+                workflow_id = %client_workflow_id,
                 violations = replay_result.violations.len(),
                 "Replay failed with determinism violations"
             );
@@ -870,7 +876,7 @@ impl WorkflowDriver {
         // recovered.
         if self.work_sender.is_closed() {
             tracing::warn!(
-                workflow_id = %workflow_id,
+                workflow_id = %client_workflow_id,
                 run_id = %run_id,
                 "Language SDK stopped taking work; workflow activation not handed over, \
                  handing it back to the engine"
@@ -909,7 +915,7 @@ impl WorkflowDriver {
             // The activation is lost with the channel, so it stays claimed
             // until the engine's claim timeout hands it out again.
             tracing::error!(
-                workflow_id = %workflow_id,
+                workflow_id = %client_workflow_id,
                 run_id = %run_id,
                 "Language SDK stopped taking work; workflow activation not handed over, it \
                  stays claimed until the engine's claim timeout"
@@ -929,6 +935,7 @@ impl WorkflowDriver {
 
     fn report_for(&self, result: WorkflowWorkResult) -> Report {
         let workflow_id = result.workflow_id;
+        let client_workflow_id = result.client_workflow_id;
         let run_id = result.run_id;
         let stream_entry_id = result.stream_entry_id.unwrap_or_default();
         let token = activation_token(result.task_token, Some(&stream_entry_id));
@@ -977,7 +984,7 @@ impl WorkflowDriver {
             // this or another worker to take again.
             Err(Error::Protocol(reason)) => {
                 tracing::error!(
-                    workflow_id = %workflow_id,
+                    workflow_id = %client_workflow_id,
                     run_id = %run_id,
                     %reason,
                     "The language SDK could not process the activation; handing it back"
@@ -998,7 +1005,7 @@ impl WorkflowDriver {
 
         if let Err(e) = validate_execution_result(&execution_result) {
             tracing::error!(
-                workflow_id = %workflow_id,
+                workflow_id = %client_workflow_id,
                 error = %e,
                 "Execution result validation failed"
             );
@@ -1015,7 +1022,7 @@ impl WorkflowDriver {
             if !violations.is_empty() {
                 for violation in &violations {
                     tracing::debug!(
-                        workflow_id = %workflow_id,
+                        workflow_id = %client_workflow_id,
                         run_id = %run_id,
                         step_id = violation.step_id.as_deref().unwrap_or_default(),
                         entry_id = violation.event_id,
@@ -1174,6 +1181,7 @@ mod tests {
         let driver = idle_driver().await;
         let report = driver.report_for(WorkflowWorkResult {
             workflow_id: "order-7".into(),
+            client_workflow_id: "order-7".into(),
             run_id: "run-1".into(),
             task_token: b"act-1".to_vec(),
             stream_entry_id: None,
@@ -1203,6 +1211,7 @@ mod tests {
             };
             let report = driver.report_for(WorkflowWorkResult {
                 workflow_id: "order-7".into(),
+                client_workflow_id: "order-7".into(),
                 run_id: "run-1".into(),
                 task_token: b"act-1".to_vec(),
                 stream_entry_id: None,

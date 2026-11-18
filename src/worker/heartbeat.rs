@@ -238,6 +238,7 @@ impl TaskExecutionTask {
                 workflow_id: String::new(),
                 run_id: String::new(),
             },
+            client_workflow_id: String::new(),
             task_id: String::new(),
             task_type: String::new(),
             task_queue: String::new(),

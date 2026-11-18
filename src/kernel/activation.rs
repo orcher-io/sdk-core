@@ -115,6 +115,16 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
     });
 
     let binding = RunBinding::of(task);
+    // The id the run's code is told. A run under the kernel's scheme derives
+    // nothing from it, so it is told the id its users know it by. A run under
+    // an SDK's own scheme keeps the engine's id, which that SDK may derive
+    // values from (its random seed among them): told another id part way
+    // through, it would replay differently.
+    let workflow_id = if binding.kernel_assigns() {
+        task.client_workflow_id.clone()
+    } else {
+        task.execution.workflow_id.clone()
+    };
     let started = Resolution {
         step_id: String::new(),
         at: started_at,
@@ -144,7 +154,7 @@ pub fn resolve(task: &WorkflowExecutionTask, namespace: &str) -> RunActivation {
     RunActivation {
         activation_id: task.task_token.clone(),
         run: Some(RunRef {
-            workflow_id: task.execution.workflow_id.clone(),
+            workflow_id,
             run_id: task.execution.run_id.clone(),
             workflow_type: task.workflow_type.clone(),
             task_queue: task.task_queue.clone(),
@@ -444,7 +454,8 @@ mod tests {
 
     fn task(journal: Vec<JournalEntry>) -> WorkflowExecutionTask {
         WorkflowExecutionTask {
-            execution: WorkflowExecution::new("order-7", "run-1"),
+            execution: WorkflowExecution::new("3f2a9c1e-engine-id", "run-1"),
+            client_workflow_id: "order-7".into(),
             workflow_type: "checkout".into(),
             task_queue: "orders".into(),
             input: serde_json::json!({"n": 1}),
@@ -787,6 +798,25 @@ mod tests {
         assert!(failure.non_retryable);
     }
 
+    /// A run under the kernel's scheme is told the id its users know it by;
+    /// one under an SDK's own scheme keeps the engine's id, which that SDK
+    /// may derive its values from.
+    #[test]
+    fn a_run_under_the_kernel_scheme_is_told_the_id_its_users_know() {
+        let mut task = task(vec![started(1_000)]);
+        task.step_ids = Some(crate::types::StepIdScheme::Kernel);
+        task.history_lineage = "lineage-1".into();
+        let activation = resolve(&task, "payments");
+        assert_eq!(activation.run.as_ref().unwrap().workflow_id, "order-7");
+
+        task.step_ids = Some(crate::types::StepIdScheme::RustV0);
+        let activation = resolve(&task, "payments");
+        assert_eq!(
+            activation.run.as_ref().unwrap().workflow_id,
+            "3f2a9c1e-engine-id"
+        );
+    }
+
     #[test]
     fn the_run_starts_first_with_its_input_and_names_its_run() {
         let mut task = task(vec![
@@ -816,7 +846,8 @@ mod tests {
                 run.run_id.as_str(),
                 run.namespace.as_str()
             ),
-            ("order-7", "run-1", "payments")
+            ("3f2a9c1e-engine-id", "run-1", "payments"),
+            "a run bound to no kernel scheme keeps the engine's id"
         );
         assert_eq!(activation.activation_id, b"act-1");
         let Some(resolution::What::Started(start)) = &activation.resolutions[0].what else {

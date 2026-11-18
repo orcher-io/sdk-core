@@ -457,6 +457,17 @@ pub(crate) fn step_id_scheme(number: i32) -> Option<StepIdScheme> {
     }
 }
 
+/// The workflow id a polled run's users know it by: the one the engine
+/// reported, or, from an engine that reports none, its own id for the run,
+/// the only one there is.
+fn client_workflow_id(reported: String, engine_id: &str) -> String {
+    if reported.is_empty() {
+        engine_id.to_string()
+    } else {
+        reported
+    }
+}
+
 /// The work an activation the engine sent asks for. This is what a poll
 /// hands the driver, and what a recorded activation (see
 /// [`crate::worker::record`]) is replayed as.
@@ -470,12 +481,15 @@ impl From<proto::PollWorkflowExecutionResponse> for WorkflowExecutionTask {
         // engine can tell a repeat of a completion from a new one. An engine
         // that returns no token gets an empty one back, which it ignores.
         let task_token = poll_response.stream_entry_id.clone().into_bytes();
+        let client_workflow_id =
+            client_workflow_id(poll_response.client_workflow_id, &poll_response.workflow_id);
 
         WorkflowExecutionTask {
             execution: WorkflowExecution::new(
                 poll_response.workflow_id,
                 poll_response.execution_id,
             ),
+            client_workflow_id,
             workflow_type: poll_response.workflow_type,
             task_queue: poll_response.task_queue,
             input: serde_json::from_slice(&poll_response.input)
@@ -503,11 +517,14 @@ impl From<proto::PollWorkflowExecutionResponse> for WorkflowExecutionTask {
 /// The task a poll handed out.
 impl From<proto::PollTaskExecutionResponse> for TaskExecutionTask {
     fn from(poll_response: proto::PollTaskExecutionResponse) -> Self {
+        let client_workflow_id =
+            client_workflow_id(poll_response.client_workflow_id, &poll_response.workflow_id);
         TaskExecutionTask {
             execution: WorkflowExecution::new(
                 poll_response.workflow_id,
                 poll_response.execution_id,
             ),
+            client_workflow_id,
             task_id: poll_response.task_id,
             task_type: poll_response.task_type,
             task_queue: poll_response.task_queue,
@@ -533,4 +550,51 @@ fn one_value(input: &[crate::payload::Payload]) -> Vec<u8> {
         .first()
         .map(|payload| payload.data.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workflow_poll(client_workflow_id: &str) -> proto::PollWorkflowExecutionResponse {
+        proto::PollWorkflowExecutionResponse {
+            workflow_id: "9b1c6f0e-engine-id".into(),
+            execution_id: "exec_1".into(),
+            client_workflow_id: client_workflow_id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn task_poll(client_workflow_id: &str) -> proto::PollTaskExecutionResponse {
+        proto::PollTaskExecutionResponse {
+            workflow_id: "9b1c6f0e-engine-id".into(),
+            execution_id: "exec_1".into(),
+            client_workflow_id: client_workflow_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A polled run is named by the id its users know it, and reported to
+    /// the engine by the engine's own.
+    #[test]
+    fn a_polled_run_keeps_both_its_ids() {
+        let workflow = WorkflowExecutionTask::from(workflow_poll("order-1001"));
+        assert_eq!(workflow.client_workflow_id, "order-1001");
+        assert_eq!(workflow.execution.workflow_id, "9b1c6f0e-engine-id");
+        assert_eq!(workflow.execution.run_id, "exec_1");
+
+        let task = TaskExecutionTask::from(task_poll("order-1001"));
+        assert_eq!(task.client_workflow_id, "order-1001");
+        assert_eq!(task.execution.workflow_id, "9b1c6f0e-engine-id");
+    }
+
+    /// An engine that reports no client id leaves the run named by the only
+    /// id there is.
+    #[test]
+    fn a_run_from_an_engine_reporting_no_client_id_is_named_by_its_own() {
+        let workflow = WorkflowExecutionTask::from(workflow_poll(""));
+        assert_eq!(workflow.client_workflow_id, "9b1c6f0e-engine-id");
+        let task = TaskExecutionTask::from(task_poll(""));
+        assert_eq!(task.client_workflow_id, "9b1c6f0e-engine-id");
+    }
 }

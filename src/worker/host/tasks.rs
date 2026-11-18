@@ -179,7 +179,8 @@ impl Tasks {
             task_id: task.task_id.clone(),
             task_type: task.task_type.clone(),
             run: Some(RunRef {
-                workflow_id: task.execution.workflow_id.clone(),
+                // The id the run's users know it by; see `kernel::resolve`.
+                workflow_id: task.client_workflow_id.clone(),
                 run_id: task.execution.run_id.clone(),
                 task_queue: task.task_queue.clone(),
                 namespace: self.namespace.clone(),

@@ -444,6 +444,7 @@ async fn the_poll_token_comes_back_on_completion_and_failure() {
         let result = if task.execution.workflow_id == "wf-ok" {
             WorkflowWorkResult {
                 workflow_id: task.execution.workflow_id.clone(),
+                client_workflow_id: task.execution.workflow_id.clone(),
                 run_id: task.execution.run_id.clone(),
                 task_token: task.task_token.clone(),
                 stream_entry_id: work.stream_entry_id,
@@ -457,6 +458,7 @@ async fn the_poll_token_comes_back_on_completion_and_failure() {
         } else {
             WorkflowWorkResult {
                 workflow_id: task.execution.workflow_id.clone(),
+                client_workflow_id: task.execution.workflow_id.clone(),
                 run_id: task.execution.run_id.clone(),
                 task_token: task.task_token.clone(),
                 stream_entry_id: None,
@@ -522,6 +524,7 @@ async fn no_token_from_the_poll_means_an_empty_one_back() {
     result_tx
         .send(WorkflowWorkResult {
             workflow_id: work.task.execution.workflow_id.clone(),
+            client_workflow_id: work.task.execution.workflow_id.clone(),
             run_id: work.task.execution.run_id.clone(),
             task_token: work.task.task_token.clone(),
             stream_entry_id: None,
@@ -762,6 +765,7 @@ async fn a_result_queued_at_shutdown_is_still_sent() {
     result_tx
         .send(WorkflowWorkResult {
             workflow_id: "wf-1".into(),
+            client_workflow_id: "wf-1".into(),
             run_id: "exec-1".into(),
             task_token: b"act1.cQ".to_vec(),
             stream_entry_id: Some("act1.cQ".into()),
@@ -961,6 +965,7 @@ async fn callers_without_a_connection_share_one_connect() {
 fn failed_result(token: &str) -> WorkflowWorkResult {
     WorkflowWorkResult {
         workflow_id: "wf-1".into(),
+        client_workflow_id: "wf-1".into(),
         run_id: "exec-1".into(),
         task_token: token.as_bytes().to_vec(),
         stream_entry_id: Some(token.into()),
@@ -1101,6 +1106,7 @@ async fn completions_in_flight_are_capped_and_counted_when_they_land() {
 
     let succeeded = |token: &str| WorkflowWorkResult {
         workflow_id: "wf-1".into(),
+        client_workflow_id: "wf-1".into(),
         run_id: "exec-1".into(),
         task_token: token.as_bytes().to_vec(),
         stream_entry_id: Some(token.into()),
@@ -1409,6 +1415,7 @@ async fn slow_completions_and_a_capped_sdk_do_not_lock_the_driver() {
                 let task = work.task;
                 let result = WorkflowWorkResult {
                     workflow_id: task.execution.workflow_id.clone(),
+                    client_workflow_id: task.execution.workflow_id.clone(),
                     run_id: task.execution.run_id.clone(),
                     task_token: task.task_token.clone(),
                     stream_entry_id: work.stream_entry_id,
@@ -1478,6 +1485,7 @@ fn completing_sdk(
                 let _ = result_tx
                     .send(WorkflowWorkResult {
                         workflow_id: task.execution.workflow_id.clone(),
+                        client_workflow_id: task.execution.workflow_id.clone(),
                         run_id: task.execution.run_id.clone(),
                         task_token: task.task_token.clone(),
                         stream_entry_id: work.stream_entry_id,
@@ -1754,6 +1762,7 @@ async fn held_by_one_report(
 fn answered(work: &crate::worker::drivers::WorkflowWork) -> WorkflowWorkResult {
     WorkflowWorkResult {
         workflow_id: work.task.execution.workflow_id.clone(),
+        client_workflow_id: work.task.execution.workflow_id.clone(),
         run_id: work.task.execution.run_id.clone(),
         task_token: work.task.task_token.clone(),
         stream_entry_id: work.stream_entry_id.clone(),
@@ -1990,6 +1999,7 @@ async fn the_whole_shutdown_fits_in_one_grace() {
     result_tx
         .send(WorkflowWorkResult {
             workflow_id: task.execution.workflow_id.clone(),
+            client_workflow_id: task.execution.workflow_id.clone(),
             run_id: task.execution.run_id.clone(),
             task_token: task.task_token.clone(),
             stream_entry_id: work.stream_entry_id,
@@ -2127,6 +2137,7 @@ async fn an_activation_whose_commands_contradict_its_journal_is_retried_not_fail
         result_tx
             .send(WorkflowWorkResult {
                 workflow_id: task.execution.workflow_id.clone(),
+                client_workflow_id: task.execution.workflow_id.clone(),
                 run_id: task.execution.run_id.clone(),
                 task_token: task.task_token.clone(),
                 stream_entry_id: work.stream_entry_id,
@@ -2291,6 +2302,7 @@ async fn a_run_whose_recorded_steps_the_code_leaves_behind_is_retried_not_carrie
         result_tx
             .send(WorkflowWorkResult {
                 workflow_id: task.execution.workflow_id.clone(),
+                client_workflow_id: task.execution.workflow_id.clone(),
                 run_id: task.execution.run_id.clone(),
                 task_token: task.task_token.clone(),
                 stream_entry_id: work.stream_entry_id,
@@ -2375,6 +2387,7 @@ async fn a_held_activation_is_handed_back_at_once_on_shutdown() {
     result_tx
         .send(WorkflowWorkResult {
             workflow_id: task.execution.workflow_id.clone(),
+            client_workflow_id: task.execution.workflow_id.clone(),
             run_id: task.execution.run_id.clone(),
             task_token: task.task_token.clone(),
             stream_entry_id: work.stream_entry_id,
