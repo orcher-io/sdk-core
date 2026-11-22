@@ -364,6 +364,16 @@ mod tests {
     use crate::worker::host::Registrations;
     use crate::worker_protocol::{CANCEL_REQUEST, WORKFLOW_FAILURE_RETRYABILITY};
 
+    /// Holding a payload seal must not cost the configuration types their
+    /// unwind safety: callers may pass them across `catch_unwind`.
+    #[test]
+    fn the_configuration_stays_unwind_safe() {
+        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        unwind_safe::<HostConfig>();
+        unwind_safe::<crate::client::ConnectOptions>();
+        unwind_safe::<crate::payload::PayloadSeal>();
+    }
+
     /// The connection's payload seal reaches every driver that exchanges
     /// payloads with the engine; without one, none seals.
     #[test]

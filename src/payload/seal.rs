@@ -74,6 +74,13 @@ impl From<Arc<CodecChain>> for PayloadSeal {
     }
 }
 
+// A seal is never changed after it is built and a codec is only ever called
+// through `&self`, so a panic cannot leave one half-updated. Saying so keeps
+// the configuration types that hold a seal unwind-safe, as they were before
+// they held one.
+impl std::panic::UnwindSafe for PayloadSeal {}
+impl std::panic::RefUnwindSafe for PayloadSeal {}
+
 impl std::fmt::Debug for PayloadSeal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PayloadSeal")
