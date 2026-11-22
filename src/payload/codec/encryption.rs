@@ -182,16 +182,24 @@ impl EncryptionPayloadCodec {
         self
     }
 
-    /// The cipher for a payload that names `key_id`, or names no key.
-    fn cipher_for(&self, key_id: Option<&str>) -> Result<&Aes256Gcm> {
+    /// The ciphers to try on a payload that names `key_id`, or names no key.
+    ///
+    /// A named key is the only candidate. A payload that names none was
+    /// written before its writer was given a key id, by the current key or
+    /// by one since rotated out, so each key this codec holds is tried, the
+    /// current one first. The authentication tag makes that safe: only the
+    /// key that wrote the payload opens it.
+    fn ciphers_for(&self, key_id: Option<&str>) -> Result<Vec<&Aes256Gcm>> {
         match key_id {
-            None => Ok(&self.cipher),
-            Some(id) if self.key_id.as_deref() == Some(id) => Ok(&self.cipher),
+            None => Ok(std::iter::once(&self.cipher)
+                .chain(self.retired.iter().map(|(_, cipher)| cipher))
+                .collect()),
+            Some(id) if self.key_id.as_deref() == Some(id) => Ok(vec![&self.cipher]),
             Some(id) => self
                 .retired
                 .iter()
                 .find(|(retired, _)| retired == id)
-                .map(|(_, cipher)| cipher)
+                .map(|(_, cipher)| vec![cipher])
                 .ok_or_else(|| {
                     Error::codec(format!(
                         "payload was encrypted with key `{id}`, which this codec does not hold"
@@ -323,13 +331,17 @@ impl PayloadCodec for EncryptionPayloadCodec {
         // Fails unless the authentication tag verifies, so tampered data is
         // never returned.
         let key_id = payload.get_metadata_string(KEY_ID_METADATA);
-        let cipher = self.cipher_for(key_id.as_deref())?;
-        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
-            Error::codec(format!(
-                "AES-GCM decryption failed: {}. Data may be corrupted or tampered with.",
-                e
-            ))
-        })?;
+        let plaintext = self
+            .ciphers_for(key_id.as_deref())?
+            .into_iter()
+            .find_map(|cipher| cipher.decrypt(nonce, ciphertext).ok())
+            .ok_or_else(|| {
+                Error::codec(
+                    "AES-GCM decryption failed: the payload was written with a key this \
+                     codec does not hold, or it is corrupted or was tampered with."
+                        .to_string(),
+                )
+            })?;
 
         let mut decoded = Payload::new(plaintext, payload.metadata.clone());
         decoded.remove_metadata(KEY_ID_METADATA);
@@ -604,6 +616,23 @@ mod tests {
         let decoded = codec.decode(&encoded).unwrap();
         assert_eq!(decoded.data, b"{}");
         assert_eq!(decoded.get_metadata_string(KEY_ID_METADATA), None);
+    }
+
+    #[test]
+    fn a_payload_that_names_no_key_is_opened_by_a_rotated_out_key() {
+        // Written before the writer was given a key id.
+        let unnamed = EncryptionPayloadCodec::new(&[1u8; 32]);
+        let encoded = unnamed.encode(&Payload::json(b"secret".to_vec())).unwrap();
+        assert_eq!(encoded.get_metadata_string(KEY_ID_METADATA), None);
+
+        let rotated = EncryptionPayloadCodec::new(&[2u8; 32])
+            .with_key_id("new")
+            .with_decryption_key("old", &[1u8; 32]);
+        assert_eq!(rotated.decode(&encoded).unwrap().data, b"secret");
+
+        // A codec that holds neither key still refuses it.
+        let stranger = EncryptionPayloadCodec::new(&[3u8; 32]).with_decryption_key("x", &[4u8; 32]);
+        assert!(stranger.decode(&encoded).is_err());
     }
 
     #[test]
