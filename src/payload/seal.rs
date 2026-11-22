@@ -67,6 +67,13 @@ pub struct PayloadSeal {
     chain: Arc<CodecChain>,
 }
 
+impl From<Arc<CodecChain>> for PayloadSeal {
+    /// Seals with a chain that is shared with something else.
+    fn from(chain: Arc<CodecChain>) -> Self {
+        Self { chain }
+    }
+}
+
 impl std::fmt::Debug for PayloadSeal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PayloadSeal")
