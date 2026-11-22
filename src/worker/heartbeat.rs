@@ -660,20 +660,33 @@ async fn send_together(
         .connection(Breaker::Respect)
         .await
         .map_err(|_| Code::Unavailable)?;
+    // Built from the heartbeats' own details on every call, so what is sealed
+    // here was never sealed before.
+    let mut body = RecordTaskHeartbeatsRequest {
+        namespace: context.caller.namespace.clone(),
+        identity: context.caller.identity.clone(),
+        heartbeats: batch
+            .iter()
+            .map(|submission| TaskHeartbeatEntry {
+                task_token: submission.token.clone(),
+                details: submission.details.clone().unwrap_or_default(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    if let Err(e) =
+        crate::wire::seal::seal_heartbeats(context.caller.payload_seal.as_ref(), &mut body)
+    {
+        tracing::error!(
+            heartbeats = batch.len(),
+            error = %e,
+            "Task heartbeats not sent: their details could not be sealed"
+        );
+        return Err(Code::Internal);
+    }
     let mut request = crate::transport::credentials::credentialed_request(
-        RecordTaskHeartbeatsRequest {
-            namespace: context.caller.namespace.clone(),
-            identity: context.caller.identity.clone(),
-            heartbeats: batch
-                .iter()
-                .map(|submission| TaskHeartbeatEntry {
-                    task_token: submission.token.clone(),
-                    details: submission.details.clone().unwrap_or_default(),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        },
+        body,
         context.caller.api_key.as_deref(),
         context.caller.organization_id.as_deref(),
     );
@@ -750,14 +763,28 @@ async fn send_one(
             return Err(Code::Unavailable);
         }
     };
+    // Built from the heartbeat's own details on every call, so what is sealed
+    // here was never sealed before.
+    let mut body = RecordTaskHeartbeatRequest {
+        task_token: submission.token.clone(),
+        namespace: context.caller.namespace.clone(),
+        identity: context.caller.identity.clone(),
+        details: submission.details.clone().unwrap_or_default(),
+        ..Default::default()
+    };
+    if let Err(e) =
+        crate::wire::seal::seal_heartbeat(context.caller.payload_seal.as_ref(), &mut body)
+    {
+        tracing::error!(
+            task_id = %submission.task_id,
+            workflow_id = %submission.workflow_id,
+            error = %e,
+            "Task heartbeat not sent: its details could not be sealed"
+        );
+        return Err(Code::Internal);
+    }
     let mut request = crate::transport::credentials::credentialed_request(
-        RecordTaskHeartbeatRequest {
-            task_token: submission.token.clone(),
-            namespace: context.caller.namespace.clone(),
-            identity: context.caller.identity.clone(),
-            details: submission.details.clone().unwrap_or_default(),
-            ..Default::default()
-        },
+        body,
         context.caller.api_key.as_deref(),
         context.caller.organization_id.as_deref(),
     );

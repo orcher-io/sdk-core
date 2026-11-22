@@ -252,6 +252,7 @@ impl HostConfig {
             protocol_version: self.protocol_version,
             supported_step_ids: self.supported_step_ids.clone(),
             max_message_bytes: self.connection.max_message_bytes,
+            payload_seal: self.connection.payload_seal.clone(),
             ..WorkflowDriverConfig::default()
         }
     }
@@ -275,6 +276,7 @@ impl HostConfig {
             version_id: self.version_id.clone(),
             auto_heartbeat: true,
             max_message_bytes: self.connection.max_message_bytes,
+            payload_seal: self.connection.payload_seal.clone(),
             ..TaskDriverConfig::default()
         }
     }
@@ -298,6 +300,7 @@ impl HostConfig {
             tls_config: self.connection.tls.clone(),
             connect_timeout: self.connection.connect_timeout,
             max_message_bytes: self.connection.max_message_bytes,
+            payload_seal: self.connection.payload_seal.clone(),
             ..ActorDriverConfig::default()
         }
     }
@@ -360,6 +363,25 @@ mod tests {
     use super::*;
     use crate::worker::host::Registrations;
     use crate::worker_protocol::{CANCEL_REQUEST, WORKFLOW_FAILURE_RETRYABILITY};
+
+    /// The connection's payload seal reaches every driver that exchanges
+    /// payloads with the engine; without one, none seals.
+    #[test]
+    fn the_payload_seal_reaches_every_driver() {
+        let plain = HostConfig::new("http://engine:50051", "orders");
+        assert!(plain.workflow_driver().payload_seal.is_none());
+        assert!(plain.task_driver().payload_seal.is_none());
+        assert!(plain.actor_driver(None).payload_seal.is_none());
+
+        let seal = crate::payload::PayloadSeal::new(crate::payload::codec::CodecChain::new());
+        let sealing = HostConfig::new(
+            ConnectOptions::new("http://engine:50051").with_payload_seal(seal),
+            "orders",
+        );
+        assert!(sealing.workflow_driver().payload_seal.is_some());
+        assert!(sealing.task_driver().payload_seal.is_some());
+        assert!(sealing.actor_driver(None).payload_seal.is_some());
+    }
 
     /// The poll counts and the heartbeat interval a worker sets reach the
     /// drivers that use them; zero polls counts as one.

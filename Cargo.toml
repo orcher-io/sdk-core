@@ -58,6 +58,7 @@ flate2 = "1.0"
 
 # Encryption (for codec module)
 aes-gcm = "0.10"
+base64 = "0.22"
 rand = "0.8"
 # The kernel's deterministic random source derives its seed with SHA-256.
 sha2 = "0.10"

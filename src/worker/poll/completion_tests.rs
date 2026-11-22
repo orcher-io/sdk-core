@@ -42,6 +42,8 @@ struct Script {
     always: Option<Code>,
     completes: Vec<Seen>,
     fails: Vec<Seen>,
+    /// Every completion as it arrived, attempts that were refused included.
+    completions: Vec<CompleteWorkflowExecutionRequest>,
     /// How long each completion takes to be answered.
     delay: Duration,
     /// When set, each completion waits for a permit before it is answered.
@@ -225,6 +227,7 @@ impl ExecutionService for Engine {
         let (delay, gate) = {
             let mut script = self.0.lock().unwrap();
             script.protocol_versions.push(request.protocol_version);
+            script.completions.push(request.clone());
             script.completes.push(Seen {
                 task_token: request.task_token,
                 stream_entry_id: Some(request.stream_entry_id),
@@ -2843,6 +2846,83 @@ mod size_limits {
         );
     }
 
+    /// Sealing makes a payload larger, and the size held against the limit
+    /// is the size sent: a completion that fits as it is and not once sealed
+    /// fails the workflow rather than being sent and refused.
+    #[tokio::test]
+    async fn a_workflow_completion_is_measured_as_it_is_sent() {
+        for (sealed, fails) in [(false, false), (true, true)] {
+            let engine = SizeEngine::default();
+            let mut harness = completer_with_limit(&engine, 64 * 1024).await;
+            if sealed {
+                harness = super::sealed::sealing(harness, super::sealed::seal(1));
+            }
+
+            harness
+                .completer
+                .send(completing_with(vec![b'x'; 56 * 1024]))
+                .await;
+
+            let seen = engine.seen.lock().unwrap();
+            let [completion] = seen.completions.as_slice() else {
+                panic!("expected one completion, got {}", seen.completions.len());
+            };
+            match failed_with(completion) {
+                None => assert!(!fails, "a completion over the limit was sent"),
+                Some(failure) => {
+                    assert!(fails, "a completion under the limit failed the workflow");
+                    assert_eq!(failure.failure_type, PAYLOAD_TOO_LARGE);
+                    assert!(
+                        failure.message.starts_with(
+                            "the workflow's completion (largest: the workflow result, 56 KiB) is"
+                        ) && failure
+                            .message
+                            .contains("more than the 64 KiB this worker sends"),
+                        "{}",
+                        failure.message
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same for a task result.
+    #[tokio::test]
+    async fn a_task_result_is_measured_as_it_is_sent() {
+        for (sealed, fails) in [(false, false), (true, true)] {
+            let engine = SizeEngine::default();
+            let mut harness = completer_with_limit(&engine, 64 * 1024).await;
+            if sealed {
+                harness = super::sealed::sealing(harness, super::sealed::seal(1));
+            }
+
+            let delivery = harness
+                .completer
+                .send_task(task_result(56 * 1024), None, "default")
+                .await;
+            assert!(matches!(delivery, Delivery::Delivered(())), "{delivery:?}");
+
+            let seen = engine.seen.lock().unwrap();
+            if fails {
+                assert!(seen.task_results.is_empty(), "the result was sent");
+                let [failure] = seen.task_failures.as_slice() else {
+                    panic!("the task was not failed: {:?}", seen.task_failures);
+                };
+                assert_eq!(failure.failure_type, PAYLOAD_TOO_LARGE);
+                assert!(
+                    failure
+                        .message
+                        .contains("more than the 64 KiB this worker sends"),
+                    "{}",
+                    failure.message
+                );
+            } else {
+                assert_eq!(seen.task_results, vec![56 * 1024]);
+                assert!(seen.task_failures.is_empty());
+            }
+        }
+    }
+
     /// An activation over tonic's 4 MiB default reaches the language SDK.
     /// It used to be refused on arrival by the worker's own gRPC stack.
     #[tokio::test]
@@ -2875,6 +2955,189 @@ mod size_limits {
 
         shutdown.shutdown();
         let _ = tokio::time::timeout(Duration::from_secs(5), running).await;
+    }
+}
+
+/// A worker given a payload seal: what it sends is sealed once however often
+/// it is sent, what it receives reaches the language SDK opened, and what it
+/// cannot open is not run.
+mod sealed {
+    use super::*;
+    use crate::payload::codec::{CodecChain, EncryptionPayloadCodec};
+    use crate::payload::PayloadSeal;
+    use orcher_proto::orcher::v1::command::Attributes;
+
+    const INPUT: &[u8] = br#"{"card":"4242-secret-in"}"#;
+    const RESULT: &[u8] = br#"{"receipt":"secret-out"}"#;
+
+    pub(super) fn seal(key: u8) -> PayloadSeal {
+        PayloadSeal::new(CodecChain::new().with_codec(EncryptionPayloadCodec::new(&[key; 32])))
+    }
+
+    /// `harness`, its completer sealing with `seal`.
+    pub(super) fn sealing(mut harness: Harness, seal: PayloadSeal) -> Harness {
+        let mut caller = (*harness.completer.caller).clone();
+        caller.payload_seal = Some(seal);
+        harness.completer.caller = Arc::new(caller);
+        harness
+    }
+
+    /// The result of the workflow `completion` completes.
+    fn result_of(completion: &CompleteWorkflowExecutionRequest) -> &[u8] {
+        match completion.commands.as_slice() {
+            [Command {
+                attributes: Some(Attributes::CompleteWorkflow(attrs)),
+                ..
+            }] => &attrs.result,
+            other => panic!("not one CompleteWorkflow command: {other:?}"),
+        }
+    }
+
+    fn shows(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    /// Every attempt of a retried completion sends the same sealed body, and
+    /// opening it once gives the result: it was not sealed again per attempt.
+    #[tokio::test]
+    async fn a_retried_completion_is_sealed_once() {
+        let engine = Engine::default();
+        engine.0.lock().unwrap().answers =
+            VecDeque::from([Code::Unavailable, Code::Unavailable, Code::Ok]);
+        let addr = serve(engine.clone()).await;
+        let harness = sealing(completer_for(format!("http://{addr}"), quick()), seal(1));
+
+        harness
+            .completer
+            .send(Report::Complete {
+                workflow_id: "wf-1".into(),
+                run_id: "exec-1".into(),
+                token: b"act1.tok".to_vec(),
+                stream_entry_id: "act1.tok".into(),
+                commands: vec![Command {
+                    command_type: CommandType::CompleteWorkflow as i32,
+                    attributes: Some(Attributes::CompleteWorkflow(
+                        CompleteWorkflowCommandAttributes {
+                            result: RESULT.to_vec(),
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }],
+                query_results: vec![],
+                update_results: vec![],
+            })
+            .await;
+
+        let sent = engine.0.lock().unwrap().completions.clone();
+        assert_eq!(sent.len(), 3);
+        assert!(sent.iter().all(|attempt| attempt == &sent[0]));
+        use prost::Message as _;
+        assert!(!shows(&sent[0].encode_to_vec(), b"secret-out"));
+        assert_eq!(
+            seal(1).open(result_of(&sent[0])).unwrap().as_deref(),
+            Some(RESULT)
+        );
+    }
+
+    /// A sealed activation reaches the language SDK opened, and the SDK's
+    /// plain answer reaches the engine sealed.
+    #[tokio::test]
+    async fn a_driver_opens_what_it_polls_and_seals_what_it_reports() {
+        let engine = Engine::default();
+        engine
+            .0
+            .lock()
+            .unwrap()
+            .polls
+            .push_back(PollWorkflowExecutionResponse {
+                input: seal(1).seal(INPUT).unwrap(),
+                ..activation("wf-sealed", "act1.sealed")
+            });
+        let (driver, mut work_rx, result_tx) = driver_for(
+            &engine,
+            WorkflowDriverConfig {
+                payload_seal: Some(seal(1)),
+                ..test_config()
+            },
+        )
+        .await;
+        let shutdown = driver.shutdown_handle();
+        let mut driver = driver;
+        let running = tokio::spawn(async move { driver.run().await });
+
+        let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+            .await
+            .expect("the activation never arrived")
+            .expect("the driver is running");
+        assert_eq!(
+            work.task.input,
+            serde_json::from_slice::<serde_json::Value>(INPUT).unwrap()
+        );
+
+        result_tx.send(answered(&work)).await.unwrap();
+        wait_for(|| !engine.0.lock().unwrap().completions.is_empty()).await;
+        let sent = engine.0.lock().unwrap().completions.clone();
+        let result = result_of(&sent[0]);
+        assert_ne!(result, b"{}");
+        assert_eq!(seal(1).open(result).unwrap().as_deref(), Some(&b"{}"[..]));
+
+        shutdown.shutdown();
+        let _ = tokio::time::timeout(Duration::from_secs(5), running).await;
+    }
+
+    /// An activation sealed with a key this worker lacks, or sealed at all
+    /// when it has none, is not handed to the language SDK and not answered:
+    /// the worker says why, holds it, and hands it back, at once when it
+    /// shuts down.
+    #[tokio::test]
+    async fn an_activation_the_worker_cannot_open_is_held_and_handed_back() {
+        for (workers, says) in [
+            (Some(seal(2)), "decryption failed"),
+            (None, "no payload codec is configured"),
+        ] {
+            let (logs, _logging) = capture_logs();
+            let engine = Engine::default();
+            engine
+                .0
+                .lock()
+                .unwrap()
+                .polls
+                .push_back(PollWorkflowExecutionResponse {
+                    input: seal(1).seal(INPUT).unwrap(),
+                    ..activation("wf-locked", "act1.locked")
+                });
+            let (driver, mut work_rx, _result_tx) = driver_for(
+                &engine,
+                WorkflowDriverConfig {
+                    payload_seal: workers,
+                    ..test_config()
+                },
+            )
+            .await;
+            let shutdown = driver.shutdown_handle();
+            let mut driver = driver;
+            let running = tokio::spawn(async move { driver.run().await });
+
+            wait_for(|| error_names(&logs, "wf-locked")).await;
+            let said = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+            assert!(said.contains(says), "{said}");
+            assert!(!said.contains("secret-in"), "{said}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(work_rx.try_recv().is_err(), "it was handed to the SDK");
+            assert!(engine.releases().is_empty(), "handed back without a pause");
+
+            shutdown.shutdown();
+            wait_for(|| !engine.releases().is_empty()).await;
+            assert_eq!(
+                engine.releases(),
+                vec![("wf-locked".to_string(), b"act1.locked".to_vec())]
+            );
+            let _ = tokio::time::timeout(Duration::from_secs(5), running).await;
+            assert!(engine.completes().is_empty() && engine.fails().is_empty());
+        }
     }
 }
 

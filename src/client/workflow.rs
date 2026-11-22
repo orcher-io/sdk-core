@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::client::connection::{ClientChannel, Connection};
 use crate::error::{Error, Result};
+use crate::payload::seal::{open, seal};
 use crate::types::{
     ListWorkflowsOptions, SearchWorkflowsOptions, WorkflowExecution, WorkflowExecutionDescription,
     WorkflowIdReusePolicy, WorkflowListPage, WorkflowRetryPolicy, WorkflowStatus,
@@ -231,6 +232,8 @@ pub struct WorkflowClient {
     /// Namespace every operation targets.
     namespace: String,
     timeout: Duration,
+    /// Applied to what is sent and removed from what is received.
+    seal: Option<crate::payload::PayloadSeal>,
 }
 
 impl WorkflowClient {
@@ -246,6 +249,7 @@ impl WorkflowClient {
                 QueryServiceClient::new(connection.authenticated()),
                 max_message_bytes
             ),
+            seal: connection.options().payload_seal.clone(),
             namespace: connection.options().namespace.clone(),
             timeout: Duration::from_secs(180),
         }
@@ -413,7 +417,9 @@ impl WorkflowClient {
                 }
             };
 
-            return result_from_answer(inner);
+            let mut result = result_from_answer(inner)?;
+            open(self.seal.as_ref(), &mut result)?;
+            return Ok(result);
         }
     }
 
@@ -523,7 +529,8 @@ impl WorkflowClient {
     /// batch call, does not re-wrap the input. The handle carries the
     /// caller's `workflow_id`, or the server-assigned one when it is left
     /// empty.
-    async fn start(&self, request: StartWorkflowRequest) -> Result<WorkflowHandle> {
+    async fn start(&self, mut request: StartWorkflowRequest) -> Result<WorkflowHandle> {
+        seal(self.seal.as_ref(), &mut request.input)?;
         let requested_id = request.workflow_id.clone();
         let response = self
             .client
@@ -578,8 +585,12 @@ impl WorkflowClient {
         let batch_request = BatchStartWorkflowRequest {
             workflows: workflows
                 .into_iter()
-                .map(|opts| crate::wire::client::start_request(opts, &self.namespace))
-                .collect(),
+                .map(|opts| {
+                    let mut request = crate::wire::client::start_request(opts, &self.namespace);
+                    seal(self.seal.as_ref(), &mut request.input)?;
+                    Ok(request)
+                })
+                .collect::<Result<_>>()?,
             ..Default::default()
         };
 
@@ -634,6 +645,8 @@ impl WorkflowClient {
         input_bytes: Vec<u8>,
     ) -> Result<()> {
         let workflow_id: String = workflow_id.into();
+        let mut input_bytes = input_bytes;
+        seal(self.seal.as_ref(), &mut input_bytes)?;
         let request = SendEventRequest {
             workflow_id: workflow_id.clone(),
             execution_id: run_id.unwrap_or_default(),
@@ -689,6 +702,8 @@ impl WorkflowClient {
         args_bytes: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let workflow_id: String = workflow_id.into();
+        let mut args_bytes = args_bytes;
+        seal(self.seal.as_ref(), &mut args_bytes)?;
         let request = QueryWorkflowRequest {
             workflow_id: workflow_id.clone(),
             execution_id: run_id.unwrap_or_default(),
@@ -705,7 +720,9 @@ impl WorkflowClient {
             .await
             .map_err(|s| crate::wire::status::for_workflow(s, &workflow_id))?;
 
-        Ok(response.into_inner().result)
+        let mut result = response.into_inner().result;
+        open(self.seal.as_ref(), &mut result)?;
+        Ok(result)
     }
 
     /// Sends an update to a running workflow and waits for its result.
@@ -756,6 +773,8 @@ impl WorkflowClient {
         args_bytes: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let workflow_id: String = workflow_id.into();
+        let mut args_bytes = args_bytes;
+        seal(self.seal.as_ref(), &mut args_bytes)?;
         let request = UpdateWorkflowRequest {
             workflow_id: workflow_id.clone(),
             execution_id: run_id.unwrap_or_default(),
@@ -775,7 +794,10 @@ impl WorkflowClient {
 
         let inner = response.into_inner();
         match inner.outcome {
-            Some(update_workflow_response::Outcome::Result(result_bytes)) => Ok(result_bytes),
+            Some(update_workflow_response::Outcome::Result(mut result_bytes)) => {
+                open(self.seal.as_ref(), &mut result_bytes)?;
+                Ok(result_bytes)
+            }
             Some(update_workflow_response::Outcome::Failure(failure)) => Err(Error::internal(
                 format!("Update rejected: {}", failure.message),
             )),

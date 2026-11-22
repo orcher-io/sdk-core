@@ -309,6 +309,9 @@ pub(crate) struct Caller {
     /// Reported on workflow completions and failures; see
     /// [`crate::worker_protocol`].
     pub(crate) protocol_version: u32,
+    /// Seals the payloads of every report and opens those of every answer;
+    /// none sends and receives them as they are.
+    pub(crate) payload_seal: Option<crate::payload::PayloadSeal>,
 }
 
 impl From<&WorkflowDriverConfig> for Caller {
@@ -319,6 +322,7 @@ impl From<&WorkflowDriverConfig> for Caller {
             api_key: config.api_key.clone(),
             organization_id: config.organization_id.clone(),
             protocol_version: config.protocol_version,
+            payload_seal: config.payload_seal.clone(),
         }
     }
 }
@@ -332,6 +336,7 @@ impl From<&TaskDriverConfig> for Caller {
             organization_id: config.organization_id.clone(),
             // Task and actor reports carry no protocol version.
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
+            payload_seal: config.payload_seal.clone(),
         }
     }
 }
@@ -345,6 +350,7 @@ impl From<&ActorDriverConfig> for Caller {
             organization_id: config.organization_id.clone(),
             // Task and actor reports carry no protocol version.
             protocol_version: crate::WORKER_PROTOCOL_VERSION,
+            payload_seal: config.payload_seal.clone(),
         }
     }
 }
@@ -604,6 +610,25 @@ impl Completer {
         self.channel_manager.max_message_bytes()
     }
 
+    /// What seals this driver's reports and opens their answers, if anything.
+    fn seal(&self) -> Option<&crate::payload::PayloadSeal> {
+        self.caller.payload_seal.as_ref()
+    }
+
+    /// Log that a report was not sent because its payloads could not be
+    /// sealed. It is never sent unsealed instead.
+    fn not_sealed(&self, subject: Subject<'_>, error: &crate::error::Error) {
+        report_event!(
+            error,
+            subject.ids,
+            error = %error,
+            "{} {} not sent: its payloads could not be sealed; {}",
+            subject.kind().title(),
+            subject.what,
+            subject.kind().left_to()
+        );
+    }
+
     /// Send a report and log how it ended.
     pub(crate) async fn send(&self, report: Report) {
         match report {
@@ -723,16 +748,37 @@ impl Completer {
     /// handed out again at its claim timeout, run again, and refused again,
     /// and the workflow never ends. Replay produces the same completion, so
     /// failing the workflow is the only outcome that ends it, and it says why.
+    ///
+    /// The completion's payloads are sealed here, once, before it is
+    /// measured: sealing makes them larger, and the size that counts is the
+    /// one sent. The completion that fails the workflow instead carries no
+    /// payload.
     pub(crate) async fn complete_or_fail_too_large(
         &self,
         workflow_id: &str,
         run_id: &str,
         request: CompleteWorkflowExecutionRequest,
     ) -> Delivery<()> {
-        let size = request.encoded_len();
+        // Named before sealing, by the sizes the workflow's code produced.
         let what = workflow_completion_named(&request);
-        let limit = self.max_message_bytes();
         let template = without_payloads(&request);
+        let mut request = request;
+        if let Err(e) = crate::wire::seal::seal_workflow_completion(self.seal(), &mut request) {
+            self.not_sealed(
+                Subject {
+                    method: "/orcher.v1.ExecutionService/CompleteWorkflowExecution",
+                    what: "completion",
+                    ids: Ids::Workflow {
+                        workflow_id,
+                        run_id,
+                    },
+                },
+                &e,
+            );
+            return Delivery::Abandoned;
+        }
+        let size = request.encoded_len();
+        let limit = self.max_message_bytes();
         if size > limit {
             let reason = too_large_to_send(&what, size, limit);
             tracing::warn!(
@@ -761,6 +807,9 @@ impl Completer {
         }
     }
 
+    /// Send a workflow completion as it is: its payloads are sealed by
+    /// [`complete_or_fail_too_large`](Self::complete_or_fail_too_large),
+    /// which is what calls this.
     pub(crate) async fn complete(
         &self,
         workflow_id: &str,
@@ -802,6 +851,9 @@ impl Completer {
                             "Forwarding eager tasks from workflow completion"
                         );
                         for proto_task in tasks {
+                            let Some(proto_task) = self.open_eager(proto_task).await else {
+                                continue;
+                            };
                             let work = proto_task_to_task_work(
                                 proto_task,
                                 &eager.default_queue,
@@ -828,23 +880,26 @@ impl Completer {
         request: FailWorkflowExecutionRequest,
     ) -> Delivery<()> {
         let max = self.max_message_bytes();
+        let subject = Subject {
+            method: "/orcher.v1.ExecutionService/FailWorkflowExecution",
+            what: "failure report",
+            ids: Ids::Workflow {
+                workflow_id,
+                run_id,
+            },
+        };
+        // Sealed once, here: every attempt below sends this same body.
+        let mut request = request;
+        if let Err(e) = crate::wire::seal::seal_workflow_failure(self.seal(), &mut request) {
+            self.not_sealed(subject, &e);
+            return Delivery::Abandoned;
+        }
         let delivery = self
-            .deliver(
-                Subject {
-                    method: "/orcher.v1.ExecutionService/FailWorkflowExecution",
-                    what: "failure report",
-                    ids: Ids::Workflow {
-                        workflow_id,
-                        run_id,
-                    },
-                },
-                request,
-                move |channel, request| async move {
-                    sized!(ExecutionServiceClient::new(channel), max)
-                        .fail_workflow_execution(request)
-                        .await
-                },
-            )
+            .deliver(subject, request, move |channel, request| async move {
+                sized!(ExecutionServiceClient::new(channel), max)
+                    .fail_workflow_execution(request)
+                    .await
+            })
             .await;
         match delivery {
             Delivery::Delivered(_) => {
@@ -879,13 +934,27 @@ impl Completer {
                 task,
             } => {
                 let max = self.max_message_bytes();
-                let request = CompleteTaskExecutionRequest {
+                let mut request = CompleteTaskExecutionRequest {
                     task_token: token,
                     namespace: self.caller.namespace.clone(),
                     identity: self.caller.identity.clone(),
                     result,
                     ..Default::default()
                 };
+                // Sealed once, here, before the result is measured: sealing
+                // makes it larger, and the size that counts is the one sent.
+                // Every attempt below sends this same body.
+                if let Err(e) = crate::wire::seal::seal_task_completion(self.seal(), &mut request) {
+                    self.not_sealed(
+                        Subject {
+                            method: "/orcher.v1.ExecutionService/CompleteTaskExecution",
+                            what: "completion",
+                            ids: task.ids(),
+                        },
+                        &e,
+                    );
+                    return Delivery::Abandoned;
+                }
                 // A result too large to send fails the task instead, saying
                 // why. Sent anyway, it is refused on every attempt, and the
                 // task waits out its timeout to be run, and refused, again.
@@ -922,6 +991,9 @@ impl Completer {
                     Delivery::Delivered(response) => {
                         report_event!(debug, task.ids(), "Task execution completed");
                         for proto_task in response.eager_tasks {
+                            let Some(proto_task) = self.open_eager(proto_task).await else {
+                                continue;
+                            };
                             let eager = proto_task_to_task_work(
                                 proto_task,
                                 default_queue,
@@ -988,7 +1060,7 @@ impl Completer {
         task: TaskIds,
     ) -> Delivery<()> {
         let max = self.max_message_bytes();
-        let request = FailTaskExecutionRequest {
+        let mut request = FailTaskExecutionRequest {
             task_token: token,
             namespace: self.caller.namespace.clone(),
             identity: self.caller.identity.clone(),
@@ -1004,20 +1076,22 @@ impl Completer {
             }),
             ..Default::default()
         };
+        let subject = Subject {
+            method: "/orcher.v1.ExecutionService/FailTaskExecution",
+            what: "failure report",
+            ids: task.ids(),
+        };
+        // Sealed once, here: every attempt below sends this same body.
+        if let Err(e) = crate::wire::seal::seal_task_failure(self.seal(), &mut request) {
+            self.not_sealed(subject, &e);
+            return Delivery::Abandoned;
+        }
         let delivery = self
-            .deliver(
-                Subject {
-                    method: "/orcher.v1.ExecutionService/FailTaskExecution",
-                    what: "failure report",
-                    ids: task.ids(),
-                },
-                request,
-                move |channel, request| async move {
-                    sized!(ExecutionServiceClient::new(channel), max)
-                        .fail_task_execution(request)
-                        .await
-                },
-            )
+            .deliver(subject, request, move |channel, request| async move {
+                sized!(ExecutionServiceClient::new(channel), max)
+                    .fail_task_execution(request)
+                    .await
+            })
             .await;
         match delivery {
             Delivery::Delivered(_) => {
@@ -1027,6 +1101,39 @@ impl Completer {
             Delivery::Declined(code) => Delivery::Declined(code),
             Delivery::Abandoned => Delivery::Abandoned,
         }
+    }
+
+    /// A task the engine handed over with an answer, its input opened.
+    /// `None` when the input cannot be opened, after failing the attempt with
+    /// the reason, as a poller does with a task it polled.
+    async fn open_eager(
+        &self,
+        mut task: orcher_proto::orcher::v1::PollTaskExecutionResponse,
+    ) -> Option<orcher_proto::orcher::v1::PollTaskExecutionResponse> {
+        let Err(e) = crate::wire::seal::open_task(self.seal(), &mut task) else {
+            return Some(task);
+        };
+        let ids = TaskIds {
+            task_id: task.task_id,
+            workflow_id: task.workflow_id,
+        };
+        report_event!(
+            error,
+            ids.ids(),
+            task_type = %task.task_type,
+            error = %e,
+            "Task input cannot be opened by this worker, so the task is not run; failing this \
+             attempt. Give this worker the payload codec and key the input was written with"
+        );
+        self.send_task_fail(
+            task.task_token,
+            format!("The task's input could not be opened: {e}"),
+            crate::wire::seal::PAYLOAD_UNREADABLE.to_string(),
+            false,
+            ids,
+        )
+        .await;
+        None
     }
 
     /// Send an actor operation's outcome, retrying it with the same body.
@@ -1047,20 +1154,23 @@ impl Completer {
         } else {
             "failure report"
         };
+        let subject = Subject {
+            method: "/orcher.v1.ActorService/CompleteActorOperation",
+            what,
+            ids,
+        };
+        // Sealed once, here: every attempt below sends this same body.
+        let mut request = request;
+        if let Err(e) = crate::wire::seal::seal_actor_completion(self.seal(), &mut request) {
+            self.not_sealed(subject, &e);
+            return Delivery::Abandoned;
+        }
         let delivery = self
-            .deliver(
-                Subject {
-                    method: "/orcher.v1.ActorService/CompleteActorOperation",
-                    what,
-                    ids,
-                },
-                request,
-                move |channel, request| async move {
-                    sized!(ActorServiceClient::new(channel), max)
-                        .complete_actor_operation(request)
-                        .await
-                },
-            )
+            .deliver(subject, request, move |channel, request| async move {
+                sized!(ActorServiceClient::new(channel), max)
+                    .complete_actor_operation(request)
+                    .await
+            })
             .await;
         match delivery {
             Delivery::Delivered(response) if response.success => {
