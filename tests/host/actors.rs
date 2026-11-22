@@ -223,6 +223,54 @@ async fn actor_state_round_trips_through_the_host() {
     host.shutdown().await;
 }
 
+/// With a payload seal, the engine is given a state value sealed, and the
+/// host reads it back as it was written.
+#[tokio::test]
+async fn actor_state_is_stored_sealed_and_read_back_plain() {
+    use orcher_sdk_core::payload::codec::{CodecChain, EncryptionPayloadCodec};
+    use orcher_sdk_core::payload::PayloadSeal;
+    let seal =
+        || PayloadSeal::new(CodecChain::new().with_codec(EncryptionPayloadCodec::new(&[7; 32])));
+
+    let engine = Engine::default();
+    let addr = engine.serve().await;
+    let host = Host::start(
+        HostConfig::new(
+            orcher_sdk_core::ConnectOptions::new(format!("http://{addr}"))
+                .with_payload_seal(seal()),
+            "orders",
+        )
+        .with_shutdown_grace(std::time::Duration::from_millis(300)),
+        handlers(),
+    )
+    .await
+    .unwrap();
+    let scope = StateScope::new("Cart", "user-7", "op-1-exec");
+    let value = br#"{"items":["secret-item"]}"#;
+
+    host.set_actor_state(&scope, "items", value.to_vec(), None)
+        .await
+        .unwrap();
+    let stored = engine
+        .script()
+        .actor_state
+        .values()
+        .next()
+        .map(|(stored, _)| stored.clone())
+        .unwrap();
+    assert_ne!(stored, value);
+    assert!(!String::from_utf8_lossy(&stored).contains("secret-item"));
+    assert_eq!(seal().open(&stored).unwrap().as_deref(), Some(&value[..]));
+
+    let read = host
+        .get_actor_state(&scope, "items")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.value, value);
+    host.shutdown().await;
+}
+
 /// Every call to the actor service carries the worker's API key and
 /// organization: the registration, the driver's polls and completions, and
 /// the state calls.

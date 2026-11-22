@@ -21,6 +21,16 @@ const ACTIVATION_CLAIM: Duration = Duration::from_secs(300);
 /// The most items one poll asks for, however many credits are free: the
 /// engine caps a poll at this too.
 const MAX_ITEMS_PER_POLL: usize = 16;
+
+/// How long an activation whose payloads this worker cannot open is held
+/// before it is handed back. Handed back at once, it would be offered to the
+/// next poll straight away and refused the same way, as fast as the worker
+/// could poll.
+const UNREADABLE_ACTIVATION_HOLD: Duration = Duration::from_secs(10);
+
+/// How long the one call that refuses a task or actor operation this worker
+/// cannot open may take.
+const REFUSAL_TIMEOUT: Duration = Duration::from_secs(5);
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -129,6 +139,10 @@ pub struct PollerConfig {
     /// pollers only.
     pub history_cache_bytes: usize,
 
+    /// Opens every payload the poller receives; see
+    /// [`ConnectOptions::payload_seal`](crate::ConnectOptions::payload_seal).
+    /// `None` (the default) hands payloads on as they arrive.
+    pub payload_seal: Option<crate::payload::PayloadSeal>,
     /// Where this poller's calls are recorded: the worker's wire
     /// measurements, shared with its other connections.
     pub wire: Arc<crate::observability::WireMetrics>,
@@ -153,6 +167,7 @@ impl std::fmt::Debug for PollerConfig {
             auto_heartbeat,
             max_message_bytes,
             history_cache_bytes,
+            payload_seal,
             wire: _,
         } = self;
         f.debug_struct("PollerConfig")
@@ -170,6 +185,7 @@ impl std::fmt::Debug for PollerConfig {
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
             .field("history_cache_bytes", history_cache_bytes)
+            .field("payload_seal", payload_seal)
             .finish()
     }
 }
@@ -195,6 +211,7 @@ impl Default for PollerConfig {
             auto_heartbeat: false,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             history_cache_bytes: crate::wire::history::DEFAULT_HISTORY_CACHE_BYTES,
+            payload_seal: None,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -1001,14 +1018,23 @@ impl WorkflowExecutionPoller {
         Ok(Some(task))
     }
 
-    /// The activation `response` as the task the driver runs: carrying its
-    /// run's whole journal, joined from the entries the process holds when it
-    /// carries only the new ones. `None` when those are not held, after
-    /// handing it back so the engine sends the whole journal next time.
+    /// The activation `response` as the task the driver runs: its payloads
+    /// opened, and carrying its run's whole journal, joined from the entries
+    /// the process holds when it carries only the new ones. `None` when those
+    /// are not held, after handing it back so the engine sends the whole
+    /// journal next time, and `None` when a payload cannot be opened.
     async fn accept(
         &self,
         mut response: orcher_proto::orcher::v1::PollWorkflowExecutionResponse,
     ) -> Option<WorkflowExecutionTask> {
+        // Opened before the join, so each entry is opened once: the entries
+        // the process holds were opened when they arrived.
+        if let Err(error) =
+            crate::wire::seal::open_activation(self.config.payload_seal.as_ref(), &mut response)
+        {
+            self.hand_back_unreadable(response, &error);
+            return None;
+        }
         let joined = match self.histories {
             Some(histories) => histories.join(&mut response),
             // Keeping nothing, this poller said so: every activation carries
@@ -1039,6 +1065,70 @@ impl WorkflowExecutionPoller {
         }
         crate::worker::record::activation(&response);
         Some(WorkflowExecutionTask::from(response))
+    }
+
+    /// Say that `response` carries a payload this worker cannot open, and
+    /// hand it back to the engine after a pause, or at once when the worker
+    /// stops.
+    ///
+    /// The activation is not run and nothing is recorded against the run: a
+    /// worker with the right codec carries it on. Failing the run instead
+    /// would let one worker with the wrong key end runs the others can read.
+    fn hand_back_unreadable(
+        &self,
+        response: orcher_proto::orcher::v1::PollWorkflowExecutionResponse,
+        error: &Error,
+    ) {
+        let named = match response.client_workflow_id.as_str() {
+            "" => response.workflow_id.as_str(),
+            id => id,
+        };
+        tracing::error!(
+            task_queue = %self.config.task_queue,
+            workflow_id = %named,
+            run_id = %response.execution_id,
+            workflow_type = %response.workflow_type,
+            error = %error,
+            retry_in_ms = UNREADABLE_ACTIVATION_HOLD.as_millis() as u64,
+            "Workflow activation carries a payload this worker cannot open, so it is not run; \
+             the run stays open and the activation is handed back to the engine to be tried \
+             again. Give this worker the payload codec and key the run's payloads were written \
+             with"
+        );
+        let leftover = crate::worker::lifecycle::Leftover {
+            token: crate::worker::poll::completion::activation_token(
+                response.stream_entry_id.clone().into_bytes(),
+                Some(response.stream_entry_id.as_str()).filter(|t| !t.is_empty()),
+            ),
+            workflow_id: response.workflow_id,
+            run_id: response.execution_id,
+            retried: true,
+            history_missing: false,
+        };
+        let client = self.client.clone();
+        let config = Arc::clone(&self.config);
+        let mut shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(UNREADABLE_ACTIVATION_HOLD) => {}
+                _ = async {
+                    // A dropped sender is not a request to stop; see `pause`.
+                    if shutdown.wait_for(|stop| *stop).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+            }
+            crate::worker::lifecycle::release_on(
+                client,
+                &config.namespace,
+                &config.identity,
+                config.api_key.as_deref(),
+                config.organization_id.as_deref(),
+                leftover,
+                crate::worker::lifecycle::SHUTDOWN_NOTICE_TIMEOUT,
+            )
+            .await;
+        });
     }
 }
 
@@ -1536,13 +1626,14 @@ impl TaskExecutionPoller {
                     .map_err(|_elapsed| Error::timeout("poll task executions - tokio timeout"))?;
             match answer {
                 Ok(response) => {
-                    return Ok(response
-                        .into_inner()
-                        .tasks
-                        .into_iter()
-                        .filter(|task| !task.task_id.is_empty())
-                        .map(TaskExecutionTask::from)
-                        .collect());
+                    let mut tasks = Vec::new();
+                    for task in response.into_inner().tasks {
+                        if task.task_id.is_empty() {
+                            continue;
+                        }
+                        tasks.extend(self.accept(task).await);
+                    }
+                    return Ok(tasks);
                 }
                 Err(e) if e.code() == tonic::Code::Unimplemented => {
                     tracing::info!(
@@ -1643,7 +1734,68 @@ impl TaskExecutionPoller {
             "Received task execution"
         );
 
-        Ok(Some(TaskExecutionTask::from(poll_response)))
+        Ok(self.accept(poll_response).await)
+    }
+
+    /// The polled `task` as the driver runs it, its input opened. `None`
+    /// when the input cannot be opened, after failing the attempt with the
+    /// reason: a task has no call that hands it back, and left unanswered it
+    /// would wait out its timeout with nothing said. The failure is one a
+    /// retry policy may retry, since another worker may hold the key.
+    async fn accept(
+        &mut self,
+        mut task: orcher_proto::orcher::v1::PollTaskExecutionResponse,
+    ) -> Option<TaskExecutionTask> {
+        let Err(error) = crate::wire::seal::open_task(self.config.payload_seal.as_ref(), &mut task)
+        else {
+            return Some(TaskExecutionTask::from(task));
+        };
+        tracing::error!(
+            task_queue = %self.config.task_queue,
+            task_id = %task.task_id,
+            task_type = %task.task_type,
+            workflow_id = %task.workflow_id,
+            error = %error,
+            "Task input cannot be opened by this worker, so the task is not run; failing this \
+             attempt. Give this worker the payload codec and key the input was written with"
+        );
+        let mut request = crate::transport::credentials::credentialed_request(
+            orcher_proto::orcher::v1::FailTaskExecutionRequest {
+                task_token: task.task_token,
+                namespace: self.config.namespace.clone(),
+                identity: self.config.identity.clone(),
+                failure: Some(orcher_proto::orcher::v1::Failure {
+                    message: format!("The task's input could not be opened: {error}"),
+                    source: "TaskDriver".to_string(),
+                    failure_type: crate::wire::seal::PAYLOAD_UNREADABLE.to_string(),
+                    non_retryable: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            self.config.api_key.as_deref(),
+            self.config.organization_id.as_deref(),
+        );
+        request.set_timeout(REFUSAL_TIMEOUT);
+        match tokio::time::timeout(REFUSAL_TIMEOUT, self.client.fail_task_execution(request)).await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(status)) => tracing::warn!(
+                task_id = %task.task_id,
+                workflow_id = %task.workflow_id,
+                code = ?status.code(),
+                error = %status.message(),
+                "Could not fail the task whose input cannot be opened; it waits out its \
+                 start-to-close timeout"
+            ),
+            Err(_) => tracing::warn!(
+                task_id = %task.task_id,
+                workflow_id = %task.workflow_id,
+                "The engine did not answer in time when failing the task whose input cannot \
+                 be opened; it waits out its start-to-close timeout"
+            ),
+        }
+        None
     }
 }
 
@@ -1699,6 +1851,10 @@ pub struct ActorPollerConfig {
     /// `PollerConfig::max_message_bytes`.
     pub max_message_bytes: usize,
 
+    /// Opens every payload the poller receives; see
+    /// [`ConnectOptions::payload_seal`](crate::ConnectOptions::payload_seal).
+    /// `None` (the default) hands payloads on as they arrive.
+    pub payload_seal: Option<crate::payload::PayloadSeal>,
     /// Where this poller's calls are recorded: the worker's wire
     /// measurements, shared with its other connections.
     pub wire: Arc<crate::observability::WireMetrics>,
@@ -1718,6 +1874,7 @@ impl std::fmt::Debug for ActorPollerConfig {
             tls_config,
             connect_timeout,
             max_message_bytes,
+            payload_seal,
             wire: _,
         } = self;
         f.debug_struct("ActorPollerConfig")
@@ -1730,6 +1887,7 @@ impl std::fmt::Debug for ActorPollerConfig {
             .field("tls_config", tls_config)
             .field("connect_timeout", connect_timeout)
             .field("max_message_bytes", max_message_bytes)
+            .field("payload_seal", payload_seal)
             .finish()
     }
 }
@@ -1746,6 +1904,7 @@ impl Default for ActorPollerConfig {
             tls_config: None,
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            payload_seal: None,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -2105,7 +2264,70 @@ impl ActorOperationPoller {
             "Polled actor operations"
         );
 
-        Ok(poll_response.operations)
+        let mut operations = Vec::with_capacity(poll_response.operations.len());
+        for operation in poll_response.operations {
+            operations.extend(self.accept(operation).await);
+        }
+        Ok(operations)
+    }
+
+    /// The polled `operation` with its payload opened. `None` when the
+    /// payload cannot be opened, after answering the operation with the
+    /// reason, so its caller is told rather than left to time out.
+    async fn accept(&mut self, mut operation: ActorOperation) -> Option<ActorOperation> {
+        let Err(error) = crate::wire::seal::open_actor_operation(
+            self.config.payload_seal.as_ref(),
+            &mut operation,
+        ) else {
+            return Some(operation);
+        };
+        tracing::error!(
+            operation_id = %operation.operation_id,
+            execution_id = %operation.execution_id,
+            actor_name = %operation.actor_name,
+            operation = %operation.operation,
+            error = %error,
+            "Actor operation payload cannot be opened by this worker, so the operation is not \
+             run; answering it with the error. Give this worker the payload codec and key the \
+             payload was written with"
+        );
+        let mut request = crate::transport::credentials::credentialed_request(
+            orcher_proto::orcher::v1::CompleteActorOperationRequest {
+                service_id: self.config.service_id.clone(),
+                operation_id: operation.operation_id.clone(),
+                execution_id: operation.execution_id.clone(),
+                status: orcher_proto::orcher::v1::ExecutionStatus::Error as i32,
+                error_message: format!("The operation's payload could not be opened: {error}"),
+                error_code: crate::wire::seal::PAYLOAD_UNREADABLE.to_string(),
+                ..Default::default()
+            },
+            self.config.api_key.as_deref(),
+            self.config.organization_id.as_deref(),
+        );
+        request.set_timeout(REFUSAL_TIMEOUT);
+        match tokio::time::timeout(
+            REFUSAL_TIMEOUT,
+            self.client.complete_actor_operation(request),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(status)) => tracing::warn!(
+                operation_id = %operation.operation_id,
+                execution_id = %operation.execution_id,
+                code = ?status.code(),
+                error = %status.message(),
+                "Could not answer the actor operation whose payload cannot be opened; it is \
+                 left to the engine's own timeout"
+            ),
+            Err(_) => tracing::warn!(
+                operation_id = %operation.operation_id,
+                execution_id = %operation.execution_id,
+                "The engine did not answer in time when answering the actor operation whose \
+                 payload cannot be opened; it is left to the engine's own timeout"
+            ),
+        }
+        None
     }
 }
 
@@ -2172,6 +2394,7 @@ mod tests {
             auto_heartbeat: false,
             max_message_bytes: 1024,
             history_cache_bytes: 0,
+            payload_seal: None,
             wire: crate::observability::WireMetrics::new(),
         };
 

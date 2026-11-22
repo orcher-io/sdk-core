@@ -124,7 +124,15 @@ use rand::Rng;
 #[derive(Clone)]
 pub struct EncryptionPayloadCodec {
     cipher: Aes256Gcm,
+    /// The name written beside what this codec encrypts, so that a reader
+    /// holding several keys knows which one to use.
+    key_id: Option<String>,
+    /// Keys kept for reading what was encrypted before a rotation, by id.
+    retired: Vec<(String, Aes256Gcm)>,
 }
+
+/// The metadata field naming the key a payload was encrypted with.
+pub const KEY_ID_METADATA: &str = "encryption-key-id";
 
 impl EncryptionPayloadCodec {
     /// Creates a codec from a 32-byte (256-bit) key.
@@ -148,7 +156,48 @@ impl EncryptionPayloadCodec {
     /// hardcoded, rotated periodically, and never logged or sent in the clear.
     pub fn new(key: &[u8; 32]) -> Self {
         let cipher = Aes256Gcm::new(key.into());
-        Self { cipher }
+        Self {
+            cipher,
+            key_id: None,
+            retired: Vec::new(),
+        }
+    }
+
+    /// Names this codec's key. The name is stored, unencrypted, beside every
+    /// payload it encrypts, and is what makes rotating keys possible later:
+    /// a reader holding several keys picks the one a payload names.
+    ///
+    /// The name identifies the key; it must not be derived from it.
+    pub fn with_key_id(mut self, key_id: impl Into<String>) -> Self {
+        self.key_id = Some(key_id.into());
+        self
+    }
+
+    /// Adds a key used only for reading: payloads that name `key_id` are
+    /// decrypted with it, and nothing is encrypted with it. This is how a
+    /// rotated-out key keeps old payloads readable.
+    pub fn with_decryption_key(mut self, key_id: impl Into<String>, key: &[u8; 32]) -> Self {
+        self.retired
+            .push((key_id.into(), Aes256Gcm::new(key.into())));
+        self
+    }
+
+    /// The cipher for a payload that names `key_id`, or names no key.
+    fn cipher_for(&self, key_id: Option<&str>) -> Result<&Aes256Gcm> {
+        match key_id {
+            None => Ok(&self.cipher),
+            Some(id) if self.key_id.as_deref() == Some(id) => Ok(&self.cipher),
+            Some(id) => self
+                .retired
+                .iter()
+                .find(|(retired, _)| retired == id)
+                .map(|(_, cipher)| cipher)
+                .ok_or_else(|| {
+                    Error::codec(format!(
+                        "payload was encrypted with key `{id}`, which this codec does not hold"
+                    ))
+                }),
+        }
     }
 
     /// Creates a codec from a key held in a byte slice.
@@ -206,6 +255,8 @@ impl std::fmt::Debug for EncryptionPayloadCodec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptionPayloadCodec")
             .field("cipher", &"<redacted>")
+            .field("key_id", &self.key_id)
+            .field("decryption_keys", &self.retired.len())
             .finish()
     }
 }
@@ -242,6 +293,9 @@ impl PayloadCodec for EncryptionPayloadCodec {
             "binary/encrypted".to_string()
         };
         encoded.set_metadata_string("encoding", &new_encoding);
+        if let Some(key_id) = &self.key_id {
+            encoded.set_metadata_string(KEY_ID_METADATA, key_id);
+        }
 
         Ok(encoded)
     }
@@ -268,7 +322,9 @@ impl PayloadCodec for EncryptionPayloadCodec {
 
         // Fails unless the authentication tag verifies, so tampered data is
         // never returned.
-        let plaintext = self.cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        let key_id = payload.get_metadata_string(KEY_ID_METADATA);
+        let cipher = self.cipher_for(key_id.as_deref())?;
+        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
             Error::codec(format!(
                 "AES-GCM decryption failed: {}. Data may be corrupted or tampered with.",
                 e
@@ -276,6 +332,7 @@ impl PayloadCodec for EncryptionPayloadCodec {
         })?;
 
         let mut decoded = Payload::new(plaintext, payload.metadata.clone());
+        decoded.remove_metadata(KEY_ID_METADATA);
 
         // Undo the encoding change made by `encode`.
         let original_encoding = if encoding == "binary/encrypted" {
@@ -534,5 +591,45 @@ mod tests {
         let result = codec.decode(&invalid);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("too short"));
+    }
+
+    #[test]
+    fn a_named_key_is_written_beside_the_payload_and_removed_on_decode() {
+        let codec = EncryptionPayloadCodec::new(&[7u8; 32]).with_key_id("2026-11");
+        let encoded = codec.encode(&Payload::json(b"{}".to_vec())).unwrap();
+        assert_eq!(
+            encoded.get_metadata_string(KEY_ID_METADATA).as_deref(),
+            Some("2026-11")
+        );
+        let decoded = codec.decode(&encoded).unwrap();
+        assert_eq!(decoded.data, b"{}");
+        assert_eq!(decoded.get_metadata_string(KEY_ID_METADATA), None);
+    }
+
+    #[test]
+    fn a_rotated_out_key_still_reads_what_it_encrypted() {
+        let old = EncryptionPayloadCodec::new(&[1u8; 32]).with_key_id("old");
+        let encoded = old.encode(&Payload::json(b"secret".to_vec())).unwrap();
+
+        let rotated = EncryptionPayloadCodec::new(&[2u8; 32])
+            .with_key_id("new")
+            .with_decryption_key("old", &[1u8; 32]);
+        assert_eq!(rotated.decode(&encoded).unwrap().data, b"secret");
+        // And writes with the new key only.
+        let rewritten = rotated.encode(&Payload::json(b"secret".to_vec())).unwrap();
+        assert_eq!(
+            rewritten.get_metadata_string(KEY_ID_METADATA).as_deref(),
+            Some("new")
+        );
+        assert!(old.decode(&rewritten).is_err());
+    }
+
+    #[test]
+    fn a_payload_naming_a_key_the_codec_lacks_is_refused_by_name() {
+        let other = EncryptionPayloadCodec::new(&[1u8; 32]).with_key_id("theirs");
+        let encoded = other.encode(&Payload::json(b"x".to_vec())).unwrap();
+        let mine = EncryptionPayloadCodec::new(&[1u8; 32]).with_key_id("mine");
+        let error = mine.decode(&encoded).unwrap_err().to_string();
+        assert!(error.contains("`theirs`"), "{error}");
     }
 }

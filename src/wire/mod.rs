@@ -11,4 +11,5 @@ pub(crate) mod client_protocol;
 pub(crate) mod engine;
 pub(crate) mod history;
 pub(crate) mod host;
+pub(crate) mod seal;
 pub(crate) mod status;

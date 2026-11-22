@@ -50,6 +50,12 @@ pub struct ConnectOptions {
     /// `ORCHER_MAX_MESSAGE_BYTES`, or 32 MiB, the engine's default, unless
     /// set.
     pub max_message_bytes: usize,
+    /// Applied to every payload sent to the engine and removed from every
+    /// payload received: with it the engine stores what the chain produced
+    /// (ciphertext, for an encrypting chain) and never the value. Clients and
+    /// workers that exchange payloads must be given the same seal. `None`
+    /// sends payloads as they are.
+    pub payload_seal: Option<crate::payload::PayloadSeal>,
 }
 
 impl ConnectOptions {
@@ -64,6 +70,7 @@ impl ConnectOptions {
             tls: None,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            payload_seal: None,
         }
     }
 
@@ -100,6 +107,13 @@ impl ConnectOptions {
     /// Sends and receives messages of up to `max_message_bytes`.
     pub fn with_max_message_bytes(mut self, max_message_bytes: usize) -> Self {
         self.max_message_bytes = max_message_bytes;
+        self
+    }
+
+    /// Seals every payload sent to the engine with `seal`, and opens every
+    /// payload received. See [`ConnectOptions::payload_seal`].
+    pub fn with_payload_seal(mut self, seal: crate::payload::PayloadSeal) -> Self {
+        self.payload_seal = Some(seal);
         self
     }
 
@@ -142,6 +156,7 @@ impl std::fmt::Debug for ConnectOptions {
             tls,
             connect_timeout,
             max_message_bytes,
+            payload_seal,
         } = self;
         f.debug_struct("ConnectOptions")
             .field("url", url)
@@ -151,6 +166,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("tls", tls)
             .field("connect_timeout", connect_timeout)
             .field("max_message_bytes", max_message_bytes)
+            .field("payload_seal", payload_seal)
             .finish()
     }
 }

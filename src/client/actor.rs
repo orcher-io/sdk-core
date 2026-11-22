@@ -17,6 +17,8 @@ use orcher_proto::orcher::v1::{
 #[derive(Clone)]
 pub struct ActorClient {
     client: ActorServiceClient<ClientChannel>,
+    /// Applied to what is sent and removed from what is received.
+    seal: Option<crate::payload::PayloadSeal>,
 }
 
 impl ActorClient {
@@ -29,6 +31,7 @@ impl ActorClient {
                 ActorServiceClient::new(connection.authenticated()),
                 connection.options().max_message_bytes
             ),
+            seal: connection.options().payload_seal.clone(),
         }
     }
 
@@ -64,6 +67,8 @@ impl ActorClient {
         timeout_ms: Option<u64>,
         idempotency_key: Option<String>,
     ) -> Result<Vec<u8>> {
+        let mut payload = payload;
+        crate::payload::seal::seal(self.seal.as_ref(), &mut payload)?;
         let request = InvokeOperationRequest {
             actor_name: actor_name.clone(),
             key: key.clone(),
@@ -84,7 +89,11 @@ impl ActorClient {
             .into_inner();
 
         match ExecutionStatus::try_from(response.status) {
-            Ok(ExecutionStatus::Success) => Ok(response.result),
+            Ok(ExecutionStatus::Success) => {
+                let mut result = response.result;
+                crate::payload::seal::open(self.seal.as_ref(), &mut result)?;
+                Ok(result)
+            }
             Ok(ExecutionStatus::Error) => Err(Error::WorkflowExecutionFailed {
                 message: format!(
                     "Actor operation {}.{} on key '{}' failed: {} (code: {})",

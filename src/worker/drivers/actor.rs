@@ -97,6 +97,11 @@ pub struct ActorDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+    /// Seals every payload the driver sends to the engine and opens every
+    /// payload it receives; see
+    /// [`ConnectOptions::payload_seal`](crate::ConnectOptions::payload_seal).
+    /// `None` (the default) sends and receives payloads as they are.
+    pub payload_seal: Option<crate::payload::PayloadSeal>,
     /// Where this driver's calls to the engine are recorded: the worker's
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
@@ -123,6 +128,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             tls_config,
             connect_timeout,
             max_message_bytes,
+            payload_seal,
             wire: _,
         } = self;
         f.debug_struct("ActorDriverConfig")
@@ -141,6 +147,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             .field("tls_config", tls_config)
             .field("connect_timeout", connect_timeout)
             .field("max_message_bytes", max_message_bytes)
+            .field("payload_seal", payload_seal)
             .finish()
     }
 }
@@ -163,6 +170,7 @@ impl Default for ActorDriverConfig {
             tls_config: None,
             connect_timeout: crate::client::connection::DEFAULT_CONNECT_TIMEOUT,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            payload_seal: None,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -299,6 +307,7 @@ impl ActorDriver {
                 tls_config: config.tls_config.clone(),
                 connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
+                payload_seal: config.payload_seal.clone(),
                 wire: std::sync::Arc::clone(&config.wire),
             };
 

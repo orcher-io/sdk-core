@@ -102,6 +102,8 @@ pub(crate) struct ActorService {
     client: ActorServiceClient<crate::transport::instrument::WireChannel>,
     api_key: Option<String>,
     organization_id: Option<String>,
+    /// Applied to state values written and removed from those read.
+    seal: Option<crate::payload::PayloadSeal>,
 }
 
 impl ActorService {
@@ -123,6 +125,7 @@ impl ActorService {
                 .max_encoding_message_size(max),
             api_key: config.connection.api_key.clone(),
             organization_id: config.connection.organization_id.clone(),
+            seal: config.connection.payload_seal.clone(),
         })
     }
 
@@ -180,7 +183,7 @@ impl ActorService {
         scope: &StateScope,
         state_key: &str,
     ) -> Result<Option<StateValue>> {
-        let response = self
+        let mut response = self
             .client
             .clone()
             .get_state(self.request(GetStateRequest {
@@ -193,6 +196,7 @@ impl ActorService {
             .await
             .map_err(crate::wire::status::error)?
             .into_inner();
+        crate::wire::seal::open_state(self.seal.as_ref(), &mut response)?;
         Ok(response.exists.then_some(StateValue {
             value: response.value,
             version: response.version,
@@ -206,18 +210,20 @@ impl ActorService {
         value: Vec<u8>,
         expected_version: Option<&str>,
     ) -> Result<String> {
+        let mut request = SetStateRequest {
+            actor_name: scope.actor_name.clone(),
+            key: scope.key.clone(),
+            state_key: state_key.to_string(),
+            value,
+            execution_id: scope.execution_id.clone(),
+            expected_version: expected_version.unwrap_or_default().to_string(),
+            ..Default::default()
+        };
+        crate::wire::seal::seal_state(self.seal.as_ref(), &mut request)?;
         let response = self
             .client
             .clone()
-            .set_state(self.request(SetStateRequest {
-                actor_name: scope.actor_name.clone(),
-                key: scope.key.clone(),
-                state_key: state_key.to_string(),
-                value,
-                execution_id: scope.execution_id.clone(),
-                expected_version: expected_version.unwrap_or_default().to_string(),
-                ..Default::default()
-            }))
+            .set_state(self.request(request))
             .await
             .map_err(crate::wire::status::error)?
             .into_inner();

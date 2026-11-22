@@ -42,6 +42,8 @@ struct Script {
     always: Option<Code>,
     /// Tokens of the task completions that arrived, in order.
     completes: Vec<Vec<u8>>,
+    /// The result each task completion carried, in the order of `completes`.
+    results: Vec<Vec<u8>>,
     /// Tokens of the task failure reports that arrived, in order.
     fails: Vec<Vec<u8>>,
     /// The failures those reports carried, in the same order.
@@ -301,10 +303,12 @@ impl ExecutionService for Engine {
         &self,
         request: Request<CompleteTaskExecutionRequest>,
     ) -> std::result::Result<Response<CompleteTaskExecutionResponse>, Status> {
-        let token = request.into_inner().task_token;
+        let request = request.into_inner();
+        let token = request.task_token;
         let wait = {
             let mut script = self.script();
             script.completes.push(token.clone());
+            script.results.push(request.result);
             match &script.slow {
                 Some((slow, gate)) if *slow == token => Some(Arc::clone(gate)),
                 _ => script.gate.clone(),
@@ -2349,4 +2353,251 @@ async fn heartbeats_due_together_go_in_one_call() {
     }
     handle.shutdown();
     stops_within(running, GRACE + MARGIN).await;
+}
+
+/// Drivers given a payload seal: tasks and actor operations reach the
+/// language SDK opened, results and heartbeat details reach the engine
+/// sealed, once however often they are sent, and work this worker cannot
+/// open is refused with the reason instead of being run.
+mod sealed {
+    use super::*;
+    use crate::payload::codec::{CodecChain, EncryptionPayloadCodec};
+    use crate::payload::PayloadSeal;
+
+    const INPUT: &[u8] = br#"{"card":"4242-secret-in"}"#;
+    const RESULT: &[u8] = br#"{"receipt":"secret-out"}"#;
+    const PROGRESS: &[u8] = br#"{"page":"secret-progress"}"#;
+
+    fn seal(key: u8) -> PayloadSeal {
+        PayloadSeal::new(CodecChain::new().with_codec(EncryptionPayloadCodec::new(&[key; 32])))
+    }
+
+    fn sealed_task(task_id: &str, token: &str, key: u8) -> PollTaskExecutionResponse {
+        PollTaskExecutionResponse {
+            input: seal(key).seal(INPUT).unwrap(),
+            ..heartbeating_task(task_id, token, 1500)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_driver_opens_what_it_polls_and_seals_what_it_reports() {
+        let engine = Engine::default();
+        {
+            let mut script = engine.script();
+            script.tasks.push_back(sealed_task("t-1", "tok-1", 1));
+            script.answers = VecDeque::from([Code::Unavailable]);
+        }
+        let mut parts = task_driver(
+            &engine,
+            TaskDriverConfig {
+                payload_seal: Some(seal(1)),
+                ..TaskDriverConfig::default()
+            },
+        )
+        .await;
+        let handle = parts.driver.shutdown_handle();
+        let mut driver = parts.driver;
+        let running = tokio::spawn(async move { driver.run().await });
+
+        let work = next_work(&mut parts.work_rx).await;
+        assert_eq!(work.task.input, INPUT);
+
+        work.heartbeat.record(Some(PROGRESS.to_vec()));
+        let with_details = || {
+            engine
+                .heartbeats("tok-1")
+                .into_iter()
+                .map(|(_, details)| details)
+                .find(|details| !details.is_empty())
+        };
+        wait_for(|| with_details().is_some()).await;
+        let details = with_details().unwrap();
+        assert_ne!(details, PROGRESS);
+        assert_eq!(seal(1).open(&details).unwrap().as_deref(), Some(PROGRESS));
+
+        parts
+            .result_tx
+            .send(TaskWorkResult {
+                task_token: work.task.task_token.clone(),
+                result: Ok(RESULT.to_vec()),
+            })
+            .await
+            .unwrap();
+        wait_for(|| engine.completes().len() >= 2).await;
+        let results = engine.script().results.clone();
+        assert_eq!(results.len(), 2, "refused once, then taken");
+        assert_eq!(results[0], results[1], "sealed again for the retry");
+        assert_ne!(results[0], RESULT);
+        assert_eq!(seal(1).open(&results[0]).unwrap().as_deref(), Some(RESULT));
+
+        handle.shutdown();
+        stops_within(running, GRACE + MARGIN).await;
+    }
+
+    /// Polled one at a time or several, a task whose input this worker
+    /// cannot open is failed with the reason, retryably, and the tasks after
+    /// it are run.
+    #[tokio::test]
+    async fn a_task_the_worker_cannot_open_is_failed_and_not_run() {
+        for (workers, batches, says) in [
+            (Some(seal(2)), false, "decryption failed"),
+            (Some(seal(2)), true, "decryption failed"),
+            (None, false, "no payload codec is configured"),
+        ] {
+            let engine = Engine::default();
+            {
+                let mut script = engine.script();
+                script.serves_batches = batches;
+                script
+                    .tasks
+                    .push_back(sealed_task("t-locked", "tok-locked", 1));
+                script.tasks.push_back(task("t-plain", "tok-plain"));
+            }
+            let mut parts = task_driver(
+                &engine,
+                TaskDriverConfig {
+                    payload_seal: workers,
+                    ..TaskDriverConfig::default()
+                },
+            )
+            .await;
+            let handle = parts.driver.shutdown_handle();
+            let mut driver = parts.driver;
+            let running = tokio::spawn(async move { driver.run().await });
+
+            let work = next_work(&mut parts.work_rx).await;
+            assert_eq!(work.task.task_id, "t-plain");
+            wait_for(|| !engine.fails().is_empty()).await;
+            assert_eq!(engine.fails(), vec![b"tok-locked".to_vec()]);
+            let [failure] = engine.failures().try_into().unwrap();
+            assert_eq!(failure.failure_type, "PayloadCodecError");
+            assert!(!failure.non_retryable);
+            assert!(
+                failure.message.contains("could not be opened") && failure.message.contains(says),
+                "{}",
+                failure.message
+            );
+
+            parts.result_tx.send(succeeded(&work)).await.unwrap();
+            wait_for(|| engine.completes().len() == 1).await;
+            handle.shutdown();
+            stops_within(running, GRACE + MARGIN).await;
+        }
+    }
+
+    /// A task handed over with a workflow completion is opened like a polled
+    /// one, and one that cannot be opened is failed the same way.
+    #[tokio::test]
+    async fn tasks_handed_over_with_a_completion_are_opened_or_failed() {
+        let engine = Engine::default();
+        engine.script().workflow_eager = Some(vec![
+            sealed_task("t-e1", "tok-e1", 1),
+            sealed_task("t-e2", "tok-e2", 2),
+        ]);
+        let addr = serve(engine.clone()).await;
+        let (sender, mut work) = mpsc::channel::<TaskWork>(4);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let completer = Completer {
+            caller: Arc::new(Caller::from(&WorkflowDriverConfig {
+                payload_seal: Some(seal(1)),
+                ..WorkflowDriverConfig::default()
+            })),
+            channel_manager: Arc::new(ChannelManager::new(format!("http://{addr}"))),
+            retry: quick(),
+            shutdown: shutdown_rx,
+            eager_task_injector: Some(EagerTasks {
+                sender,
+                heartbeats: None,
+                default_queue: "default".into(),
+            }),
+            heartbeats: None,
+        };
+
+        completer
+            .send(Report::Complete {
+                workflow_id: "wf-1".into(),
+                run_id: "run-1".into(),
+                token: b"activation".to_vec(),
+                stream_entry_id: String::new(),
+                commands: vec![],
+                query_results: vec![],
+                update_results: vec![],
+            })
+            .await;
+
+        let handed = work.try_recv().expect("the task it can open");
+        assert_eq!(handed.task.task_id, "t-e1");
+        assert_eq!(handed.task.input, INPUT);
+        assert!(work.try_recv().is_err(), "the other was handed over");
+        assert_eq!(engine.fails(), vec![b"tok-e2".to_vec()]);
+        assert_eq!(engine.failures()[0].failure_type, "PayloadCodecError");
+    }
+
+    #[tokio::test]
+    async fn an_actor_driver_opens_seals_and_refuses_what_it_cannot_open() {
+        let engine = Engine::default();
+        engine.script().operations = vec![
+            ActorOperation {
+                payload: seal(2).seal(INPUT).unwrap(),
+                ..actor_operation("op-locked")
+            },
+            ActorOperation {
+                payload: seal(1).seal(INPUT).unwrap(),
+                ..actor_operation("op-1")
+            },
+        ];
+        let (mut driver, mut work_rx, result_tx) = actor_driver(
+            &engine,
+            ActorDriverConfig {
+                enable_heartbeat: false,
+                payload_seal: Some(seal(1)),
+                ..ActorDriverConfig::default()
+            },
+        )
+        .await;
+        let running = tokio::spawn(async move { driver.run().await });
+
+        let work = tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+            .await
+            .expect("an operation handed over")
+            .unwrap();
+        assert_eq!(work.operation.operation_id, "op-1");
+        assert_eq!(work.operation.payload, INPUT);
+        result_tx
+            .send(ActorWorkResult {
+                operation_id: work.operation.operation_id.clone(),
+                execution_id: work.operation.execution_id.clone(),
+                result: Ok(RESULT.to_vec()),
+            })
+            .await
+            .unwrap();
+        wait_for(|| engine.actor_calls("op-1") >= 1 && engine.actor_calls("op-locked") >= 1).await;
+
+        let completions = engine.script().actor_completions.clone();
+        let of = |id: &str| {
+            completions
+                .iter()
+                .find(|completion| completion.operation_id == id)
+                .unwrap()
+        };
+        assert_eq!(of("op-locked").status, ExecutionStatus::Error as i32);
+        assert_eq!(of("op-locked").error_code, "PayloadCodecError");
+        assert!(
+            of("op-locked")
+                .error_message
+                .contains("could not be opened"),
+            "{}",
+            of("op-locked").error_message
+        );
+        assert_eq!(of("op-1").status, ExecutionStatus::Success as i32);
+        assert_ne!(of("op-1").result, RESULT);
+        assert_eq!(
+            seal(1).open(&of("op-1").result).unwrap().as_deref(),
+            Some(RESULT)
+        );
+
+        drop(result_tx);
+        drop(work_rx);
+        stops_within(running, MARGIN).await;
+    }
 }

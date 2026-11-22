@@ -135,6 +135,11 @@ pub struct TaskDriverConfig {
     /// default. A result too large to send fails its task or workflow, saying
     /// so, rather than being sent and refused.
     pub max_message_bytes: usize,
+    /// Seals every payload the driver sends to the engine and opens every
+    /// payload it receives; see
+    /// [`ConnectOptions::payload_seal`](crate::ConnectOptions::payload_seal).
+    /// `None` (the default) sends and receives payloads as they are.
+    pub payload_seal: Option<crate::payload::PayloadSeal>,
     /// Where this driver's calls to the engine are recorded: the worker's
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
@@ -162,6 +167,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             version_id,
             auto_heartbeat,
             max_message_bytes,
+            payload_seal,
             wire: _,
         } = self;
         f.debug_struct("TaskDriverConfig")
@@ -181,6 +187,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             .field("version_id", version_id)
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
+            .field("payload_seal", payload_seal)
             .finish()
     }
 }
@@ -204,6 +211,7 @@ impl Default for TaskDriverConfig {
             version_id: None,
             auto_heartbeat: true,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
+            payload_seal: None,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -443,6 +451,7 @@ impl TaskDriver {
                 connect_timeout: config.connect_timeout,
                 max_message_bytes: config.max_message_bytes,
                 history_cache_bytes: 0,
+                payload_seal: config.payload_seal.clone(),
                 wire: std::sync::Arc::clone(&config.wire),
             };
 
@@ -1033,6 +1042,7 @@ async fn session_poller(
         connect_timeout: config.connect_timeout,
         max_message_bytes: config.max_message_bytes,
         history_cache_bytes: 0,
+        payload_seal: config.payload_seal.clone(),
         wire: std::sync::Arc::clone(&config.wire),
     };
     TaskExecutionPoller::new(

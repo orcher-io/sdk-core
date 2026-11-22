@@ -40,6 +40,9 @@ use std::collections::HashMap;
 
 pub mod codec;
 pub mod converter;
+pub mod seal;
+
+pub use seal::PayloadSeal;
 
 /// Serialized data together with metadata describing its encoding.
 ///
