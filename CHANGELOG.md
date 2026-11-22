@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.23.3](https://github.com/orcher-io/sdk-core/compare/v0.23.2...v0.23.3) (2026-11-22)
+
+
+### Features
+
+* apply a payload codec to everything sent to the engine ([#175](https://github.com/orcher-io/sdk-core/issues/175)) ([b626ea7](https://github.com/orcher-io/sdk-core/commit/b626ea7fe34e905583485d81766eda2f8ad6407f))
+
+
+### Bug Fixes
+
+* keep HostConfig unwind-safe now that it holds a payload seal ([#178](https://github.com/orcher-io/sdk-core/issues/178)) ([cf44855](https://github.com/orcher-io/sdk-core/commit/cf4485583f4e33f44a7ed447e92a6cc44c4fb6e9))
+
 ## [0.23.2](https://github.com/orcher-io/sdk-core/compare/v0.23.1...v0.23.2) (2026-11-18)
 
 
