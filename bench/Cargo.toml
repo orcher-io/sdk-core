@@ -1,6 +1,6 @@
 [package]
 name = "orcher-bench"
-version = "0.23.3"
+version = "0.23.4"
 edition = "2021"
 license = "Apache-2.0"
 description = "On-demand benchmark suite for ORCHER workers and the engine (not published, not run in CI)"

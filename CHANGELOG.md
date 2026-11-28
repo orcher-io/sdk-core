@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.4](https://github.com/orcher-io/sdk-core/compare/v0.23.3...v0.23.4) (2026-11-28)
+
+
+### Features
+
+* let the workflow and task drivers share one work budget ([#179](https://github.com/orcher-io/sdk-core/issues/179)) ([5c03eba](https://github.com/orcher-io/sdk-core/commit/5c03ebab32c8e071a612f8ba2b18113c08af4547))
+
 ## [0.23.3](https://github.com/orcher-io/sdk-core/compare/v0.23.2...v0.23.3) (2026-11-22)
 
 
