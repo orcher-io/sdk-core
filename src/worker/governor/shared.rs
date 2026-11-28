@@ -36,6 +36,7 @@ impl SharedBudget {
         BudgetShare {
             budget: self.clone(),
             weight: weight.clamp(1, self.total),
+            reserve: 0,
         }
     }
 
@@ -46,7 +47,6 @@ impl SharedBudget {
     }
 
     /// How many units are free.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn available(&self) -> usize {
         self.units.available_permits()
     }
@@ -57,6 +57,10 @@ impl SharedBudget {
 pub(crate) struct BudgetShare {
     budget: SharedBudget,
     weight: u32,
+    /// Units a batch's extra credits must leave free: what the other
+    /// drivers' polls need to hold one credit each. See
+    /// [`try_take_extra`](Self::try_take_extra).
+    reserve: u32,
 }
 
 impl BudgetShare {
@@ -77,10 +81,92 @@ impl BudgetShare {
             .ok()
     }
 
+    /// This share, whose batches leave `reserve` units free for the other
+    /// drivers' polls.
+    pub(crate) fn reserving(mut self, reserve: u32) -> Self {
+        self.reserve = reserve;
+        self
+    }
+
+    /// Take one more credit's units for a batch, if they are free now and
+    /// taking them leaves the reserve free.
+    ///
+    /// A poll holds every credit it was made with for as long as it waits,
+    /// up to a whole long poll. A batch that took the units the other
+    /// drivers' polls need would keep those drivers from polling at all
+    /// until it ended, with their work waiting in the engine. The first
+    /// credit of a poll is not held to this: every poll needs one.
+    pub(crate) fn try_take_extra(&self) -> Option<OwnedSemaphorePermit> {
+        let taken = self.try_take()?;
+        // Taken, then checked: two batches racing can each see the other's
+        // units still free, and neither may leave less than the reserve.
+        if self.budget.available() < self.reserve as usize {
+            return None;
+        }
+        Some(taken)
+    }
+
     /// The units each credit takes.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn weight(&self) -> u32 {
         self.weight
+    }
+}
+
+/// How a worker's budget and polls are laid out once they fit each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fitted {
+    /// Units in the budget.
+    pub(crate) units: u32,
+    /// Polls the workflow driver keeps open.
+    pub(crate) workflow_pollers: usize,
+    /// Polls the task driver keeps open.
+    pub(crate) task_pollers: usize,
+    /// Units a workflow credit takes, as the fit counted it: share the
+    /// budget by this, not by the configured weight, which a raised budget
+    /// would clamp differently.
+    pub(crate) workflow_weight: u32,
+    /// Units a task credit takes, as the fit counted it.
+    pub(crate) task_weight: u32,
+}
+
+/// Fit a budget of `units` to the polls the drivers keep open.
+///
+/// Every open poll holds a credit, and its driver's weight in units, for as
+/// long as it waits. A budget smaller than that lets one driver's idle polls
+/// hold all of it, and the other driver cannot poll until one of them ends,
+/// up to a whole long poll, with its work waiting in the engine.
+///
+/// So the polls are cut, the larger holder first and never below one a
+/// driver, until they fit within the budget; only when one poll a driver
+/// does not fit is the budget raised, to just what one poll each needs. A
+/// driver the worker does not run (`None`) holds nothing. Weights are taken
+/// as [`SharedBudget::share`] takes them: within one and the whole budget.
+pub(crate) fn fit(
+    units: u32,
+    workflow_weight: u32,
+    task_weight: u32,
+    workflow_pollers: Option<usize>,
+    task_pollers: Option<usize>,
+) -> Fitted {
+    let units = units.max(1);
+    let w = u64::from(workflow_weight.clamp(1, units));
+    let t = u64::from(task_weight.clamp(1, units));
+    let mut p = workflow_pollers.map_or(0, |n| n.max(1)) as u64;
+    let mut q = task_pollers.map_or(0, |n| n.max(1)) as u64;
+    let floor = |p: u64, q: u64| p * w + q * t;
+    while floor(p, q) > u64::from(units) && (p > 1 || q > 1) {
+        if (p * w >= q * t && p > 1) || q <= 1 {
+            p -= 1;
+        } else {
+            q -= 1;
+        }
+    }
+    Fitted {
+        units: units.max(u32::try_from(floor(p, q)).unwrap_or(u32::MAX)),
+        workflow_pollers: p as usize,
+        task_pollers: q as usize,
+        workflow_weight: w as u32,
+        task_weight: t as u32,
     }
 }
 
@@ -131,5 +217,101 @@ mod tests {
         drop(held);
         let _permit = waiting.await.expect("the waiting take completes");
         assert_eq!(budget.available(), 0);
+    }
+
+    #[test]
+    fn a_batch_leaves_the_reserve_free() {
+        let budget = SharedBudget::new(6);
+        let workflows = budget.share(1).reserving(2);
+        let first = workflows.try_take().expect("a poll's first credit");
+        let extras: Vec<_> = std::iter::from_fn(|| workflows.try_take_extra()).collect();
+        assert_eq!(extras.len(), 3, "6 units, 1 taken, 2 kept back");
+        assert_eq!(budget.available(), 2);
+        // The first credit of a poll is not held to the reserve.
+        let tasks = budget.share(1).reserving(5);
+        let task = tasks.try_take().expect("a poll's first credit");
+        assert!(tasks.try_take_extra().is_none());
+        assert_eq!(budget.available(), 1, "a refused extra is given back");
+        drop((first, extras, task));
+    }
+
+    #[test]
+    fn a_budget_that_holds_every_poll_is_left_alone() {
+        assert_eq!(
+            fit(20, 1, 2, Some(4), Some(4)),
+            Fitted {
+                units: 20,
+                workflow_pollers: 4,
+                task_pollers: 4,
+                workflow_weight: 1,
+                task_weight: 2
+            }
+        );
+    }
+
+    #[test]
+    fn polls_are_cut_to_fit_the_budget_largest_holder_first() {
+        // Four polls a driver hold 4 + 8 = 12 units. The task polls hold
+        // more, so they are cut first, then whichever holds more: three
+        // workflow polls and one task poll, 5 units, fit in 6.
+        assert_eq!(
+            fit(6, 1, 2, Some(4), Some(4)),
+            Fitted {
+                units: 6,
+                workflow_pollers: 3,
+                task_pollers: 1,
+                workflow_weight: 1,
+                task_weight: 2
+            }
+        );
+        assert_eq!(
+            fit(4, 1, 1, Some(4), Some(4)),
+            Fitted {
+                units: 4,
+                workflow_pollers: 2,
+                task_pollers: 2,
+                workflow_weight: 1,
+                task_weight: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_budget_too_small_for_one_poll_a_driver_is_raised_to_that() {
+        assert_eq!(
+            fit(1, 1, 1, Some(4), Some(4)),
+            Fitted {
+                units: 2,
+                workflow_pollers: 1,
+                task_pollers: 1,
+                workflow_weight: 1,
+                task_weight: 1
+            }
+        );
+        // A weight above the budget counts as the whole budget.
+        assert_eq!(
+            fit(3, 9, 1, Some(2), Some(2)),
+            Fitted {
+                units: 4,
+                workflow_pollers: 1,
+                task_pollers: 1,
+                workflow_weight: 3,
+                task_weight: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_driver_the_worker_does_not_run_holds_nothing() {
+        assert_eq!(
+            fit(3, 1, 1, None, Some(4)),
+            Fitted {
+                units: 3,
+                workflow_pollers: 0,
+                task_pollers: 3,
+                workflow_weight: 1,
+                task_weight: 1
+            }
+        );
     }
 }

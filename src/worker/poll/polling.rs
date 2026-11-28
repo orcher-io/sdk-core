@@ -634,7 +634,7 @@ impl WorkflowExecutionPoller {
                 }
                 let batch = batch_size(self.batch_polls, &credits, self.last_poll_worked);
                 while in_hand.len() < batch {
-                    match credits.try_acquire() {
+                    match credits.try_acquire_extra() {
                         Some(credit) => in_hand.push(credit),
                         None => break,
                     }
@@ -1408,7 +1408,7 @@ impl TaskExecutionPoller {
                 }
                 let batch = batch_size(self.batch_polls, &credits, self.last_poll_worked);
                 while in_hand.len() < batch {
-                    match credits.try_acquire() {
+                    match credits.try_acquire_extra() {
                         Some(credit) => in_hand.push(credit),
                         None => break,
                     }

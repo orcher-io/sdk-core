@@ -111,10 +111,27 @@ impl Credits {
 
     /// Take a credit if one is free now, and its share of the budget with
     /// it, without giving back those whose claim has lapsed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_acquire(&self) -> Option<Credit> {
         let own = Arc::clone(&self.slots).try_acquire_owned().ok()?;
         let shared = match &self.share {
             Some(share) => Some(share.try_take()?),
+            None => None,
+        };
+        Some(Credit {
+            _own: own,
+            _shared: shared,
+        })
+    }
+
+    /// Take one more credit for a poll's batch if one is free now, leaving
+    /// the shared budget's reserve for the other drivers' polls; see
+    /// [`BudgetShare::try_take_extra`]. The same as
+    /// [`try_acquire`](Self::try_acquire) for a driver with no shared budget.
+    pub(crate) fn try_acquire_extra(&self) -> Option<Credit> {
+        let own = Arc::clone(&self.slots).try_acquire_owned().ok()?;
+        let shared = match &self.share {
+            Some(share) => Some(share.try_take_extra()?),
             None => None,
         };
         Some(Credit {
@@ -269,6 +286,33 @@ mod tests {
         drop(workflow);
         assert_eq!(budget.available(), 3);
         assert!(tasks.try_acquire().is_some());
+    }
+
+    /// Once the budget and the polls are fitted, every poll both drivers
+    /// keep open can hold its credit at once, so neither driver's idle polls
+    /// keep the other from polling. Unfitted, the first of these could not.
+    #[test]
+    fn every_open_poll_can_hold_a_credit_once_fitted() {
+        for (units, w, t, p, q) in [
+            (4, 1, 1, 4, 4),
+            (6, 1, 2, 4, 4),
+            (1, 1, 1, 4, 4),
+            (3, 9, 1, 2, 2),
+            (100, 1, 1, 4, 4),
+        ] {
+            let fitted = super::super::fit(units, w, t, Some(p), Some(q));
+            let budget = SharedBudget::new(fitted.units);
+            let workflows = Credits::sharing(100, Some(budget.share(fitted.workflow_weight)));
+            let tasks = Credits::sharing(100, Some(budget.share(fitted.task_weight)));
+            let held: Vec<_> = (0..fitted.workflow_pollers)
+                .map(|_| workflows.try_acquire())
+                .chain((0..fitted.task_pollers).map(|_| tasks.try_acquire()))
+                .collect();
+            assert!(
+                held.iter().all(Option::is_some),
+                "a poll could not hold a credit with {units} units, weights {w}/{t}, polls {p}/{q}: {fitted:?}"
+            );
+        }
     }
 
     #[tokio::test]

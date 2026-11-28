@@ -53,7 +53,18 @@ pub const DEFAULT_MAX_SESSIONS: usize = 10;
 ///
 /// With a budget, a driver whose last poll brought nothing asks for one item
 /// at a time, so an idle driver's open poll holds one credit's units and not
-/// a batch's.
+/// a batch's; and a poll asking for several takes the extra credits only
+/// while that leaves enough units for the other driver's polls to hold one
+/// credit each.
+///
+/// Every open poll holds one credit's units while it waits, so the budget
+/// must cover one credit for each poll the drivers keep open
+/// ([`HostConfig::with_pollers`]); otherwise one driver's idle polls could
+/// hold all of it and keep the other from polling for up to a whole long
+/// poll. A worker whose budget does not cover them starts with fewer polls,
+/// the driver holding more cut first and never below one; one whose budget
+/// does not cover one poll a driver has its budget raised to that. Either
+/// is logged as a warning. Polls on session queues are not counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WorkBudget {

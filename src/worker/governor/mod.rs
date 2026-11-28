@@ -35,4 +35,4 @@ mod shared;
 pub(crate) use budget::{SlotBudget, SlotPermit};
 pub(crate) use credits::{Credit, Credits};
 pub(crate) use in_flight::InFlight;
-pub(crate) use shared::{BudgetShare, SharedBudget};
+pub(crate) use shared::{fit, BudgetShare, SharedBudget};
