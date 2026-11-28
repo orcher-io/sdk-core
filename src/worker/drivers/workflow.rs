@@ -125,6 +125,10 @@ pub struct WorkflowDriverConfig {
     /// [`ConnectOptions::payload_seal`](crate::ConnectOptions::payload_seal).
     /// `None` (the default) sends and receives payloads as they are.
     pub payload_seal: Option<crate::payload::PayloadSeal>,
+    /// This driver's share of the worker's budget, when its drivers share
+    /// one: each credit then takes the driver's weight in units of it. `None`
+    /// (the default) limits the driver by its own concurrency alone.
+    pub(crate) budget_share: Option<crate::worker::governor::BudgetShare>,
     /// Where this driver's calls to the engine are recorded: the worker's
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
@@ -156,6 +160,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             supported_step_ids,
             history_cache_bytes,
             payload_seal,
+            budget_share,
             wire: _,
         } = self;
         f.debug_struct("WorkflowDriverConfig")
@@ -179,6 +184,7 @@ impl std::fmt::Debug for WorkflowDriverConfig {
             .field("supported_step_ids", supported_step_ids)
             .field("history_cache_bytes", history_cache_bytes)
             .field("payload_seal", payload_seal)
+            .field("budget_share", budget_share)
             .finish()
     }
 }
@@ -206,6 +212,7 @@ impl Default for WorkflowDriverConfig {
             supported_step_ids: Vec::new(),
             history_cache_bytes: crate::wire::history::DEFAULT_HISTORY_CACHE_BYTES,
             payload_seal: None,
+            budget_share: None,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -383,7 +390,10 @@ impl WorkflowDriver {
             std::sync::Arc::new(crate::worker::poll::scaler::PollerScaler::new(poller_count));
         // One credit per activation the driver can run: its pollers claim no
         // more than that.
-        let credits = Arc::new(Credits::new(config.max_concurrent_executions));
+        let credits = Arc::new(Credits::sharing(
+            config.max_concurrent_executions,
+            config.budget_share.clone(),
+        ));
         tracing::info!(
             poller_count = poller_count,
             namespace = %config.namespace,

@@ -37,6 +37,7 @@ use crate::proto::host::v1::{
 };
 use crate::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
 use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
+use crate::worker::governor::{self, SharedBudget};
 use crate::worker::{
     ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkerMetrics,
     WorkerRegistrationDriver, WorkflowDriver,
@@ -45,7 +46,7 @@ use crate::{Error, Result};
 use tokio::task::JoinHandle;
 
 pub use actors::{ActorHandler, StateScope, StateValue};
-pub use config::HostConfig;
+pub use config::{HostConfig, WorkBudget};
 pub use encoded::EncodedHost;
 
 /// How long a driver has to stop past the shutdown grace and the release
@@ -146,7 +147,7 @@ impl Host {
     /// it could run (it would poll for nothing), or an actor type with no
     /// operation; and the actor service's refusal of the worker's actor
     /// handlers.
-    pub async fn start(config: HostConfig, registrations: Registrations) -> Result<Self> {
+    pub async fn start(mut config: HostConfig, registrations: Registrations) -> Result<Self> {
         let needed = registrations.needed_drivers();
         if needed.is_empty() {
             return Err(Error::Configuration(
@@ -159,12 +160,57 @@ impl Host {
         // reported to the engine with every worker heartbeat.
         let load = WorkerMetrics::new();
         let mut stops = Stops::default();
+        // The budget the workflow and task drivers share, if the worker has
+        // one: each driver's share of it, by the driver's weight, once the
+        // budget and the polls held open against it fit each other.
+        let shares = config.work_budget.map(|budget| {
+            let fitted = governor::fit(
+                budget.units,
+                budget.workflow_weight,
+                budget.task_weight,
+                needed.workflows.then_some(config.workflow_pollers),
+                needed.tasks.then_some(config.task_pollers),
+            );
+            if fitted.units != budget.units.max(1)
+                || (needed.workflows && fitted.workflow_pollers != config.workflow_pollers)
+                || (needed.tasks && fitted.task_pollers != config.task_pollers)
+            {
+                tracing::warn!(
+                    units = budget.units,
+                    workflow_pollers = config.workflow_pollers,
+                    task_pollers = config.task_pollers,
+                    fitted_units = fitted.units,
+                    fitted_workflow_pollers = fitted.workflow_pollers,
+                    fitted_task_pollers = fitted.task_pollers,
+                    "The work budget cannot hold a credit for every open poll: \
+                     polls were cut to fit it, or the budget raised to one poll a driver"
+                );
+            }
+            if needed.workflows {
+                config.workflow_pollers = fitted.workflow_pollers;
+            }
+            if needed.tasks {
+                config.task_pollers = fitted.task_pollers;
+            }
+            let shared = SharedBudget::new(fitted.units);
+            let workflow = shared.share(fitted.workflow_weight);
+            let task = shared.share(fitted.task_weight);
+            // A batch leaves free what the other driver's polls need to hold
+            // one credit each.
+            let workflow_reserve = fitted.task_pollers as u32 * task.weight();
+            let task_reserve = fitted.workflow_pollers as u32 * workflow.weight();
+            (
+                workflow.reserving(workflow_reserve),
+                task.reserving(task_reserve),
+            )
+        });
 
         let mut eager_tasks = None;
         let tasks = if needed.tasks {
             let (driver, work, results, queue_changes) = TaskDriver::new({
                 let mut driver_config = config.task_driver();
                 driver_config.wire = Arc::clone(&wire);
+                driver_config.budget_share = shares.as_ref().map(|(_, task)| task.clone());
                 driver_config
             })
             .await?;
@@ -197,6 +243,7 @@ impl Host {
             let (driver, work, results) = WorkflowDriver::new({
                 let mut driver_config = config.workflow_driver();
                 driver_config.wire = Arc::clone(&wire);
+                driver_config.budget_share = shares.as_ref().map(|(workflow, _)| workflow.clone());
                 driver_config
             })
             .await?;

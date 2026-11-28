@@ -22,6 +22,22 @@ const ACTIVATION_CLAIM: Duration = Duration::from_secs(300);
 /// engine caps a poll at this too.
 const MAX_ITEMS_PER_POLL: usize = 16;
 
+/// How many credits a poll is made with, at most.
+///
+/// Up to [`MAX_ITEMS_PER_POLL`] when the engine serves several items to a
+/// poll, otherwise one. A driver that shares the worker's budget asks for
+/// several only when its last poll brought work: a poll holds its credits,
+/// and their units of the shared budget, for as long as it waits, so an idle
+/// driver's poll holds one credit's units rather than a batch's that the
+/// other drivers could be running work with.
+fn batch_size(batch_polls: bool, credits: &Credits, last_poll_worked: bool) -> usize {
+    if !batch_polls || (credits.is_shared() && !last_poll_worked) {
+        1
+    } else {
+        MAX_ITEMS_PER_POLL
+    }
+}
+
 /// How long an activation whose payloads this worker cannot open is held
 /// before it is handed back. Handed back at once, it would be offered to the
 /// next poll straight away and refused the same way, as fast as the worker
@@ -373,6 +389,8 @@ pub struct WorkflowExecutionPoller {
 
     /// Consecutive polls that returned no work.
     consecutive_idle_polls: u32,
+    /// Whether the last poll brought work; see [`batch_size`].
+    last_poll_worked: bool,
 
     /// Consecutive polls that ended in a normal long-poll timeout.
     consecutive_timeouts: u32,
@@ -475,6 +493,7 @@ impl WorkflowExecutionPoller {
             index: 0,
             server_url: address,
             consecutive_idle_polls: 0,
+            last_poll_worked: false,
             consecutive_timeouts: 0,
             cooloff_until: None,
         };
@@ -613,8 +632,9 @@ impl WorkflowExecutionPoller {
                     // Told to stop: the check above ends the loop.
                     None => continue,
                 }
-                while self.batch_polls && in_hand.len() < MAX_ITEMS_PER_POLL {
-                    match credits.try_acquire() {
+                let batch = batch_size(self.batch_polls, &credits, self.last_poll_worked);
+                while in_hand.len() < batch {
+                    match credits.try_acquire_extra() {
                         Some(credit) => in_hand.push(credit),
                         None => break,
                     }
@@ -651,6 +671,7 @@ impl WorkflowExecutionPoller {
                     self.consecutive_idle_polls = 0;
                     self.consecutive_timeouts = 0;
                     consecutive_errors = 0;
+                    self.last_poll_worked = true;
 
                     // Each activation spends one of the credits the poll was
                     // made with; those left over go back when dropped.
@@ -706,6 +727,7 @@ impl WorkflowExecutionPoller {
                     // An empty answer is still an answer: the path works again.
                     consecutive_errors = 0;
                     self.consecutive_idle_polls = self.consecutive_idle_polls.saturating_add(1);
+                    self.last_poll_worked = false;
                     if let Some(scaler) = &self.scaler {
                         scaler.idle(self.index);
                     }
@@ -1174,6 +1196,9 @@ pub struct TaskExecutionPoller {
     /// the engine answers that it hands out only one.
     batch_polls: bool,
 
+    /// Whether the last poll brought work; see [`batch_size`].
+    last_poll_worked: bool,
+
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 }
@@ -1257,6 +1282,7 @@ impl TaskExecutionPoller {
             scaler: None,
             credits: None,
             batch_polls: true,
+            last_poll_worked: false,
             index: 0,
         };
 
@@ -1380,8 +1406,9 @@ impl TaskExecutionPoller {
                     // Told to stop: the check above ends the loop.
                     None => continue,
                 }
-                while self.batch_polls && in_hand.len() < MAX_ITEMS_PER_POLL {
-                    match credits.try_acquire() {
+                let batch = batch_size(self.batch_polls, &credits, self.last_poll_worked);
+                while in_hand.len() < batch {
+                    match credits.try_acquire_extra() {
                         Some(credit) => in_hand.push(credit),
                         None => break,
                     }
@@ -1416,6 +1443,7 @@ impl TaskExecutionPoller {
                     }
                     consecutive_idle_polls = 0;
                     consecutive_timeouts = 0;
+                    self.last_poll_worked = true;
 
                     // Each task spends one of the credits the poll was made
                     // with; those left over go back when dropped.
@@ -1470,6 +1498,7 @@ impl TaskExecutionPoller {
 
                     // Count idle polls and enter cool-off after too many.
                     consecutive_idle_polls = consecutive_idle_polls.saturating_add(1);
+                    self.last_poll_worked = false;
                     if let Some(scaler) = &self.scaler {
                         scaler.idle(self.index);
                     }

@@ -7,6 +7,8 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
+use super::shared::BudgetShare;
+
 /// The work a driver may claim, one credit per item.
 ///
 /// A poller takes a credit before it polls, so a driver claims work only
@@ -18,25 +20,36 @@ use tokio::time::Instant;
 /// else: so work the language SDK never answers holds its credit only as
 /// long as the engine would wait for it.
 ///
+/// A driver that shares the worker's budget with the others
+/// ([`sharing`](Self::sharing)) takes its share of that budget with each
+/// credit, and gives it back with the credit: its own limit is then a
+/// ceiling within the shared budget.
+///
 /// Shared by a driver and its pollers.
 #[derive(Debug)]
 pub(crate) struct Credits {
     slots: Arc<Semaphore>,
     limit: usize,
+    /// The worker's shared budget, when the driver draws on one.
+    share: Option<BudgetShare>,
     /// Credits spent on claimed work, by the work's token.
     spent: Mutex<HashMap<Vec<u8>, Spent>>,
 }
 
 #[derive(Debug)]
 struct Spent {
-    permit: OwnedSemaphorePermit,
+    credit: Credit,
     /// When the engine's claim on the work lapses, if it does.
     lapses: Option<Instant>,
 }
 
 /// A credit taken for a poll; given back when dropped, unless spent.
 #[derive(Debug)]
-pub(crate) struct Credit(OwnedSemaphorePermit);
+pub(crate) struct Credit {
+    _own: OwnedSemaphorePermit,
+    /// The units of the shared budget taken with it, if the driver shares one.
+    _shared: Option<OwnedSemaphorePermit>,
+}
 
 impl Credits {
     /// `limit` credits, and never fewer than one: with none, a driver could
@@ -46,8 +59,23 @@ impl Credits {
         Self {
             slots: Arc::new(Semaphore::new(limit)),
             limit,
+            share: None,
             spent: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// `limit` credits, each also taking `share` of the worker's shared
+    /// budget; [`new`](Self::new) when there is none.
+    pub(crate) fn sharing(limit: usize, share: Option<BudgetShare>) -> Self {
+        Self {
+            share,
+            ..Self::new(limit)
+        }
+    }
+
+    /// Whether the driver draws on a budget shared with other drivers.
+    pub(crate) fn is_shared(&self) -> bool {
+        self.share.is_some()
     }
 
     /// Take a credit, waiting for one to be given back if none is free.
@@ -55,22 +83,61 @@ impl Credits {
     /// Cancel safe: dropping the future before it completes takes no credit.
     pub(crate) async fn acquire(&self) -> Credit {
         loop {
-            let acquire = Arc::clone(&self.slots).acquire_owned();
-            let permit = match self.reclaim_lapsed() {
+            let acquire = async {
+                let own = Arc::clone(&self.slots)
+                    .acquire_owned()
+                    .await
+                    .expect("a credit semaphore is never closed");
+                let shared = match &self.share {
+                    Some(share) => Some(share.take().await),
+                    None => None,
+                };
+                Credit {
+                    _own: own,
+                    _shared: shared,
+                }
+            };
+            // A claim that lapses meanwhile gives its credit, and its share
+            // of the budget, back: then try again.
+            return match self.reclaim_lapsed() {
                 None => acquire.await,
                 Some(lapses) => tokio::select! {
-                    permit = acquire => permit,
+                    credit = acquire => credit,
                     () = tokio::time::sleep_until(lapses) => continue,
                 },
             };
-            return Credit(permit.expect("a credit semaphore is never closed"));
         }
     }
 
-    /// Take a credit if one is free now, without giving back those whose
-    /// claim has lapsed.
+    /// Take a credit if one is free now, and its share of the budget with
+    /// it, without giving back those whose claim has lapsed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn try_acquire(&self) -> Option<Credit> {
-        Arc::clone(&self.slots).try_acquire_owned().ok().map(Credit)
+        let own = Arc::clone(&self.slots).try_acquire_owned().ok()?;
+        let shared = match &self.share {
+            Some(share) => Some(share.try_take()?),
+            None => None,
+        };
+        Some(Credit {
+            _own: own,
+            _shared: shared,
+        })
+    }
+
+    /// Take one more credit for a poll's batch if one is free now, leaving
+    /// the shared budget's reserve for the other drivers' polls; see
+    /// [`BudgetShare::try_take_extra`]. The same as
+    /// [`try_acquire`](Self::try_acquire) for a driver with no shared budget.
+    pub(crate) fn try_acquire_extra(&self) -> Option<Credit> {
+        let own = Arc::clone(&self.slots).try_acquire_owned().ok()?;
+        let shared = match &self.share {
+            Some(share) => Some(share.try_take_extra()?),
+            None => None,
+        };
+        Some(Credit {
+            _own: own,
+            _shared: shared,
+        })
     }
 
     /// Spend `credit` on the work named by `token`, until
@@ -81,7 +148,7 @@ impl Credits {
     /// credit back: it is the same work.
     pub(crate) fn spend(&self, credit: Credit, token: Vec<u8>, lapse: Option<Duration>) {
         let spent = Spent {
-            permit: credit.0,
+            credit,
             lapses: lapse.map(|lapse| Instant::now() + lapse),
         };
         self.ledger().insert(token, spent);
@@ -90,9 +157,7 @@ impl Credits {
     /// The credit spent on the work named by `token`, to be dropped once its
     /// report is sent; `None` for work claimed without one.
     pub(crate) fn give_back(&self, token: &[u8]) -> Option<Credit> {
-        self.ledger()
-            .remove(token)
-            .map(|spent| Credit(spent.permit))
+        self.ledger().remove(token).map(|spent| spent.credit)
     }
 
     /// How many credits there are in all.
@@ -127,6 +192,7 @@ impl Credits {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SharedBudget;
     use super::*;
 
     const SOON: Duration = Duration::from_millis(50);
@@ -194,6 +260,90 @@ mod tests {
             .unwrap();
         drop(credit);
         assert!(credits.give_back(b"never-answered").is_none());
+    }
+
+    #[tokio::test]
+    async fn drivers_sharing_a_budget_take_their_units_from_it() {
+        let budget = SharedBudget::new(3);
+        let workflows = Credits::sharing(10, Some(budget.share(1)));
+        let tasks = Credits::sharing(10, Some(budget.share(2)));
+
+        let task = tasks.acquire().await;
+        tasks.spend(task, b"task".to_vec(), None);
+        assert_eq!(budget.available(), 1);
+        assert!(
+            tasks.try_acquire().is_none(),
+            "one unit left, a task takes two"
+        );
+        assert_eq!(tasks.available(), 9, "a refused credit is not kept");
+
+        let workflow = workflows.try_acquire().expect("one unit is enough");
+        assert!(workflows.try_acquire().is_none(), "the budget is spent");
+        assert!(tokio::time::timeout(SOON, tasks.acquire()).await.is_err());
+
+        // Given back, the credit's units are free for either driver.
+        drop(tasks.give_back(b"task"));
+        drop(workflow);
+        assert_eq!(budget.available(), 3);
+        assert!(tasks.try_acquire().is_some());
+    }
+
+    /// Once the budget and the polls are fitted, every poll both drivers
+    /// keep open can hold its credit at once, so neither driver's idle polls
+    /// keep the other from polling. Unfitted, the first of these could not.
+    #[test]
+    fn every_open_poll_can_hold_a_credit_once_fitted() {
+        for (units, w, t, p, q) in [
+            (4, 1, 1, 4, 4),
+            (6, 1, 2, 4, 4),
+            (1, 1, 1, 4, 4),
+            (3, 9, 1, 2, 2),
+            (100, 1, 1, 4, 4),
+        ] {
+            let fitted = super::super::fit(units, w, t, Some(p), Some(q));
+            let budget = SharedBudget::new(fitted.units);
+            let workflows = Credits::sharing(100, Some(budget.share(fitted.workflow_weight)));
+            let tasks = Credits::sharing(100, Some(budget.share(fitted.task_weight)));
+            let held: Vec<_> = (0..fitted.workflow_pollers)
+                .map(|_| workflows.try_acquire())
+                .chain((0..fitted.task_pollers).map(|_| tasks.try_acquire()))
+                .collect();
+            assert!(
+                held.iter().all(Option::is_some),
+                "a poll could not hold a credit with {units} units, weights {w}/{t}, polls {p}/{q}: {fitted:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_driver_limit_stays_a_ceiling_within_the_budget() {
+        let budget = SharedBudget::new(10);
+        let credits = Credits::sharing(2, Some(budget.share(1)));
+        let _a = credits.try_acquire().unwrap();
+        let _b = credits.try_acquire().unwrap();
+        assert!(credits.try_acquire().is_none());
+        assert_eq!(budget.available(), 8);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lapsed_claim_gives_its_units_of_the_budget_back() {
+        let budget = SharedBudget::new(1);
+        let credits = Arc::new(Credits::sharing(5, Some(budget.share(1))));
+        let credit = credits.acquire().await;
+        credits.spend(credit, b"lost".to_vec(), Some(Duration::from_secs(60)));
+
+        let waiting = tokio::spawn({
+            let credits = Arc::clone(&credits);
+            async move { credits.acquire().await }
+        });
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        let credit = tokio::time::timeout(SOON, waiting)
+            .await
+            .expect("the lapsed claim's units are back")
+            .unwrap();
+        assert_eq!(budget.available(), 0, "the new credit holds them");
+        drop(credit);
+        assert_eq!(budget.available(), 1);
     }
 
     #[tokio::test(start_paused = true)]

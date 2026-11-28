@@ -140,6 +140,10 @@ pub struct TaskDriverConfig {
     /// [`ConnectOptions::payload_seal`](crate::ConnectOptions::payload_seal).
     /// `None` (the default) sends and receives payloads as they are.
     pub payload_seal: Option<crate::payload::PayloadSeal>,
+    /// This driver's share of the worker's budget, when its drivers share
+    /// one: each credit then takes the driver's weight in units of it. `None`
+    /// (the default) limits the driver by its own concurrency alone.
+    pub(crate) budget_share: Option<crate::worker::governor::BudgetShare>,
     /// Where this driver's calls to the engine are recorded: the worker's
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
@@ -168,6 +172,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             auto_heartbeat,
             max_message_bytes,
             payload_seal,
+            budget_share,
             wire: _,
         } = self;
         f.debug_struct("TaskDriverConfig")
@@ -188,6 +193,7 @@ impl std::fmt::Debug for TaskDriverConfig {
             .field("auto_heartbeat", auto_heartbeat)
             .field("max_message_bytes", max_message_bytes)
             .field("payload_seal", payload_seal)
+            .field("budget_share", budget_share)
             .finish()
     }
 }
@@ -212,6 +218,7 @@ impl Default for TaskDriverConfig {
             auto_heartbeat: true,
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             payload_seal: None,
+            budget_share: None,
             wire: crate::observability::WireMetrics::new(),
         }
     }
@@ -426,7 +433,10 @@ impl TaskDriver {
             std::sync::Arc::new(crate::worker::poll::scaler::PollerScaler::new(poller_count));
         // One credit per task the driver can run: its pollers, the session
         // pollers among them, claim no more than that.
-        let credits = Arc::new(Credits::new(config.max_concurrent_executions));
+        let credits = Arc::new(Credits::sharing(
+            config.max_concurrent_executions,
+            config.budget_share.clone(),
+        ));
         tracing::info!(
             poller_count = poller_count,
             namespace = %config.namespace,

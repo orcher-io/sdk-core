@@ -18,16 +18,21 @@
 //!   driver claims only the work it has room to run, and the credit is held
 //!   until that work has been reported.
 //!
-//! This is where the worker's resource model is meant to grow: one budget
-//! shared across the three drivers, with today's per-driver limits as
-//! ceilings within it; pressure signals (process CPU and memory, and a
-//! signal from the language runtime) feeding admission; and polls that ask
-//! for as many items as there are free credits.
+//! - [`SharedBudget`]: one budget the workflow and task drivers may share
+//!   ([`WorkBudget`](crate::WorkBudget)). Each credit then also takes its
+//!   driver's weight in units of it, so the drivers' own limits become
+//!   ceilings within one budget for the whole worker.
+//!
+//! This is where the worker's resource model is meant to grow: actor
+//! operations in the shared budget, and pressure signals (process CPU and
+//! memory, and a signal from the language runtime) feeding admission.
 
 mod budget;
 mod credits;
 mod in_flight;
+mod shared;
 
 pub(crate) use budget::{SlotBudget, SlotPermit};
 pub(crate) use credits::{Credit, Credits};
 pub(crate) use in_flight::InFlight;
+pub(crate) use shared::{fit, BudgetShare, SharedBudget};
