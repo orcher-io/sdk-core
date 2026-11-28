@@ -37,6 +37,7 @@ use crate::proto::host::v1::{
 };
 use crate::proto::kernel::v1::{Payload, RunActivation, RunActivationResult};
 use crate::worker::drivers::registration::DEREGISTER_TIMEOUT;
+use crate::worker::governor::SharedBudget;
 use crate::worker::{
     ActorDriver, NeededDrivers, ShutdownHandle, TaskDriver, WorkerMetrics,
     WorkerRegistrationDriver, WorkflowDriver,
@@ -45,7 +46,7 @@ use crate::{Error, Result};
 use tokio::task::JoinHandle;
 
 pub use actors::{ActorHandler, StateScope, StateValue};
-pub use config::HostConfig;
+pub use config::{HostConfig, WorkBudget};
 pub use encoded::EncodedHost;
 
 /// How long a driver has to stop past the shutdown grace and the release
@@ -159,12 +160,22 @@ impl Host {
         // reported to the engine with every worker heartbeat.
         let load = WorkerMetrics::new();
         let mut stops = Stops::default();
+        // The budget the workflow and task drivers share, if the worker has
+        // one: each driver's share of it, by the driver's weight.
+        let shares = config.work_budget.map(|budget| {
+            let shared = SharedBudget::new(budget.units);
+            (
+                shared.share(budget.workflow_weight),
+                shared.share(budget.task_weight),
+            )
+        });
 
         let mut eager_tasks = None;
         let tasks = if needed.tasks {
             let (driver, work, results, queue_changes) = TaskDriver::new({
                 let mut driver_config = config.task_driver();
                 driver_config.wire = Arc::clone(&wire);
+                driver_config.budget_share = shares.as_ref().map(|(_, task)| task.clone());
                 driver_config
             })
             .await?;
@@ -197,6 +208,7 @@ impl Host {
             let (driver, work, results) = WorkflowDriver::new({
                 let mut driver_config = config.workflow_driver();
                 driver_config.wire = Arc::clone(&wire);
+                driver_config.budget_share = shares.as_ref().map(|(workflow, _)| workflow.clone());
                 driver_config
             })
             .await?;

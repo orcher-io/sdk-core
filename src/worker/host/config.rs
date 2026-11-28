@@ -41,6 +41,49 @@ pub const RELEASE_MARGIN: Duration = Duration::from_secs(5);
 /// How many sessions a worker hosts at once, unless configured.
 pub const DEFAULT_MAX_SESSIONS: usize = 10;
 
+/// One budget of work capacity the worker's workflow and task drivers
+/// share, so the worker as a whole holds no more than it can run.
+///
+/// Each workflow activation the worker holds takes `workflow_weight` units,
+/// and each task `task_weight`, from the moment the poll that claims it is
+/// made until its result is reported. Each driver's own limit
+/// ([`HostConfig::with_concurrency`]) stays a ceiling within the budget: the
+/// budget only ever lowers what a driver may hold. Actor operations are not
+/// counted in it yet.
+///
+/// With a budget, a driver whose last poll brought nothing asks for one item
+/// at a time, so an idle driver's open poll holds one credit's units and not
+/// a batch's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WorkBudget {
+    /// Units in the budget (at least one).
+    pub units: u32,
+    /// Units one workflow activation takes (at least one).
+    pub workflow_weight: u32,
+    /// Units one task takes (at least one).
+    pub task_weight: u32,
+}
+
+impl WorkBudget {
+    /// A budget of `units`, in which an activation and a task each take one.
+    pub fn new(units: u32) -> Self {
+        Self {
+            units,
+            workflow_weight: 1,
+            task_weight: 1,
+        }
+    }
+
+    /// Weighs a workflow activation as `workflow` units and a task as
+    /// `task`. A weight above the whole budget counts as the whole budget.
+    pub fn with_weights(mut self, workflow: u32, task: u32) -> Self {
+        self.workflow_weight = workflow;
+        self.task_weight = task;
+        self
+    }
+}
+
 /// One worker's configuration.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -100,6 +143,9 @@ pub struct HostConfig {
     /// scheme is bound to, as before schemes; see
     /// `docs/kernel-protocol-v1.md` §8.3.
     pub supported_step_ids: Vec<StepIdScheme>,
+    /// One budget the workflow and task drivers share, if any. `None` (the
+    /// default) limits each driver by its own concurrency alone.
+    pub work_budget: Option<WorkBudget>,
 }
 
 impl HostConfig {
@@ -126,6 +172,7 @@ impl HostConfig {
             sdk_version: String::new(),
             protocol_version: crate::worker_protocol::CANCEL_REQUEST,
             supported_step_ids: Vec::new(),
+            work_budget: None,
         }
     }
 
@@ -175,6 +222,13 @@ impl HostConfig {
         self.max_concurrent_workflows = workflows;
         self.max_concurrent_tasks = tasks;
         self.max_concurrent_actor_operations = actor_operations;
+        self
+    }
+
+    /// Shares `budget` between the workflow and task drivers, within each
+    /// one's own concurrency.
+    pub fn with_work_budget(mut self, budget: WorkBudget) -> Self {
+        self.work_budget = Some(budget);
         self
     }
 

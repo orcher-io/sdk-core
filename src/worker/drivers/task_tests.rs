@@ -2244,6 +2244,100 @@ async fn a_driver_asks_for_as_many_tasks_as_it_has_room_for_in_one_poll() {
     stops_within(running, GRACE + MARGIN).await;
 }
 
+/// A driver that shares the worker's budget claims no more than its share
+/// allows, though its own limit would let it run more.
+#[tokio::test]
+async fn a_driver_sharing_a_budget_claims_no_more_than_the_budget_allows() {
+    let engine = Engine::default();
+    {
+        let mut script = engine.script();
+        script.serves_batches = true;
+        for n in 0..6 {
+            script
+                .tasks
+                .push_back(task(&format!("t-{n}"), &format!("tok-{n}")));
+        }
+    }
+    // Four units, and each task takes two: room for two tasks, of the four
+    // the driver's own limit allows.
+    let budget = crate::worker::governor::SharedBudget::new(4);
+    let mut parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            max_concurrent_executions: 4,
+            budget_share: Some(budget.share(2)),
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let first = next_work(&mut parts.work_rx).await;
+    let second = next_work(&mut parts.work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!([first.task.task_id, second.task.task_id], ["t-0", "t-1"]);
+    assert_eq!(claimed(&engine, 6), 2, "claimed beyond the budget");
+    assert_eq!(budget.available(), 0);
+
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// A driver that shares the worker's budget and has had no work asks for one
+/// task at a time, so its waiting poll holds one task's units of the budget
+/// and not a batch's.
+#[tokio::test]
+async fn an_idle_driver_sharing_a_budget_asks_for_one_task() {
+    let engine = Engine::default();
+    engine.script().serves_batches = true;
+    let budget = crate::worker::governor::SharedBudget::new(8);
+    let parts = task_driver(
+        &engine,
+        TaskDriverConfig {
+            max_concurrent_executions: 8,
+            budget_share: Some(budget.share(1)),
+            // One poller, so the poll that brings work is the next to poll.
+            poller_count: 1,
+            ..TaskDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = parts.driver.shutdown_handle();
+    let mut driver = parts.driver;
+    let running = tokio::spawn(async move { driver.run().await });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        engine.script().batches_asked.is_empty(),
+        "an idle driver asked for a batch: {:?}",
+        engine.script().batches_asked
+    );
+
+    // Work comes: once a poll brings some, it asks for as many as it has
+    // room for again.
+    {
+        let mut script = engine.script();
+        for n in 0..4 {
+            script
+                .tasks
+                .push_back(task(&format!("t-{n}"), &format!("tok-{n}")));
+        }
+    }
+    let mut work_rx = parts.work_rx;
+    for _ in 0..4 {
+        next_work(&mut work_rx).await;
+    }
+    assert!(
+        !engine.script().batches_asked.is_empty(),
+        "a driver with work never asked for a batch"
+    );
+
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
 /// Of an engine that hands out one task per poll, a driver polls for one at
 /// a time, and still takes every task.
 #[tokio::test]

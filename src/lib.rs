@@ -123,7 +123,7 @@ pub mod worker;
 
 // The worker host: the one way a language SDK runs a worker.
 pub use worker::host::{
-    ActorHandler, EncodedHost, Host, HostConfig, Registrations, StateScope, StateValue,
+    ActorHandler, EncodedHost, Host, HostConfig, Registrations, StateScope, StateValue, WorkBudget,
 };
 
 // The connection to the engine, and the clients for workflows, namespaces
