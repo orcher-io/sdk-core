@@ -8,8 +8,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 ///
 /// Each driver draws on it with its own weight: a credit of a driver whose
 /// weight is 2 takes two units. A driver's own limit stays a ceiling within
-/// the budget, so the budget only ever lowers what a driver may hold, never
-/// raises it.
+/// the budget, so the budget never lets a driver hold more than that limit.
 ///
 /// Cloning shares the budget.
 #[derive(Clone, Debug)]
@@ -107,66 +106,95 @@ impl BudgetShare {
     }
 
     /// The units each credit takes.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn weight(&self) -> u32 {
         self.weight
     }
 }
 
-/// How a worker's budget and polls are laid out once they fit each other.
+/// One driver's open polls, as [`fit`] counts them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Fitted {
-    /// Units in the budget.
-    pub(crate) units: u32,
-    /// Polls the workflow driver keeps open.
-    pub(crate) workflow_pollers: usize,
-    /// Polls the task driver keeps open.
-    pub(crate) task_pollers: usize,
-    /// Units a workflow credit takes, as the fit counted it: share the
+pub(crate) struct Polls {
+    /// Polls the driver keeps open.
+    pub(crate) pollers: usize,
+    /// Units each of its credits takes. As the fit gives it back, share the
     /// budget by this, not by the configured weight, which a raised budget
     /// would clamp differently.
-    pub(crate) workflow_weight: u32,
-    /// Units a task credit takes, as the fit counted it.
-    pub(crate) task_weight: u32,
+    pub(crate) weight: u32,
+}
+
+/// How a worker's budget and polls are laid out once they fit each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fitted<const N: usize> {
+    /// Units in the budget.
+    pub(crate) units: u32,
+    /// Each driver's polls, in the order they were given; a driver the
+    /// worker does not run keeps none open.
+    pub(crate) drivers: [Polls; N],
+}
+
+impl<const N: usize> Fitted<N> {
+    /// Units the batches of driver `index` must leave free: what the other
+    /// drivers' polls need to hold one credit each.
+    pub(crate) fn reserve_for(&self, index: usize) -> u32 {
+        let held: u64 = self
+            .drivers
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, polls)| polls.pollers as u64 * u64::from(polls.weight))
+            .sum();
+        u32::try_from(held).unwrap_or(u32::MAX)
+    }
 }
 
 /// Fit a budget of `units` to the polls the drivers keep open.
 ///
 /// Every open poll holds a credit, and its driver's weight in units, for as
 /// long as it waits. A budget smaller than that lets one driver's idle polls
-/// hold all of it, and the other driver cannot poll until one of them ends,
-/// up to a whole long poll, with its work waiting in the engine.
+/// hold all of it, and the others cannot poll until one of them ends, up to
+/// a whole long poll, with their work waiting in the engine.
 ///
-/// So the polls are cut, the larger holder first and never below one a
-/// driver, until they fit within the budget; only when one poll a driver
-/// does not fit is the budget raised, to just what one poll each needs. A
-/// driver the worker does not run (`None`) holds nothing. Weights are taken
-/// as [`SharedBudget::share`] takes them: within one and the whole budget.
-pub(crate) fn fit(
-    units: u32,
-    workflow_weight: u32,
-    task_weight: u32,
-    workflow_pollers: Option<usize>,
-    task_pollers: Option<usize>,
-) -> Fitted {
+/// So the polls are cut, the largest holder first (the earlier driver on a
+/// tie) and never below one a driver, until they fit within the budget; only
+/// when one poll a driver does not fit is the budget raised, to just what one
+/// poll each needs. A driver the worker does not run (`None`) holds nothing.
+/// Weights are taken as [`SharedBudget::share`] takes them: within one and
+/// the whole budget.
+pub(crate) fn fit<const N: usize>(units: u32, drivers: [Option<Polls>; N]) -> Fitted<N> {
     let units = units.max(1);
-    let w = u64::from(workflow_weight.clamp(1, units));
-    let t = u64::from(task_weight.clamp(1, units));
-    let mut p = workflow_pollers.map_or(0, |n| n.max(1)) as u64;
-    let mut q = task_pollers.map_or(0, |n| n.max(1)) as u64;
-    let floor = |p: u64, q: u64| p * w + q * t;
-    while floor(p, q) > u64::from(units) && (p > 1 || q > 1) {
-        if (p * w >= q * t && p > 1) || q <= 1 {
-            p -= 1;
-        } else {
-            q -= 1;
-        }
+    let mut fitted = drivers.map(|polls| match polls {
+        Some(polls) => Polls {
+            pollers: polls.pollers.max(1),
+            weight: polls.weight.clamp(1, units),
+        },
+        None => Polls {
+            pollers: 0,
+            weight: 1,
+        },
+    });
+    let held = |drivers: &[Polls; N]| -> u64 {
+        drivers
+            .iter()
+            .map(|polls| polls.pollers as u64 * u64::from(polls.weight))
+            .sum()
+    };
+    while held(&fitted) > u64::from(units) {
+        // The driver holding the most units that can lose a poll; the first
+        // such on a tie.
+        let Some(cut) = fitted
+            .iter_mut()
+            .filter(|polls| polls.pollers > 1)
+            .rev()
+            .max_by_key(|polls| polls.pollers as u64 * u64::from(polls.weight))
+        else {
+            break;
+        };
+        cut.pollers -= 1;
     }
     Fitted {
-        units: units.max(u32::try_from(floor(p, q)).unwrap_or(u32::MAX)),
-        workflow_pollers: p as usize,
-        task_pollers: q as usize,
-        workflow_weight: w as u32,
-        task_weight: t as u32,
+        units: units.max(u32::try_from(held(&fitted)).unwrap_or(u32::MAX)),
+        drivers: fitted,
     }
 }
 
@@ -235,16 +263,17 @@ mod tests {
         drop((first, extras, task));
     }
 
+    fn polls(pollers: usize, weight: u32) -> Polls {
+        Polls { pollers, weight }
+    }
+
     #[test]
     fn a_budget_that_holds_every_poll_is_left_alone() {
         assert_eq!(
-            fit(20, 1, 2, Some(4), Some(4)),
+            fit(20, [Some(polls(4, 1)), Some(polls(4, 2))]),
             Fitted {
                 units: 20,
-                workflow_pollers: 4,
-                task_pollers: 4,
-                workflow_weight: 1,
-                task_weight: 2
+                drivers: [polls(4, 1), polls(4, 2)],
             }
         );
     }
@@ -255,23 +284,17 @@ mod tests {
         // more, so they are cut first, then whichever holds more: three
         // workflow polls and one task poll, 5 units, fit in 6.
         assert_eq!(
-            fit(6, 1, 2, Some(4), Some(4)),
+            fit(6, [Some(polls(4, 1)), Some(polls(4, 2))]),
             Fitted {
                 units: 6,
-                workflow_pollers: 3,
-                task_pollers: 1,
-                workflow_weight: 1,
-                task_weight: 2
+                drivers: [polls(3, 1), polls(1, 2)],
             }
         );
         assert_eq!(
-            fit(4, 1, 1, Some(4), Some(4)),
+            fit(4, [Some(polls(4, 1)), Some(polls(4, 1))]),
             Fitted {
                 units: 4,
-                workflow_pollers: 2,
-                task_pollers: 2,
-                workflow_weight: 1,
-                task_weight: 1
+                drivers: [polls(2, 1), polls(2, 1)],
             }
         );
     }
@@ -279,39 +302,47 @@ mod tests {
     #[test]
     fn a_budget_too_small_for_one_poll_a_driver_is_raised_to_that() {
         assert_eq!(
-            fit(1, 1, 1, Some(4), Some(4)),
+            fit(1, [Some(polls(4, 1)), Some(polls(4, 1))]),
             Fitted {
                 units: 2,
-                workflow_pollers: 1,
-                task_pollers: 1,
-                workflow_weight: 1,
-                task_weight: 1
+                drivers: [polls(1, 1), polls(1, 1)],
             }
         );
         // A weight above the budget counts as the whole budget.
         assert_eq!(
-            fit(3, 9, 1, Some(2), Some(2)),
+            fit(3, [Some(polls(2, 9)), Some(polls(2, 1))]),
             Fitted {
                 units: 4,
-                workflow_pollers: 1,
-                task_pollers: 1,
-                workflow_weight: 3,
-                task_weight: 1
+                drivers: [polls(1, 3), polls(1, 1)],
             }
         );
     }
 
     #[test]
     fn a_driver_the_worker_does_not_run_holds_nothing() {
+        let fitted = fit(3, [None, Some(polls(4, 1))]);
+        assert_eq!(fitted.units, 3);
+        assert_eq!(fitted.drivers[0].pollers, 0);
+        assert_eq!(fitted.drivers[1], polls(3, 1));
+        assert_eq!(fitted.reserve_for(1), 0, "no other driver polls");
+    }
+
+    #[test]
+    fn three_drivers_are_cut_the_same_way() {
+        // 4 + 4 + 8 = 16 units held, in 7: the actor polls hold most and
+        // are cut first, then the largest holder each time, the earlier
+        // driver on a tie.
+        let fitted = fit(7, [Some(polls(4, 1)), Some(polls(4, 1)), Some(polls(4, 2))]);
         assert_eq!(
-            fit(3, 1, 1, None, Some(4)),
+            fitted,
             Fitted {
-                units: 3,
-                workflow_pollers: 0,
-                task_pollers: 3,
-                workflow_weight: 1,
-                task_weight: 1
+                units: 7,
+                drivers: [polls(2, 1), polls(3, 1), polls(1, 2)],
             }
         );
+        // Each driver's batches leave the others' polls their units.
+        assert_eq!(fitted.reserve_for(0), 5);
+        assert_eq!(fitted.reserve_for(1), 4);
+        assert_eq!(fitted.reserve_for(2), 5);
     }
 }

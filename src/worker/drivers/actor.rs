@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::transport::channel::{Breaker, ChannelManager};
-use crate::worker::governor::{InFlight, SlotBudget, SlotPermit};
+use crate::worker::governor::{Credits, InFlight, SlotBudget, SlotPermit};
 use crate::worker::poll::completion::{
     note_connection_failure, Caller, Completer, CompletionRetryConfig,
 };
@@ -106,6 +106,10 @@ pub struct ActorDriverConfig {
     /// wire measurements, shared with its other drivers. A driver has
     /// measurements of its own unless given these.
     pub wire: std::sync::Arc<crate::observability::WireMetrics>,
+    /// This driver's share of the worker's budget, when its drivers share
+    /// one: each credit then takes the driver's weight in units of it. `None`
+    /// (the default) limits the driver by its own concurrency alone.
+    pub(crate) budget_share: Option<crate::worker::governor::BudgetShare>,
 }
 
 // Written by hand so the secret is never printed; destructured so that a new
@@ -130,6 +134,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             max_message_bytes,
             payload_seal,
             wire: _,
+            budget_share,
         } = self;
         f.debug_struct("ActorDriverConfig")
             .field("server_url", server_url)
@@ -148,6 +153,7 @@ impl std::fmt::Debug for ActorDriverConfig {
             .field("connect_timeout", connect_timeout)
             .field("max_message_bytes", max_message_bytes)
             .field("payload_seal", payload_seal)
+            .field("budget_share", budget_share)
             .finish()
     }
 }
@@ -172,6 +178,7 @@ impl Default for ActorDriverConfig {
             max_message_bytes: crate::transport::limits::default_max_message_bytes(),
             payload_seal: None,
             wire: crate::observability::WireMetrics::new(),
+            budget_share: None,
         }
     }
 }
@@ -246,6 +253,10 @@ pub struct ActorDriver {
     /// When each operation handed to the language SDK was handed over, by
     /// operation id, so its report says how long it ran.
     handed_at: HashMap<String, Instant>,
+
+    /// Shared with the pollers: one credit per operation the driver can run,
+    /// spent on each operation polled until its report is sent.
+    credits: Arc<Credits>,
 }
 
 impl ActorDriver {
@@ -289,6 +300,12 @@ impl ActorDriver {
         // one up to `poller_count`.
         let scaler =
             std::sync::Arc::new(crate::worker::poll::scaler::PollerScaler::new(poller_count));
+        // One credit per operation the driver can run: its pollers claim no
+        // more than that.
+        let credits = Arc::new(Credits::sharing(
+            config.max_concurrent_executions,
+            config.budget_share.clone(),
+        ));
         tracing::info!(
             poller_count = poller_count,
             namespace = %config.namespace,
@@ -318,7 +335,8 @@ impl ActorDriver {
                 operation_sender.clone(),
             )
             .await?
-            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx);
+            .with_scaler(std::sync::Arc::clone(&scaler), poller_idx)
+            .with_credits(Arc::clone(&credits));
 
             let poller_id = poller_idx;
             tokio::spawn(async move {
@@ -347,6 +365,7 @@ impl ActorDriver {
             completion_retry: CompletionRetryConfig::default(),
             registration,
             handed_at: HashMap::new(),
+            credits,
         };
 
         Ok((driver, work_receiver, result_sender, event_receiver))
@@ -497,6 +516,7 @@ impl ActorDriver {
                             self.handed_at.insert(op_id.clone(), Instant::now());
                             if room.send(ActorWork { operation }).is_closed() {
                                 self.handed_at.remove(&op_id);
+                                drop(self.credits.give_back(op_id.as_bytes()));
                                 tracing::error!(
                                     operation_id = %op_id,
                                     "Failed to send actor work to language SDK"
@@ -514,10 +534,15 @@ impl ActorDriver {
                     match result {
                         Some(result) => {
                             let request = self.handle_actor_result(result);
+                            // The operation's credit is given back once its
+                            // report has been sent, or given up on: until
+                            // then it is still this driver's work.
+                            let credit = self.credits.give_back(request.operation_id.as_bytes());
                             let completer = completer.clone();
                             in_flight.spawn(
                                 async move {
                                     completer.send_actor(request).await;
+                                    drop(credit);
                                 },
                                 slot.take(),
                             );
@@ -552,10 +577,12 @@ impl ActorDriver {
         // channel, and reports still being retried get the shutdown grace.
         while let Ok(result) = self.result_receiver.try_recv() {
             let request = self.handle_actor_result(result);
+            let credit = self.credits.give_back(request.operation_id.as_bytes());
             let completer = completer.clone();
             in_flight.spawn(
                 async move {
                     completer.send_actor(request).await;
+                    drop(credit);
                 },
                 None,
             );

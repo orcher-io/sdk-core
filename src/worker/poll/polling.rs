@@ -18,6 +18,11 @@ use crate::worker::poll::scaler::PollerScaler;
 /// it to another: its default claim timeout.
 const ACTIVATION_CLAIM: Duration = Duration::from_secs(300);
 
+/// How long the engine waits for an actor operation's result before it
+/// fails the call: it waits from when it queued the operation, so by this
+/// long after the claim the engine has given up on the operation.
+const ACTOR_OPERATION_CLAIM: Duration = Duration::from_secs(300);
+
 /// The most items one poll asks for, however many credits are free: the
 /// engine caps a poll at this too.
 const MAX_ITEMS_PER_POLL: usize = 16;
@@ -1966,6 +1971,13 @@ pub struct ActorOperationPoller {
     /// This poller's number among its driver's pollers, from 0.
     index: usize,
 
+    /// Shared with the driver: a credit is taken before each poll and spent
+    /// on each operation it brings.
+    credits: Option<Arc<Credits>>,
+
+    /// Whether the last poll brought work; see [`batch_size`].
+    last_poll_worked: bool,
+
     /// Server address, used to reconnect after a cool-off.
     server_url: String,
 
@@ -2035,6 +2047,8 @@ impl ActorOperationPoller {
             poll_request_template,
             scaler: None,
             index: 0,
+            credits: None,
+            last_poll_worked: false,
             server_url: address,
             consecutive_idle_polls: 0,
             consecutive_timeouts: 0,
@@ -2071,6 +2085,28 @@ impl ActorOperationPoller {
         self.scaler = Some(scaler);
         self.index = index;
         self
+    }
+
+    /// Poll only with credits from the driver's, one spent on each operation
+    /// the poll brings. Without credits it asks for `max_operations` a poll.
+    pub(crate) fn with_credits(mut self, credits: Arc<Credits>) -> Self {
+        self.credits = Some(credits);
+        self
+    }
+
+    /// Waits for a credit to poll with; `None` if told to stop meanwhile.
+    async fn wait_for_credit(&mut self, credits: &Credits) -> Option<Credit> {
+        let driver_gone = self.operation_sender.clone();
+        let shutdown = &mut self.shutdown;
+        tokio::select! {
+            credit = credits.acquire() => Some(credit),
+            _ = driver_gone.closed() => None,
+            _ = async {
+                if shutdown.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => None,
+        }
     }
 
     pub async fn poll_loop(&mut self) -> Result<()> {
@@ -2140,7 +2176,31 @@ impl ActorOperationPoller {
                 }
             }
 
-            let result = self.poll_once_inner().await;
+            // Only with room for what the poll brings: with every credit
+            // spent on operations not yet reported, it waits, and it asks
+            // for as many operations as it has credits.
+            let mut in_hand: Vec<Credit> = Vec::new();
+            if let Some(credits) = self.credits.clone() {
+                match self.wait_for_credit(&credits).await {
+                    Some(credit) => in_hand.push(credit),
+                    // Told to stop: the check above ends the loop.
+                    None => continue,
+                }
+                let batch = batch_size(true, &credits, self.last_poll_worked)
+                    .min(self.config.max_operations.max(1) as usize);
+                while in_hand.len() < batch {
+                    match credits.try_acquire_extra() {
+                        Some(credit) => in_hand.push(credit),
+                        None => break,
+                    }
+                }
+            }
+            let max_operations = match self.credits {
+                Some(_) => in_hand.len() as u32,
+                None => self.config.max_operations,
+            };
+
+            let result = self.poll_once_inner(max_operations).await;
 
             match result {
                 Ok(operations) if !operations.is_empty() => {
@@ -2150,17 +2210,30 @@ impl ActorOperationPoller {
                     self.consecutive_idle_polls = 0;
                     self.consecutive_timeouts = 0;
                     consecutive_errors = 0;
+                    self.last_poll_worked = true;
 
                     tracing::debug!(count = operations.len(), "Received actor operations");
 
+                    // Each operation spends one of the credits the poll was
+                    // made with; those left over go back when dropped.
+                    let mut in_hand = in_hand.into_iter();
                     for operation in operations {
+                        let token = operation.operation_id.clone().into_bytes();
+                        if let (Some(credits), Some(credit)) = (&self.credits, in_hand.next()) {
+                            credits.spend(credit, token.clone(), Some(ACTOR_OPERATION_CLAIM));
+                        }
                         if let Err(e) = self.operation_sender.send(operation).await {
+                            if let Some(credits) = &self.credits {
+                                drop(credits.give_back(&token));
+                            }
                             tracing::error!("Failed to send actor operation: {}", e);
                             return Ok(());
                         }
                     }
                 }
                 Ok(_) => {
+                    drop(in_hand);
+                    self.last_poll_worked = false;
                     // No work, but an answer: the path to the server works.
                     consecutive_errors = 0;
                     self.consecutive_idle_polls = self.consecutive_idle_polls.saturating_add(1);
@@ -2188,6 +2261,8 @@ impl ActorOperationPoller {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
+                    drop(in_hand);
+                    self.last_poll_worked = false;
                     if e.is_normal_timeout() {
                         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
                         if let Some(scaler) = &self.scaler {
@@ -2248,10 +2323,11 @@ impl ActorOperationPoller {
     }
 
     /// Polls once for a batch of actor operations.
-    async fn poll_once_inner(&mut self) -> Result<Vec<ActorOperation>> {
+    async fn poll_once_inner(&mut self, max_operations: u32) -> Result<Vec<ActorOperation>> {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let request_body = self.poll_request_template.clone();
+        let mut request_body = self.poll_request_template.clone();
+        request_body.max_operations = max_operations.max(1);
 
         let grpc_deadline = Duration::from_millis(self.config.poll_timeout_ms + 10_000);
         let mut request = tonic::Request::new(request_body);

@@ -41,28 +41,27 @@ pub const RELEASE_MARGIN: Duration = Duration::from_secs(5);
 /// How many sessions a worker hosts at once, unless configured.
 pub const DEFAULT_MAX_SESSIONS: usize = 10;
 
-/// One budget of work capacity the worker's workflow and task drivers
+/// One budget of work capacity the worker's workflow, task and actor drivers
 /// share, so the worker as a whole holds no more than it can run.
 ///
 /// Each workflow activation the worker holds takes `workflow_weight` units,
-/// and each task `task_weight`, from the moment the poll that claims it is
-/// made until its result is reported. Each driver's own limit
-/// ([`HostConfig::with_concurrency`]) stays a ceiling within the budget: the
-/// budget only ever lowers what a driver may hold. Actor operations are not
-/// counted in it yet.
+/// each task `task_weight` and each actor operation `actor_weight`, from the
+/// moment the poll that claims it is made until its result is reported. Each
+/// driver's own limit ([`HostConfig::with_concurrency`]) stays a ceiling
+/// within the budget: the budget only ever lowers what a driver may hold.
 ///
 /// With a budget, a driver whose last poll brought nothing asks for one item
 /// at a time, so an idle driver's open poll holds one credit's units and not
 /// a batch's; and a poll asking for several takes the extra credits only
-/// while that leaves enough units for the other driver's polls to hold one
+/// while that leaves enough units for the other drivers' polls to hold one
 /// credit each.
 ///
 /// Every open poll holds one credit's units while it waits, so the budget
 /// must cover one credit for each poll the drivers keep open
 /// ([`HostConfig::with_pollers`]); otherwise one driver's idle polls could
-/// hold all of it and keep the other from polling for up to a whole long
+/// hold all of it and keep the others from polling for up to a whole long
 /// poll. A worker whose budget does not cover them starts with fewer polls,
-/// the driver holding more cut first and never below one; one whose budget
+/// the driver holding most cut first and never below one; one whose budget
 /// does not cover one poll a driver has its budget raised to that. Either
 /// is logged as a warning. Polls on session queues are not counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,15 +73,19 @@ pub struct WorkBudget {
     pub workflow_weight: u32,
     /// Units one task takes (at least one).
     pub task_weight: u32,
+    /// Units one actor operation takes (at least one).
+    pub actor_weight: u32,
 }
 
 impl WorkBudget {
-    /// A budget of `units`, in which an activation and a task each take one.
+    /// A budget of `units`, in which an activation, a task and an actor
+    /// operation each take one.
     pub fn new(units: u32) -> Self {
         Self {
             units,
             workflow_weight: 1,
             task_weight: 1,
+            actor_weight: 1,
         }
     }
 
@@ -91,6 +94,13 @@ impl WorkBudget {
     pub fn with_weights(mut self, workflow: u32, task: u32) -> Self {
         self.workflow_weight = workflow;
         self.task_weight = task;
+        self
+    }
+
+    /// Weighs an actor operation as `actor` units. A weight above the whole
+    /// budget counts as the whole budget.
+    pub fn with_actor_weight(mut self, actor: u32) -> Self {
+        self.actor_weight = actor;
         self
     }
 }
@@ -154,7 +164,7 @@ pub struct HostConfig {
     /// scheme is bound to, as before schemes; see
     /// `docs/kernel-protocol-v1.md` §8.3.
     pub supported_step_ids: Vec<StepIdScheme>,
-    /// One budget the workflow and task drivers share, if any. `None` (the
+    /// One budget the workflow, task and actor drivers share, if any. `None` (the
     /// default) limits each driver by its own concurrency alone.
     pub work_budget: Option<WorkBudget>,
 }
@@ -236,8 +246,8 @@ impl HostConfig {
         self
     }
 
-    /// Shares `budget` between the workflow and task drivers, within each
-    /// one's own concurrency.
+    /// Shares `budget` between the workflow, task and actor drivers, within
+    /// each one's own concurrency.
     pub fn with_work_budget(mut self, budget: WorkBudget) -> Self {
         self.work_budget = Some(budget);
         self
