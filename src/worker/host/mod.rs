@@ -118,6 +118,13 @@ struct Inner {
     stops: Mutex<Stops>,
 }
 
+/// Each driver's share of the worker's budget.
+struct Shares {
+    workflow: governor::BudgetShare,
+    task: governor::BudgetShare,
+    actor: governor::BudgetShare,
+}
+
 /// What stops the worker's drivers, taken once by [`Host::shutdown`].
 #[derive(Default)]
 struct Stops {
@@ -160,49 +167,62 @@ impl Host {
         // reported to the engine with every worker heartbeat.
         let load = WorkerMetrics::new();
         let mut stops = Stops::default();
-        // The budget the workflow and task drivers share, if the worker has
-        // one: each driver's share of it, by the driver's weight, once the
-        // budget and the polls held open against it fit each other.
+        // The budget the drivers share, if the worker has one: each driver's
+        // share of it, by the driver's weight, once the budget and the polls
+        // held open against it fit each other.
         let shares = config.work_budget.map(|budget| {
-            let fitted = governor::fit(
-                budget.units,
-                budget.workflow_weight,
-                budget.task_weight,
-                needed.workflows.then_some(config.workflow_pollers),
-                needed.tasks.then_some(config.task_pollers),
-            );
-            if fitted.units != budget.units.max(1)
-                || (needed.workflows && fitted.workflow_pollers != config.workflow_pollers)
-                || (needed.tasks && fitted.task_pollers != config.task_pollers)
-            {
+            let asked = [
+                (
+                    needed.workflows,
+                    config.workflow_pollers,
+                    budget.workflow_weight,
+                ),
+                (needed.tasks, config.task_pollers, budget.task_weight),
+                (needed.actors, config.actor_pollers, budget.actor_weight),
+            ]
+            .map(|(runs, pollers, weight)| runs.then_some(governor::Polls { pollers, weight }));
+            let fitted = governor::fit(budget.units, asked);
+            let [workflow, task, actor] = fitted.drivers;
+            let cut = asked
+                .iter()
+                .zip(&fitted.drivers)
+                .any(|(asked, fitted)| asked.is_some_and(|asked| asked.pollers != fitted.pollers));
+            if fitted.units != budget.units.max(1) || cut {
                 tracing::warn!(
                     units = budget.units,
                     workflow_pollers = config.workflow_pollers,
                     task_pollers = config.task_pollers,
+                    actor_pollers = config.actor_pollers,
                     fitted_units = fitted.units,
-                    fitted_workflow_pollers = fitted.workflow_pollers,
-                    fitted_task_pollers = fitted.task_pollers,
+                    fitted_workflow_pollers = workflow.pollers,
+                    fitted_task_pollers = task.pollers,
+                    fitted_actor_pollers = actor.pollers,
                     "The work budget cannot hold a credit for every open poll: \
                      polls were cut to fit it, or the budget raised to one poll a driver"
                 );
             }
             if needed.workflows {
-                config.workflow_pollers = fitted.workflow_pollers;
+                config.workflow_pollers = workflow.pollers;
             }
             if needed.tasks {
-                config.task_pollers = fitted.task_pollers;
+                config.task_pollers = task.pollers;
+            }
+            if needed.actors {
+                config.actor_pollers = actor.pollers;
             }
             let shared = SharedBudget::new(fitted.units);
-            let workflow = shared.share(fitted.workflow_weight);
-            let task = shared.share(fitted.task_weight);
-            // A batch leaves free what the other driver's polls need to hold
+            // A batch leaves free what the other drivers' polls need to hold
             // one credit each.
-            let workflow_reserve = fitted.task_pollers as u32 * task.weight();
-            let task_reserve = fitted.workflow_pollers as u32 * workflow.weight();
-            (
-                workflow.reserving(workflow_reserve),
-                task.reserving(task_reserve),
-            )
+            let share = |index: usize, polls: governor::Polls| {
+                shared
+                    .share(polls.weight)
+                    .reserving(fitted.reserve_for(index))
+            };
+            Shares {
+                workflow: share(0, workflow),
+                task: share(1, task),
+                actor: share(2, actor),
+            }
         });
 
         let mut eager_tasks = None;
@@ -210,7 +230,7 @@ impl Host {
             let (driver, work, results, queue_changes) = TaskDriver::new({
                 let mut driver_config = config.task_driver();
                 driver_config.wire = Arc::clone(&wire);
-                driver_config.budget_share = shares.as_ref().map(|(_, task)| task.clone());
+                driver_config.budget_share = shares.as_ref().map(|shares| shares.task.clone());
                 driver_config
             })
             .await?;
@@ -243,7 +263,7 @@ impl Host {
             let (driver, work, results) = WorkflowDriver::new({
                 let mut driver_config = config.workflow_driver();
                 driver_config.wire = Arc::clone(&wire);
-                driver_config.budget_share = shares.as_ref().map(|(workflow, _)| workflow.clone());
+                driver_config.budget_share = shares.as_ref().map(|shares| shares.workflow.clone());
                 driver_config
             })
             .await?;
@@ -289,6 +309,7 @@ impl Host {
             let (driver, work, results, events) = ActorDriver::new({
                 let mut driver_config = config.actor_driver(Some(registration_id));
                 driver_config.wire = Arc::clone(&wire);
+                driver_config.budget_share = shares.as_ref().map(|shares| shares.actor.clone());
                 driver_config
             })
             .await?;

@@ -13,19 +13,19 @@
 //!   a backlog of reports holds the language SDK and the pollers back.
 //! - [`InFlight`]: the reports a driver is still sending, each from a task
 //!   of its own, and the bounded wait for them when the driver stops.
-//! - [`Credits`]: the work a driver may have claimed from the engine. The
-//!   workflow and task drivers' pollers take a credit before each poll, so a
-//!   driver claims only the work it has room to run, and the credit is held
-//!   until that work has been reported.
+//! - [`Credits`]: the work a driver may have claimed from the engine. Every
+//!   work driver's pollers take a credit before each poll, so a driver
+//!   claims only the work it has room to run, and the credit is held until
+//!   that work has been reported.
 //!
-//! - [`SharedBudget`]: one budget the workflow and task drivers may share
+//! - [`SharedBudget`]: one budget the workflow, task and actor drivers may share
 //!   ([`WorkBudget`](crate::WorkBudget)). Each credit then also takes its
 //!   driver's weight in units of it, so the drivers' own limits become
 //!   ceilings within one budget for the whole worker.
 //!
-//! This is where the worker's resource model is meant to grow: actor
-//! operations in the shared budget, and pressure signals (process CPU and
-//! memory, and a signal from the language runtime) feeding admission.
+//! This is where the worker's resource model is meant to grow: pressure
+//! signals (process CPU and memory, and a signal from the language runtime)
+//! feeding admission.
 
 mod budget;
 mod credits;
@@ -35,4 +35,4 @@ mod shared;
 pub(crate) use budget::{SlotBudget, SlotPermit};
 pub(crate) use credits::{Credit, Credits};
 pub(crate) use in_flight::InFlight;
-pub(crate) use shared::{fit, BudgetShare, SharedBudget};
+pub(crate) use shared::{fit, BudgetShare, Polls, SharedBudget};

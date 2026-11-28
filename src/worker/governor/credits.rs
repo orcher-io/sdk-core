@@ -192,7 +192,7 @@ impl Credits {
 
 #[cfg(test)]
 mod tests {
-    use super::super::SharedBudget;
+    use super::super::{Polls, SharedBudget};
     use super::*;
 
     const SOON: Duration = Duration::from_millis(50);
@@ -300,13 +300,26 @@ mod tests {
             (3, 9, 1, 2, 2),
             (100, 1, 1, 4, 4),
         ] {
-            let fitted = super::super::fit(units, w, t, Some(p), Some(q));
+            let fitted = super::super::fit(
+                units,
+                [
+                    Some(Polls {
+                        pollers: p,
+                        weight: w,
+                    }),
+                    Some(Polls {
+                        pollers: q,
+                        weight: t,
+                    }),
+                ],
+            );
+            let [workflow, task] = fitted.drivers;
             let budget = SharedBudget::new(fitted.units);
-            let workflows = Credits::sharing(100, Some(budget.share(fitted.workflow_weight)));
-            let tasks = Credits::sharing(100, Some(budget.share(fitted.task_weight)));
-            let held: Vec<_> = (0..fitted.workflow_pollers)
+            let workflows = Credits::sharing(100, Some(budget.share(workflow.weight)));
+            let tasks = Credits::sharing(100, Some(budget.share(task.weight)));
+            let held: Vec<_> = (0..workflow.pollers)
                 .map(|_| workflows.try_acquire())
-                .chain((0..fitted.task_pollers).map(|_| tasks.try_acquire()))
+                .chain((0..task.pollers).map(|_| tasks.try_acquire()))
                 .collect();
             assert!(
                 held.iter().all(Option::is_some),

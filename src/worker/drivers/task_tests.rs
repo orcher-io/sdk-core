@@ -54,8 +54,11 @@ struct Script {
     /// A completion carrying this token waits for a permit from the
     /// semaphore beside it before it is answered; the others do not.
     slow: Option<(Vec<u8>, Arc<Semaphore>)>,
-    /// Actor operations handed out by the first actor poll.
+    /// Actor operations handed out by successive actor polls, as many as
+    /// each asks for.
     operations: Vec<ActorOperation>,
+    /// How many operations each actor poll asked for, in order.
+    actor_polls_asked: Vec<u32>,
     /// Answers to successive completions of each actor operation, by id:
     /// the success flag, or an error. `Ok(true)` after.
     actor_answers: HashMap<String, VecDeque<std::result::Result<bool, Code>>>,
@@ -395,9 +398,15 @@ impl ExecutionService for Engine {
 impl ActorService for Engine {
     async fn poll_actor_operation(
         &self,
-        _: Request<PollActorOperationRequest>,
+        request: Request<PollActorOperationRequest>,
     ) -> std::result::Result<Response<PollActorOperationResponse>, Status> {
-        let operations = std::mem::take(&mut self.script().operations);
+        let asked = request.into_inner().max_operations;
+        let operations = {
+            let mut script = self.script();
+            script.actor_polls_asked.push(asked);
+            let take = (asked as usize).min(script.operations.len());
+            script.operations.drain(..take).collect::<Vec<_>>()
+        };
         if operations.is_empty() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1014,6 +1023,135 @@ async fn an_actor_failure_is_reported_with_its_type_and_duration() {
     }
 
     // The handle stops the driver while it runs.
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// The next operation the actor driver hands over.
+async fn next_operation(work_rx: &mut mpsc::Receiver<crate::worker::ActorWork>) -> ActorOperation {
+    tokio::time::timeout(Duration::from_secs(5), work_rx.recv())
+        .await
+        .expect("an operation handed over")
+        .expect("the driver is running")
+        .operation
+}
+
+/// The actor driver claims no more operations than it can run at once, and
+/// claims the next once one is reported.
+#[tokio::test]
+async fn an_actor_driver_claims_no_more_operations_than_it_can_run() {
+    let engine = Engine::default();
+    engine.script().operations = (0..5)
+        .map(|n| actor_operation(&format!("op-{n}")))
+        .collect();
+    let (mut driver, mut work_rx, result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            enable_heartbeat: false,
+            max_concurrent_executions: 2,
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    let first = next_operation(&mut work_rx).await;
+    next_operation(&mut work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        engine.script().operations.len(),
+        3,
+        "claimed beyond its limit"
+    );
+
+    result_tx
+        .send(ActorWorkResult {
+            operation_id: first.operation_id,
+            execution_id: first.execution_id,
+            result: Ok(b"{}".to_vec()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(next_operation(&mut work_rx).await.operation_id, "op-2");
+
+    handle.shutdown();
+    drop(result_tx);
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// An actor driver that shares the worker's budget claims no more than the
+/// budget holds, whatever its own limit.
+#[tokio::test]
+async fn an_actor_driver_sharing_a_budget_claims_no_more_than_the_budget_allows() {
+    let engine = Engine::default();
+    engine.script().operations = (0..6)
+        .map(|n| actor_operation(&format!("op-{n}")))
+        .collect();
+    // Four units, and each operation takes two: room for two operations, of
+    // the ten the driver's own limit allows.
+    let budget = crate::worker::governor::SharedBudget::new(4);
+    let (mut driver, mut work_rx, _result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            enable_heartbeat: false,
+            max_concurrent_executions: 10,
+            budget_share: Some(budget.share(2)),
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    next_operation(&mut work_rx).await;
+    next_operation(&mut work_rx).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        engine.script().operations.len(),
+        4,
+        "claimed beyond the budget"
+    );
+    assert_eq!(budget.available(), 0);
+
+    handle.shutdown();
+    stops_within(running, GRACE + MARGIN).await;
+}
+
+/// A poll of a driver sharing the budget takes extra credits for a batch only
+/// while that leaves the other drivers' polls their units: here never, so
+/// every poll asks for one operation, and each still gets one.
+#[tokio::test]
+async fn an_actor_batch_leaves_the_other_drivers_polls_their_units() {
+    let engine = Engine::default();
+    engine.script().operations = (0..4)
+        .map(|n| actor_operation(&format!("op-{n}")))
+        .collect();
+    // Six units, five kept for the other drivers' polls: a poll's first
+    // credit leaves at most five free, and an extra would leave four.
+    let budget = crate::worker::governor::SharedBudget::new(6);
+    let (mut driver, mut work_rx, _result_tx) = actor_driver(
+        &engine,
+        ActorDriverConfig {
+            enable_heartbeat: false,
+            budget_share: Some(budget.share(1).reserving(5)),
+            ..ActorDriverConfig::default()
+        },
+    )
+    .await;
+    let handle = driver.shutdown_handle();
+    let running = tokio::spawn(async move { driver.run().await });
+
+    for _ in 0..4 {
+        next_operation(&mut work_rx).await;
+    }
+    let asked = engine.script().actor_polls_asked.clone();
+    assert!(asked.len() >= 4, "{asked:?}");
+    assert!(
+        asked.iter().all(|&n| n == 1),
+        "a batch took the other drivers' units: {asked:?}"
+    );
+
     handle.shutdown();
     stops_within(running, GRACE + MARGIN).await;
 }
